@@ -13,7 +13,7 @@ import json
 import re
 from typing import Any
 
-from . import config, llm, store
+from . import config, llm, redact, store
 from .schema import VALID_TYPES, MemoryRecord
 
 _MAX_SUMMARY_CHARS = 6000
@@ -89,8 +89,13 @@ def build_extraction_question(summary: str) -> str:
 
 
 def distill(summary: str, source: str = "engram-distill") -> list[MemoryRecord]:
-    """Return gated MemoryRecords distilled from a transcript summary."""
-    summary = (summary or "").strip()
+    """Return gated MemoryRecords distilled from a transcript summary.
+
+    Secrets are scrubbed up front (before the LLM ever sees the text) and again
+    on each memory's title/content before it becomes a record — defense in
+    depth, so a credential is never sent out or written to disk.
+    """
+    summary = redact.scrub((summary or "").strip())
     if not summary:
         return []
 
@@ -104,8 +109,8 @@ def distill(summary: str, source: str = "engram-distill") -> list[MemoryRecord]:
             continue
         records.append(
             MemoryRecord(
-                title=item["title"],
-                content=item["content"],
+                title=redact.scrub(item["title"]),
+                content=redact.scrub(item["content"]),
                 type=item["type"],
                 confidence=item["confidence"],
                 provenance="inferred",

@@ -1,5 +1,8 @@
 # engram
 
+[![tests](https://github.com/vcnngr/engram/actions/workflows/test.yml/badge.svg)](https://github.com/vcnngr/engram/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Persistent cross-session memory for coding agents — **no Docker, no vector DB, no external service**.
 
 `/clear` and compaction wipe Claude Code's knowledge every session. engram keeps a small

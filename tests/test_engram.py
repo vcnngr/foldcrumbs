@@ -14,7 +14,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from engram import distill, install, store  # noqa: E402
+from engram import distill, install, redact, store  # noqa: E402
 from engram.schema import MemoryRecord  # noqa: E402
 
 
@@ -87,6 +87,34 @@ class TestDistill(unittest.TestCase):
         types = {m["type"] for m in h}
         self.assertIn("decision", types)
         self.assertIn("instruction", types)
+
+
+class TestRedact(unittest.TestCase):
+    def test_scrubs_known_tokens(self):
+        out = redact.scrub("key is sk-abcdefabcdefabcdefabcdef and gho_" + "a" * 36)
+        self.assertNotIn("sk-abcdef", out)
+        self.assertNotIn("gho_a", out)
+        self.assertIn("[REDACTED]", out)
+
+    def test_scrubs_kv_secret(self):
+        out = redact.scrub('password = "hunter2secret"')
+        self.assertNotIn("hunter2secret", out)
+        self.assertIn("password", out)  # key name kept, value gone
+
+    def test_keeps_normal_text(self):
+        text = "We use os.replace for atomic writes."
+        self.assertEqual(redact.scrub(text), text)
+
+
+class TestSearch(TmpStore):
+    def test_search_ranks_relevant(self):
+        store.upsert(MemoryRecord(title="Recall via grep",
+                                  content="Recall uses grep, no vector DB.", type="decision"))
+        store.upsert(MemoryRecord(title="Atomic writes",
+                                  content="Use os.replace.", type="instruction"))
+        hits = store.search("vector db", limit=5)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].title, "Recall via grep")
 
 
 class TestInstaller(unittest.TestCase):

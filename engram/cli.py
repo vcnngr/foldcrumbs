@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from difflib import SequenceMatcher
 from pathlib import Path
 
 from . import config, distill, install, llm, store
@@ -39,27 +38,27 @@ def _cmd_remember(args: argparse.Namespace) -> int:
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
-    query = args.query.lower()
-    words = [w for w in __import__("re").findall(r"[a-z0-9]+", query) if len(w) > 2]
-    scored: list[tuple[float, MemoryRecord]] = []
-    for m in store.load_all():
-        if m.status != "active":
-            continue
-        hay = f"{m.title}\n{m.content}\n{' '.join(m.tags)}".lower()
-        if query in hay:
-            score = 1.0
-        elif words:
-            # grep-like: fraction of query words present, plus a fuzzy nudge.
-            overlap = sum(1 for w in words if w in hay) / len(words)
-            score = overlap * 0.9 + SequenceMatcher(None, query, hay).ratio() * 0.1
-        else:
-            score = SequenceMatcher(None, query, hay).ratio()
-        if score >= 0.22:
-            scored.append((score, m))
-    scored.sort(key=lambda t: t[0], reverse=True)
-    top = [m for _, m in scored[: args.limit]]
+    top = store.search(args.query, limit=args.limit)
     block = format_context_block(top, heading=args.query)
     print(block or "(no matching memories)")
+    return 0
+
+
+def _cmd_answer(args: argparse.Namespace) -> int:
+    mems = store.search(args.question, limit=args.limit)
+    if not mems:
+        print("(no relevant memories found)")
+        return 0
+    context = "\n".join(f"- [{m.type}] {m.content}" for m in mems)
+    out = llm.chat(
+        messages=[
+            {"role": "system", "content": "Answer the question using ONLY the "
+             "provided project memories. If they don't cover it, say so."},
+            {"role": "user", "content": f"Memories:\n{context}\n\nQuestion: {args.question}"},
+        ],
+        temperature=0.1,
+    )
+    print(out or f"(LLM unavailable — relevant memories)\n{context}")
     return 0
 
 
@@ -138,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("query")
     rc.add_argument("--limit", type=int, default=10)
     rc.set_defaults(func=_cmd_recall)
+
+    an = sub.add_parser("answer", help="answer a question grounded in memory (LLM)")
+    an.add_argument("question")
+    an.add_argument("--limit", type=int, default=8)
+    an.set_defaults(func=_cmd_answer)
 
     sub.add_parser("index", help="rebuild MEMORY.md").set_defaults(func=_cmd_index)
 

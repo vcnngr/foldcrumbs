@@ -149,6 +149,37 @@ def upsert(
     return "created", write_memory(rec, cwd)
 
 
+def search(
+    query: str, limit: int = 10, cwd: str | os.PathLike[str] | None = None
+) -> list[MemoryRecord]:
+    """Grep-like search over active memories: substring + word-overlap + fuzzy.
+
+    Shared by the CLI (recall/answer) and the MCP server so ranking is
+    consistent. In-agent recall is still native grep; this is the programmatic
+    equivalent for tooling.
+    """
+    import re
+
+    q = query.lower()
+    words = [w for w in re.findall(r"[a-z0-9]+", q) if len(w) > 2]
+    scored: list[tuple[float, MemoryRecord]] = []
+    for m in iter_memories(cwd):
+        if m.status != "active":
+            continue
+        hay = f"{m.title}\n{m.content}\n{' '.join(m.tags)}".lower()
+        if q in hay:
+            score = 1.0
+        elif words:
+            overlap = sum(1 for w in words if w in hay) / len(words)
+            score = overlap * 0.9 + SequenceMatcher(None, q, hay).ratio() * 0.1
+        else:
+            score = SequenceMatcher(None, q, hay).ratio()
+        if score >= 0.22:
+            scored.append((score, m))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return [m for _, m in scored[:limit]]
+
+
 def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
     """Regenerate MEMORY.md from the store (grouped by type, recency within)."""
     d = _ensure_dir(cwd)

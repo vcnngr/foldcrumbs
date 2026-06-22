@@ -90,26 +90,7 @@ TOOLS = [
 
 
 def _search(query: str, limit: int) -> list[MemoryRecord]:
-    from difflib import SequenceMatcher
-    import re
-
-    words = [w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 2]
-    scored: list[tuple[float, MemoryRecord]] = []
-    for m in store.load_all():
-        if m.status != "active":
-            continue
-        hay = f"{m.title}\n{m.content}\n{' '.join(m.tags)}".lower()
-        if query.lower() in hay:
-            score = 1.0
-        elif words:
-            overlap = sum(1 for w in words if w in hay) / len(words)
-            score = overlap * 0.9 + SequenceMatcher(None, query.lower(), hay).ratio() * 0.1
-        else:
-            score = SequenceMatcher(None, query.lower(), hay).ratio()
-        if score >= 0.22:
-            scored.append((score, m))
-    scored.sort(key=lambda t: t[0], reverse=True)
-    return [m for _, m in scored[:limit]]
+    return store.search(query, limit=limit)
 
 
 def tool_remember(args: dict[str, Any]) -> str:
