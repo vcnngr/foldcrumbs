@@ -77,7 +77,7 @@ def iter_memories(cwd: str | os.PathLike[str] | None = None) -> Iterator[MemoryR
     if not d.exists():
         return
     for path in sorted(d.glob("*.md")):
-        if path.name == config.INDEX_NAME:
+        if path.name in (config.INDEX_NAME, config.HANDOFF_NAME):
             continue
         try:
             yield MemoryRecord.from_markdown(path.read_text(encoding="utf-8"))
@@ -147,6 +147,32 @@ def upsert(
         path = write_memory(dup, cwd)
         return "validated", path
     return "created", write_memory(rec, cwd)
+
+
+def write_handoff(text: str, cwd: str | os.PathLike[str] | None = None) -> Path:
+    """Overwrite the single working-state handoff snapshot (atomic)."""
+    d = _ensure_dir(cwd)
+    target = d / config.HANDOFF_NAME
+    fd, tmp = tempfile.mkstemp(dir=str(d), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text.strip() + "\n")
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return target
+
+
+def read_handoff(cwd: str | os.PathLike[str] | None = None) -> str | None:
+    p = config.handoff_path(cwd)
+    if not p.exists():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return text or None
 
 
 def search(

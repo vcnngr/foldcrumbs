@@ -141,6 +141,41 @@ def distill_and_store(
     return persist(distill(summary, source=source), cwd)
 
 
+_HANDOFF_HEADER = (
+    "You write a short handoff note so a coding session can be resumed after a "
+    "context reset. From the session notes, capture only the LIVE working state: "
+    "the task currently in progress, files being edited, decisions just taken, "
+    "and the immediate next steps. Be concise and concrete; address the reader "
+    "as 'You'. Use Markdown bullet points. Omit anything already finished."
+)
+
+
+def make_handoff(summary: str) -> str | None:
+    """Produce a Markdown working-state handoff from a transcript summary.
+
+    Uses the LLM; on failure falls back to the scrubbed transcript tail so a
+    /clear still leaves *something* to resume from. Returns None if empty.
+    """
+    summary = redact.scrub((summary or "").strip())
+    if not summary:
+        return None
+    text = llm.chat(
+        messages=[
+            {"role": "system", "content": _HANDOFF_HEADER},
+            {"role": "user", "content": f"Session notes:\n{summary[-_MAX_SUMMARY_CHARS:]}"},
+        ],
+        temperature=0.2,
+        max_tokens=512,
+    )
+    if text and text.strip():
+        body = text.strip()
+    else:
+        # Fallback: last slice of the conversation, lightly framed.
+        body = "_(LLM unavailable — raw tail)_\n\n" + summary[-1500:]
+    stamp = "<!-- engram handoff -->\n# Resume point\n\n"
+    return redact.scrub(stamp + body)
+
+
 # --------------------------------------------------------------------------- #
 # Internals
 # --------------------------------------------------------------------------- #

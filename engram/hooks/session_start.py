@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from engram import config  # noqa: E402
+from engram import config, store  # noqa: E402
 from engram.hooks._common import (  # noqa: E402
     emit_additional_context,
     read_hook_input,
@@ -34,26 +34,36 @@ def main() -> int:
     if source in ("clear", "compact") and session_id:
         clear_checkpoint(session_id)
 
-    idx = config.index_path(cwd)
-    if not idx.exists():
-        return 0
-    try:
-        body = idx.read_text(encoding="utf-8").strip()
-    except Exception:
-        return 0
-    if not body:
-        return 0
+    parts: list[str] = []
 
-    block = (
-        "<engram-index>\n"
-        "Persistent project memory (from previous sessions). Honour it; do not "
-        "re-ask what is already recorded. To recall detail, read the linked "
-        "file or grep the memory folder:\n"
-        f"{config.memory_dir(cwd)}\n\n"
-        f"{body}\n"
-        "</engram-index>"
-    )
-    emit_additional_context(EVENT, block)
+    idx = config.index_path(cwd)
+    if idx.exists():
+        try:
+            body = idx.read_text(encoding="utf-8").strip()
+        except Exception:
+            body = ""
+        if body:
+            parts.append(
+                "<engram-index>\n"
+                "Persistent project memory (from previous sessions). Honour it; "
+                "do not re-ask what is already recorded. To recall detail, read "
+                "the linked file or grep the memory folder:\n"
+                f"{config.memory_dir(cwd)}\n\n"
+                f"{body}\n"
+                "</engram-index>"
+            )
+
+    handoff = store.read_handoff(cwd)
+    if handoff:
+        parts.append(
+            "<engram-handoff>\n"
+            "Where the last session left off — resume from here:\n\n"
+            f"{handoff}\n"
+            "</engram-handoff>"
+        )
+
+    if parts:
+        emit_additional_context(EVENT, "\n\n".join(parts))
     return 0
 
 

@@ -62,6 +62,22 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_checkpoint(args: argparse.Namespace) -> int:
+    text = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+    handoff = distill.make_handoff(text)
+    if not handoff:
+        print("(nothing to checkpoint)")
+        return 0
+    path = store.write_handoff(handoff)
+    print(f"handoff written: {path}")
+    return 0
+
+
+def _cmd_handoff(_: argparse.Namespace) -> int:
+    print(store.read_handoff() or "(no handoff yet)")
+    return 0
+
+
 def _cmd_index(_: argparse.Namespace) -> int:
     print(f"rebuilt: {store.rebuild_index()}")
     return 0
@@ -144,6 +160,13 @@ def build_parser() -> argparse.ArgumentParser:
     an.set_defaults(func=_cmd_answer)
 
     sub.add_parser("index", help="rebuild MEMORY.md").set_defaults(func=_cmd_index)
+
+    cp = sub.add_parser("checkpoint", help="write a working-state handoff (LLM)")
+    cp.add_argument("file", nargs="?", help="transcript/text file (default: stdin)")
+    cp.set_defaults(func=_cmd_checkpoint)
+
+    sub.add_parser("handoff", help="print the current handoff").set_defaults(
+        func=_cmd_handoff)
 
     d = sub.add_parser("distill", help="distill a transcript/text into memories")
     d.add_argument("file", nargs="?", help="path to text file (default: stdin)")

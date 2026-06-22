@@ -34,6 +34,9 @@ MIN_CONFIDENCE = float(os.environ.get("ENGRAM_MIN_CONFIDENCE", "0.7"))
 STATE_DIR = Path(os.environ.get("ENGRAM_STATE_DIR", str(Path.home() / ".engram")))
 
 INDEX_NAME = "MEMORY.md"
+# Live working-state snapshot (overwritten each checkpoint), for resuming after
+# a /clear. Distinct from durable memories; never indexed as one.
+HANDOFF_NAME = "HANDOFF.md"
 
 
 def encode_cwd(cwd: str | os.PathLike[str]) -> str:
@@ -61,3 +64,7 @@ def memory_dir(cwd: str | os.PathLike[str] | None = None) -> Path:
 
 def index_path(cwd: str | os.PathLike[str] | None = None) -> Path:
     return memory_dir(cwd) / INDEX_NAME
+
+
+def handoff_path(cwd: str | os.PathLike[str] | None = None) -> Path:
+    return memory_dir(cwd) / HANDOFF_NAME

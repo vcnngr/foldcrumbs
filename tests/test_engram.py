@@ -117,6 +117,22 @@ class TestSearch(TmpStore):
         self.assertEqual(hits[0].title, "Recall via grep")
 
 
+class TestHandoff(TmpStore):
+    def test_write_read(self):
+        store.write_handoff("# Resume point\n\n- You were editing store.py")
+        self.assertIn("Resume point", store.read_handoff())
+
+    def test_handoff_not_indexed_or_searched(self):
+        store.write_handoff("# Resume point\n\n- secret working state")
+        store.upsert(MemoryRecord(title="A fact", content="grep is recall", type="fact"))
+        # Handoff file must not appear as a memory.
+        titles = [m.title for m in store.load_all()]
+        self.assertNotIn("Resume point", titles)
+        self.assertEqual(len(store.load_all()), 1)
+        idx = store.rebuild_index().read_text()
+        self.assertNotIn("HANDOFF", idx)
+
+
 class TestInstaller(unittest.TestCase):
     def test_merge_preserves_and_is_idempotent(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:

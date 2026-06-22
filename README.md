@@ -21,6 +21,8 @@ DISTILL   async, local LLM only (MLX/Ollama/OpenRouter via env)
           at ~45% context and at session end → gated, dedup'd
 ANTI-ROT  PostToolUse monitor → checkpoint + reminder (no forced compaction)
           PostCompact → re-inject index after compaction
+HANDOFF   each checkpoint also writes a live working-state snapshot, re-injected
+          at SessionStart → resume the exact task after a /clear
 ```
 
 The retrieval engine is the agent itself: it greps the folder when relevant. The LLM is used
@@ -82,8 +84,24 @@ python3 -m engram status
 python3 -m engram remember "Recall is grep, no vector DB" --type decision --tag arch
 python3 -m engram recall "vector db"
 python3 -m engram index
-python3 -m engram distill transcript.txt   # uses the LLM
+python3 -m engram distill transcript.txt    # distil durable memories (LLM)
+python3 -m engram checkpoint transcript.txt # write a resume handoff (LLM)
+python3 -m engram handoff                   # print the current handoff
+python3 -m engram answer "how does recall work?"
 ```
+
+## Surviving `/clear` and `/compact`
+
+Two layers cross the context switch:
+
+- **Durable memories** (decisions, rules, preferences, facts) — always re-injected via
+  the `MEMORY.md` index at SessionStart / PostCompact.
+- **Working-state handoff** — a single overwritten snapshot of the *current* task, files
+  in flight and next steps, written at each checkpoint and re-injected so you resume the
+  exact task after a hard `/clear`.
+
+At ~45% context engram nudges you; pick `/compact` (keep working) or `/clear` (fresh start) —
+either way the next turn is re-primed. Force a snapshot anytime with `engram checkpoint`.
 
 ## Local LLM
 
