@@ -190,23 +190,35 @@ This project has a persistent memory store. Use the `engram` MCP tools:
 """
 
 
-def write_opencode_plugin(project_dir: Path) -> Path:
-    d = Path(project_dir) / ".opencode" / "plugins"
+def write_opencode_plugin(plugins_dir: Path) -> Path:
+    d = Path(plugins_dir)
     d.mkdir(parents=True, exist_ok=True)
     path = d / "engram.ts"
     path.write_text(OPENCODE_PLUGIN, encoding="utf-8")
     return path
 
 
-def append_agents_md(project_dir: Path) -> Path | None:
-    """Append the engram instruction block to AGENTS.md if not already there."""
-    path = Path(project_dir) / "AGENTS.md"
+def append_agents_md(agents_path: Path) -> Path | None:
+    """Append the engram instruction block to an AGENTS.md if not already there."""
+    path = Path(agents_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     if "Memory (engram)" in existing:
         return None
     sep = "" if not existing or existing.endswith("\n\n") else "\n\n"
     path.write_text(existing + sep + AGENTS_MD_BLOCK, encoding="utf-8")
     return path
+
+
+def opencode_paths(global_scope: bool = True) -> dict[str, Path]:
+    """Resolve opencode config/plugin/AGENTS paths for global or project scope."""
+    if global_scope:
+        base = Path.home() / ".config" / "opencode"
+        return {"config": base / "opencode.json", "plugins": base / "plugins",
+                "agents": base / "AGENTS.md"}
+    base = Path.cwd()
+    return {"config": base / "opencode.json", "plugins": base / ".opencode" / "plugins",
+            "agents": base / "AGENTS.md"}
 
 
 # --------------------------------------------------------------------------- #
@@ -218,8 +230,25 @@ def codex_mcp_snippet() -> str:
     cmd = _mcp_command()
     args = ", ".join(json.dumps(a) for a in cmd[1:])
     return (
-        "# Add to ~/.codex/config.toml :\n"
         "[mcp_servers.engram]\n"
         f"command = {json.dumps(cmd[0])}\n"
         f"args = [{args}]\n"
     )
+
+
+def install_codex_mcp_toml(config_path: Path | None = None) -> str:
+    """Append [mcp_servers.engram] to ~/.codex/config.toml if not present.
+
+    Appending a new table at EOF is safe for existing TOML; we never rewrite or
+    reorder existing content. Returns a status string.
+    """
+    config_path = Path(config_path or (Path.home() / ".codex" / "config.toml"))
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    if "[mcp_servers.engram]" in existing:
+        return "already present"
+    if existing:
+        shutil.copy2(config_path, config_path.with_suffix(".toml.engram-bak"))
+    sep = "" if not existing or existing.endswith("\n\n") else "\n\n" if existing.endswith("\n") else "\n\n"
+    config_path.write_text(existing + sep + codex_mcp_snippet(), encoding="utf-8")
+    return f"added to {config_path}"

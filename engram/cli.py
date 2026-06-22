@@ -92,11 +92,11 @@ def _cmd_status(_: argparse.Namespace) -> int:
 def _cmd_install(args: argparse.Namespace) -> int:
     agent = args.agent
     if agent == "opencode":
-        proj = Path.cwd()
-        mcp = install.install_opencode_mcp(proj / "opencode.json")
-        plugin = install.write_opencode_plugin(proj)
-        agents = install.append_agents_md(proj)
-        print(f"opencode.json mcp: {mcp or '(already present)'}")
+        paths = install.opencode_paths(global_scope=not args.local)
+        mcp = install.install_opencode_mcp(paths["config"])
+        plugin = install.write_opencode_plugin(paths["plugins"])
+        agents = install.append_agents_md(paths["agents"])
+        print(f"opencode.json mcp: {mcp or '(already present)'} ({paths['config']})")
         print(f"plugin: {plugin}")
         print(f"AGENTS.md: {agents or '(block already present)'}")
         return 0
@@ -108,7 +108,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
     print(f"settings: {path}")
     print("added:", changes or "(nothing — already installed)")
     if agent == "codex":
-        print("\n" + install.codex_mcp_snippet())
+        print("codex MCP (config.toml):", install.install_codex_mcp_toml())
     return 0
 
 
