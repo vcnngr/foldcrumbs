@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "engram"
+version = "0.1.0"
+description = "Persistent cross-session memory for coding agents — file-based, no vector DB, no external service."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Vincenzo Ingrosso" }]
+keywords = ["claude-code", "codex", "opencode", "agent-memory", "llm", "hooks", "mlx"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# No runtime dependencies — pure stdlib, so hook scripts never fail to import.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff>=0.5", "mypy>=1.10"]
+
+[project.scripts]
+engram = "engram.cli:main"
+
+[project.urls]
+Repository = "https://github.com/vcnngr/engram"
+
+[tool.setuptools.packages.find]
+include = ["engram*"]
+
+[tool.setuptools.package-data]
+engram = ["hooks/*.py"]

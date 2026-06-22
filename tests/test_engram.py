@@ -1,0 +1,133 @@
+"""Regression tests for engram (stdlib unittest, no external deps).
+
+Run: python3 -m unittest discover -s tests
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+from engram import distill, install, store  # noqa: E402
+from engram.schema import MemoryRecord  # noqa: E402
+
+
+class TmpStore(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="ccmem_test_")
+        os.environ["ENGRAM_DIR"] = self.dir
+
+    def tearDown(self):
+        os.environ.pop("ENGRAM_DIR", None)
+
+
+class TestSchema(unittest.TestCase):
+    def test_roundtrip(self):
+        r = MemoryRecord(title="T", content="Body text here.", type="decision",
+                         confidence=0.9, tags=["a", "b"])
+        back = MemoryRecord.from_markdown(r.to_markdown())
+        self.assertEqual(back.title, "T")
+        self.assertEqual(back.type, "decision")
+        self.assertEqual(back.confidence, 0.9)
+        self.assertEqual(back.tags, ["a", "b"])
+
+    def test_invalid_type_falls_back(self):
+        self.assertEqual(MemoryRecord(title="x", content="y", type="bogus").type, "fact")
+
+    def test_legacy_type_preserved(self):
+        self.assertEqual(MemoryRecord(title="x", content="y", type="project").type,
+                         "project")
+
+    def test_supersede_zeroes_confidence(self):
+        r = MemoryRecord(title="x", content="y", type="fact", confidence=0.9)
+        r.mark_superseded("other-id")
+        self.assertEqual(r.compute_confidence(), 0.0)
+
+
+class TestStore(TmpStore):
+    def test_dedup_validates(self):
+        a = MemoryRecord(title="Use stdlib", content="Hooks use only stdlib here.",
+                         type="decision", confidence=0.9)
+        self.assertEqual(store.upsert(a)[0], "created")
+        b = MemoryRecord(title="Use stdlib only",
+                         content="Hooks use only stdlib here now.",
+                         type="decision", confidence=0.9)
+        self.assertEqual(store.upsert(b)[0], "validated")
+        self.assertEqual(len([m for m in store.load_all()]), 1)
+
+    def test_index_grouped(self):
+        store.upsert(MemoryRecord(title="R", content="rule", type="instruction"))
+        store.upsert(MemoryRecord(title="F", content="fact", type="fact"))
+        idx = store.rebuild_index().read_text()
+        self.assertIn("## Rules", idx)
+        self.assertIn("## Facts", idx)
+
+
+class TestDistill(unittest.TestCase):
+    def test_parser_tolerates_fences(self):
+        text = '```json\n[{"type":"decision","title":"x","content":"c","confidence":0.9}]\n```'
+        out = distill.parse_llm_memories(text)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["type"], "decision")
+
+    def test_gate_filters_low_confidence(self):
+        self.assertFalse(distill._passes_gate(
+            {"type": "fact", "content": "c", "confidence": 0.4}))
+        self.assertTrue(distill._passes_gate(
+            {"type": "fact", "content": "c", "confidence": 0.8}))
+
+    def test_heuristic_classifies(self):
+        h = distill.heuristic_memories("We decided to use X. Always lint first.")
+        types = {m["type"] for m in h}
+        self.assertIn("decision", types)
+        self.assertIn("instruction", types)
+
+
+class TestInstaller(unittest.TestCase):
+    def test_merge_preserves_and_is_idempotent(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": "node existing.js"}]}]}}, f)
+            path = Path(f.name)
+        changes = install.install(path)
+        self.assertTrue(changes)
+        s = json.loads(path.read_text())
+        cmds = [h["command"] for g in s["hooks"]["SessionStart"] for h in g["hooks"]]
+        self.assertTrue(any("existing.js" in c for c in cmds))  # preserved
+        self.assertTrue(any("session_start.py" in c for c in cmds))  # added
+        self.assertEqual(install.install(path), [])  # idempotent
+        path.unlink()
+
+
+class TestHooksIsolation(TmpStore):
+    def _run_hook(self, script, payload):
+        return subprocess.run(
+            [sys.executable, str(REPO / "engram" / "hooks" / script)],
+            input=json.dumps(payload), capture_output=True, text=True,
+            env={**os.environ}, timeout=30,
+        )
+
+    def test_session_start_emits_index(self):
+        store.upsert(MemoryRecord(title="X", content="a fact", type="fact"))
+        store.rebuild_index()
+        r = self._run_hook("session_start.py",
+                            {"session_id": "t", "cwd": "/x", "source": "startup"})
+        self.assertEqual(r.returncode, 0)
+        out = json.loads(r.stdout)
+        self.assertIn("engram-index", out["hookSpecificOutput"]["additionalContext"])
+
+    def test_hook_survives_garbage_stdin(self):
+        r = subprocess.run(
+            [sys.executable, str(REPO / "engram" / "hooks" / "session_start.py")],
+            input="not json", capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

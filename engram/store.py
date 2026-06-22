@@ -1,0 +1,190 @@
+"""File-backed memory store + MEMORY.md index.
+
+One Markdown file per memory in the project memory dir. Retrieval at runtime
+is the agent's own grep over this folder; this module handles writing,
+loading, dedup and index regeneration. Pure stdlib (difflib for fuzzy match).
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+from collections.abc import Iterator
+from difflib import SequenceMatcher
+from pathlib import Path
+
+from . import config
+from .schema import MemoryRecord
+
+# Index render order: hard rules first, soft context last (mirrors profile.py).
+_TYPE_ORDER = [
+    "instruction",
+    "decision",
+    "commitment",
+    "preference",
+    "error",
+    "learning",
+    "fact",
+    "goal",
+    "observation",
+    "relationship",
+    "artifact",
+    "event",
+    "context",
+    # legacy host types
+    "project",
+    "feedback",
+    "reference",
+    "session",
+    "user",
+    "incident",
+]
+
+_TYPE_LABEL = {
+    "instruction": "Rules",
+    "decision": "Decisions",
+    "commitment": "Commitments",
+    "preference": "Preferences",
+    "error": "Failure modes",
+    "learning": "Lessons",
+    "fact": "Facts",
+    "goal": "Goals",
+    "observation": "Observations",
+    "relationship": "Relationships",
+    "artifact": "Artifacts",
+    "event": "Events",
+    "context": "Background",
+    "project": "Projects",
+    "feedback": "Feedback",
+    "reference": "References",
+    "session": "Sessions",
+    "user": "User",
+    "incident": "Incidents",
+}
+
+_DEDUP_THRESHOLD = 0.85  # title+content similarity above which two memories match
+
+
+def _ensure_dir(cwd: str | os.PathLike[str] | None) -> Path:
+    d = config.memory_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def iter_memories(cwd: str | os.PathLike[str] | None = None) -> Iterator[MemoryRecord]:
+    """Yield every memory in the store (skips the index file)."""
+    d = config.memory_dir(cwd)
+    if not d.exists():
+        return
+    for path in sorted(d.glob("*.md")):
+        if path.name == config.INDEX_NAME:
+            continue
+        try:
+            yield MemoryRecord.from_markdown(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+
+def load_all(cwd: str | os.PathLike[str] | None = None) -> list[MemoryRecord]:
+    return list(iter_memories(cwd))
+
+
+def _path_for(rec: MemoryRecord, cwd: str | os.PathLike[str] | None) -> Path:
+    return config.memory_dir(cwd) / rec.filename()
+
+
+def write_memory(
+    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None
+) -> Path:
+    """Write a memory atomically (tmp + os.replace). Returns the file path."""
+    d = _ensure_dir(cwd)
+    target = d / rec.filename()
+    fd, tmp = tempfile.mkstemp(dir=str(d), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(rec.to_markdown())
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return target
+
+
+def _similarity(a: MemoryRecord, b: MemoryRecord) -> float:
+    sa = f"{a.title}\n{a.content}".lower()
+    sb = f"{b.title}\n{b.content}".lower()
+    return SequenceMatcher(None, sa, sb).ratio()
+
+
+def find_duplicate(
+    rec: MemoryRecord,
+    cwd: str | os.PathLike[str] | None = None,
+    threshold: float = _DEDUP_THRESHOLD,
+) -> MemoryRecord | None:
+    """Return the most similar existing active memory above ``threshold``."""
+    best: MemoryRecord | None = None
+    best_score = threshold
+    for existing in iter_memories(cwd):
+        if existing.status != "active" or existing.type != rec.type:
+            continue
+        score = _similarity(rec, existing)
+        if score >= best_score:
+            best, best_score = existing, score
+    return best
+
+
+def upsert(
+    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None
+) -> tuple[str, Path]:
+    """Write with dedup. Returns (action, path).
+
+    action ∈ {"created", "validated"}. If a near-duplicate exists, we bump its
+    validation count (trust) instead of adding a second copy.
+    """
+    dup = find_duplicate(rec, cwd)
+    if dup is not None:
+        dup.validate()
+        path = write_memory(dup, cwd)
+        return "validated", path
+    return "created", write_memory(rec, cwd)
+
+
+def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
+    """Regenerate MEMORY.md from the store (grouped by type, recency within)."""
+    d = _ensure_dir(cwd)
+    mems = [m for m in iter_memories(cwd) if m.status == "active"]
+
+    grouped: dict[str, list[MemoryRecord]] = {}
+    for m in mems:
+        grouped.setdefault(m.type, []).append(m)
+    for lst in grouped.values():
+        lst.sort(key=lambda m: m.updated_at, reverse=True)
+
+    ordered = [t for t in _TYPE_ORDER if t in grouped]
+    ordered += [t for t in grouped if t not in _TYPE_ORDER]
+
+    lines = [
+        "# MEMORY.md — engram index",
+        "",
+        f"_{len(mems)} memories. One line each; read the linked file for detail._",
+        "",
+    ]
+    for t in ordered:
+        label = _TYPE_LABEL.get(t, t.capitalize())
+        lines.append(f"## {label}")
+        for m in grouped[t]:
+            tag = "" if m.compute_confidence() >= 0.6 else " *(tentative)*"
+            hook = m.description or m.title
+            lines.append(f"- [{m.title}]({m.filename()}) — {hook}{tag}")
+        lines.append("")
+
+    target = d / config.INDEX_NAME
+    fd, tmp = tempfile.mkstemp(dir=str(d), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines).rstrip() + "\n")
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return target
