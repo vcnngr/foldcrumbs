@@ -23,10 +23,25 @@ ANTI-ROT  PostToolUse monitor → checkpoint + reminder (no forced compaction)
 The retrieval engine is the agent itself: it greps the folder when relevant. The LLM is used
 **only** for async distillation — so recall is instant and never depends on a model being up.
 
-Design and reuse derive from [memanto](https://github.com/moorcheh-ai/memanto) (MIT): the
-typed-memory schema, trust/decay logic, extraction prompts and hook patterns — but the closed
-Moorcheh engine is replaced by grep. Pure Python stdlib: hook scripts never fail on a missing
-import.
+Pure Python stdlib: hook scripts never fail on a missing import.
+
+## What's different from memanto
+
+engram started from ideas in [memanto](https://github.com/moorcheh-ai/memanto), but takes a
+deliberately different shape:
+
+| | memanto | engram |
+|--|--|--|
+| Retrieval | Moorcheh engine (closed) | the agent's own grep — no engine |
+| Footprint | Docker + engine + LLM + REST API | a folder + hooks |
+| LLM | required for retrieval & answers | async distillation only; recall never needs it |
+| Anti-rot | — | context monitor + checkpoint near 45% |
+| Deps | service stack | zero runtime deps (stdlib) |
+| Scope | tool-agnostic service | per-project memory, agent-side |
+
+The original work here is the architecture: grep-based recall, the file store + index, the
+anti-rot monitor, the merge-safe installer, the hooks and CLI. See **Credits** for the parts
+adapted from memanto.
 
 ## Install
 
@@ -80,3 +95,16 @@ python3 -m unittest discover -s tests -v
 - **Phase 2** — connect Codex (native hooks + MCP) and OpenCode (plugin) to the same memory via a
   minimal MCP server.
 - **Phase 3** — embeddings + open vector DB only if scale outgrows grep; document ingest via OCR.
+
+## Credits
+
+engram adapts a few utilities from [memanto](https://github.com/moorcheh-ai/memanto)
+(MIT, © Moorcheh / Edge AI Innovations): the typed-memory categories and confidence/decay
+model, the session-distillation approach, the transcript-reading helper, and the context-block
+rendering idea. These are reimplemented here against a file store; the Moorcheh retrieval engine
+is not used. Full notice in [LICENSE](LICENSE). Thanks to the memanto authors for releasing it
+under MIT.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

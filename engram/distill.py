@@ -2,9 +2,9 @@
 
 Leads with the local LLM (config endpoint); degrades to a conservative keyword
 heuristic if the LLM yields nothing parseable, so a hook never silently
-no-ops. Extraction prompts, parser and heuristic are lifted from memanto's
-extractor.py (MIT); the LLM call is swapped to our OpenAI-compatible client and
-a write gate + dedup are added.
+no-ops. The idea of distilling a finished session into typed memories is
+inspired by memanto (MIT); the prompts, the OpenAI-compatible call, the write
+gate and the dedup step are engram's own.
 """
 
 from __future__ import annotations
@@ -30,21 +30,23 @@ _GATE_TYPES = {
 }
 
 EXTRACTION_HEADER = (
-    "You are an engineering-memory distiller for a developer's coding agent. "
-    "You read a summary of a finished coding session and extract only the "
-    "DURABLE engineering signals worth remembering across future sessions: "
-    "architectural decisions, hard rules/conventions, coding preferences, "
-    "stable codebase facts, root-cause learnings, and explicit goals. "
-    "Ignore ephemeral chatter, greetings, and one-off task details. "
-    "Each item must stand alone without the surrounding conversation."
+    "Act as a memory curator for a software developer's coding assistant. "
+    "Given notes from a finished coding session, pull out only the facts that "
+    "stay true beyond this session and are worth recalling next time: choices "
+    "of architecture or tooling, firm rules and conventions, the developer's "
+    "stated preferences, durable facts about the codebase, lessons from "
+    "diagnosing a problem, and clearly stated objectives. "
+    "Skip small talk, pleasantries, and details specific to a single task. "
+    "Write each item so it makes sense on its own, with no surrounding context."
 )
 
 EXTRACTION_FOOTER = (
-    "Respond with ONLY a JSON array (no prose, no code fences). Each element: "
-    '{"type": <one of: decision, instruction, preference, fact, learning, '
-    'error, goal, context>, "title": <<=80 chars>, "content": <one atomic '
-    'self-contained statement>, "confidence": <0.0-1.0>}. '
-    "Return [] if nothing durable was established."
+    "Reply with a JSON array and nothing else — no commentary, no code fences. "
+    'Each entry is an object: {"type": one of [decision, instruction, '
+    "preference, fact, learning, error, goal, context], "
+    '"title": <=80 characters, "content": a single standalone sentence, '
+    '"confidence": a number from 0.0 to 1.0}. '
+    "If the session established nothing durable, reply with []."
 )
 
 
@@ -180,7 +182,7 @@ def _coerce_memory(item: Any) -> dict[str, Any] | None:
     }
 
 
-# --- heuristic fallback (lifted) ------------------------------------------- #
+# --- heuristic fallback (keyword classifier, engram) ---------------------- #
 
 _ROLE_PREFIX_RE = re.compile(
     r"^\s*(?:user|assistant|human|claude|system)\s*:\s*", re.IGNORECASE

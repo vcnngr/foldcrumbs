@@ -6,7 +6,8 @@ Design rules (these run on the developer's hot path):
   distillation is spawned detached (``spawn_detached``).
 * Be schema-tolerant — the transcript JSONL format is not officially pinned.
 
-Transcript reading is lifted from memanto's hooks/_common.py (MIT).
+The schema-tolerant transcript reader follows the approach used by memanto's
+hooks (MIT); the token estimator and detached-spawn helper are engram's.
 """
 
 from __future__ import annotations
@@ -81,7 +82,7 @@ def spawn_detached(args: list[str]) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Transcript reading (schema-tolerant) — lifted from memanto
+# Transcript reading (schema-tolerant) — approach follows memanto
 # --------------------------------------------------------------------------- #
 
 
