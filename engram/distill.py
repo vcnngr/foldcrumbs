@@ -95,8 +95,7 @@ _ARTIFACT_RE = re.compile(
     r"|\]\([^)]+\)"              # markdown link
     r"|[✓✅❌✗]"                  # status glyphs from tool/UI output
     r"|do not respond to these messages"   # local-command caveat boilerplate
-    r"|broken links?|dead links?"          # debugging-the-index narration
-    r"|MEMORY\.md|untitled\.md",           # references to the memory store itself
+    r"|MEMORY\.md|\buntitled\.md",         # references to the memory store itself
     re.IGNORECASE | re.MULTILINE,
 )
 

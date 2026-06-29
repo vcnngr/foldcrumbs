@@ -111,10 +111,12 @@ class TestDistill(unittest.TestCase):
 
     def test_is_artifact_flags_tooling_output(self):
         self.assertTrue(distill._is_artifact("| Index | File | Stato |"))
-        self.assertTrue(distill._is_artifact("see fact_untitled.md on disk"))
-        self.assertTrue(distill._is_artifact("the index has broken links"))
+        self.assertTrue(distill._is_artifact("references MEMORY.md directly"))
         self.assertTrue(distill._is_artifact("Link OK ✓"))
         self.assertFalse(distill._is_artifact("We use os.replace for atomic writes."))
+        # Generality: legit project prose must survive — e.g. a web project that
+        # genuinely fixes broken links is NOT a tooling artifact.
+        self.assertFalse(distill._is_artifact("Fixed the broken links on the docs page."))
 
     def test_heuristic_drops_self_referential_artifacts(self):
         h = distill.heuristic_memories(
