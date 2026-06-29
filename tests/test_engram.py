@@ -124,6 +124,48 @@ class TestDistill(unittest.TestCase):
         self.assertNotIn("dead links", joined)
 
 
+class TestLLMBackend(unittest.TestCase):
+    """claude-cli backend: dispatch + the anti-recursion kill-switch."""
+
+    def setUp(self):
+        import importlib
+        from engram import config, llm
+        self.config, self.llm, self._reload = config, llm, importlib.reload
+        self._saved = {k: os.environ.get(k)
+                       for k in ("ENGRAM_LLM_BACKEND", "ENGRAM_DISABLE", "ENGRAM_CLAUDE_BIN")}
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self._reload(self.config)
+        self._reload(self.llm)
+
+    def _reload_with(self, **env):
+        for k, v in env.items():
+            os.environ[k] = v
+        self._reload(self.config)
+        self._reload(self.llm)
+        return self.llm
+
+    def test_disabled_blocks_claude_cli_and_never_spawns(self):
+        # Recursion guard: inside an engram-spawned session the CLI backend is
+        # unavailable and chat() returns None without shelling out.
+        llm = self._reload_with(ENGRAM_LLM_BACKEND="claude-cli", ENGRAM_DISABLE="1")
+        self.assertFalse(llm.available())
+        self.assertIsNone(llm.chat([{"role": "user", "content": "hi"}]))
+
+    def test_available_true_when_cli_present(self):
+        llm = self._reload_with(
+            ENGRAM_LLM_BACKEND="claude-cli", ENGRAM_CLAUDE_BIN=sys.executable)
+        os.environ.pop("ENGRAM_DISABLE", None)
+        self._reload(self.config)
+        self._reload(self.llm)
+        self.assertTrue(llm.available())  # sys.executable always exists
+
+
 class TestRedact(unittest.TestCase):
     def test_scrubs_known_tokens(self):
         out = redact.scrub("key is sk-abcdefabcdefabcdefabcdef and gho_" + "a" * 36)

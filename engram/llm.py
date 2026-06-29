@@ -9,6 +9,9 @@ returns None and the caller degrades to the heuristic path.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
 
@@ -16,6 +19,24 @@ from . import config
 
 
 def chat(
+    messages: list[dict[str, str]],
+    temperature: float = 0.0,
+    max_tokens: int = 1024,
+    json_schema: dict | None = None,
+) -> str | None:
+    """Return assistant text for ``messages``, or None on failure.
+
+    Routes to the configured backend: the Claude CLI (print mode) when
+    ``ENGRAM_LLM_BACKEND=claude-cli``, otherwise an OpenAI-compatible HTTP
+    endpoint. Either way, any failure returns None so the caller degrades to
+    the heuristic path.
+    """
+    if config.LLM_BACKEND == "claude-cli":
+        return _chat_claude_cli(messages)
+    return _chat_openai(messages, temperature, max_tokens, json_schema)
+
+
+def _chat_openai(
     messages: list[dict[str, str]],
     temperature: float = 0.0,
     max_tokens: int = 1024,
@@ -61,8 +82,46 @@ def chat(
         return None
 
 
+def _chat_claude_cli(messages: list[dict[str, str]]) -> str | None:
+    """Run the Claude CLI in print mode (`claude -p`) and return its text.
+
+    For machines with no local LLM server. The system/user messages are
+    flattened into one prompt (print mode has no system role). Returns None on
+    any failure so the caller falls back to the heuristic path.
+    """
+    # Never recurse: a `claude -p` we spawned must not spawn another distill.
+    if config.DISABLED:
+        return None
+    binpath = shutil.which(config.CLAUDE_BIN) or config.CLAUDE_BIN
+    prompt = "\n\n".join(m.get("content", "") for m in messages if m.get("content"))
+    if not prompt.strip():
+        return None
+    env = dict(os.environ)
+    env["ENGRAM_DISABLE"] = "1"  # kill-switch for the nested session's hooks
+    try:
+        proc = subprocess.run(
+            [binpath, "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=config.LLM_TIMEOUT,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    return out or None
+
+
 def available() -> bool:
-    """Cheap reachability probe for the configured endpoint."""
+    """Cheap reachability probe for the configured backend."""
+    if config.LLM_BACKEND == "claude-cli":
+        # Unavailable inside an engram-spawned session (recursion guard) or when
+        # the CLI isn't found.
+        if config.DISABLED:
+            return False
+        return shutil.which(config.CLAUDE_BIN) is not None
     url = config.LLM_ENDPOINT.rstrip("/") + "/v1/models"
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:

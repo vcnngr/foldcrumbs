@@ -19,6 +19,17 @@ LLM_ENDPOINT = os.environ.get("ENGRAM_LLM_ENDPOINT", "http://localhost:8081")
 LLM_MODEL = os.environ.get("ENGRAM_LLM_MODEL", "gemma-4-26b-a4b-it")
 LLM_API_KEY = os.environ.get("ENGRAM_LLM_API_KEY", "")
 LLM_TIMEOUT = float(os.environ.get("ENGRAM_LLM_TIMEOUT", "120"))
+# Completion backend for distillation: "openai" (HTTP to LLM_ENDPOINT, default)
+# or "claude-cli" (shell out to the Claude Code CLI in print mode). The CLI
+# backend is for machines with no local LLM server — it needs no endpoint.
+LLM_BACKEND = os.environ.get("ENGRAM_LLM_BACKEND", "openai").strip().lower()
+# Path/name of the Claude CLI for the claude-cli backend. Prefer an absolute
+# path: hooks run without the user's interactive shell, so PATH may be minimal.
+CLAUDE_BIN = os.environ.get("ENGRAM_CLAUDE_BIN", "claude")
+# Master kill-switch. engram sets this in the env of any `claude -p` subprocess
+# it spawns so the nested headless session's own hooks no-op and can't trigger
+# another distillation — i.e. it stops claude-cli distillation from recursing.
+DISABLED = bool(os.environ.get("ENGRAM_DISABLE"))
 # Request OpenAI structured output (response_format json_schema) for distill.
 # Best-effort: servers that ignore it still work (tolerant parser). Default on.
 LLM_JSON_SCHEMA = os.environ.get("ENGRAM_LLM_JSON_SCHEMA", "1") not in ("0", "false", "")

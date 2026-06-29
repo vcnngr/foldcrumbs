@@ -23,6 +23,11 @@ from typing import Any
 
 def run(main: Callable[[], int]) -> None:
     """Execute a hook entry point under the never-break-Claude contract."""
+    # Master kill-switch: a `claude -p` distillation subprocess sets this so the
+    # nested headless session's hooks no-op — otherwise claude-cli distillation
+    # would recurse (session_end → worker → claude -p → session_end → ...).
+    if os.environ.get("ENGRAM_DISABLE"):
+        raise SystemExit(0)
     try:
         code = main()
     except Exception:

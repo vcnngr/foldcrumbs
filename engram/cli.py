@@ -99,7 +99,10 @@ def _cmd_status(_: argparse.Namespace) -> int:
     print(f"memory dir : {config.memory_dir()}")
     print(f"index      : {config.index_path()}")
     print(f"memories   : {len(active)} active / {len(mems)} total")
-    print(f"LLM endpoint: {config.LLM_ENDPOINT} (model {config.LLM_MODEL})")
+    if config.LLM_BACKEND == "claude-cli":
+        print(f"LLM backend: claude-cli ({config.CLAUDE_BIN})")
+    else:
+        print(f"LLM backend: openai — {config.LLM_ENDPOINT} (model {config.LLM_MODEL})")
     print(f"LLM reachable: {llm.available()}")
     print(f"context budget: {config.CONTEXT_BUDGET} @ {int(config.CONTEXT_PCT*100)}%")
     return 0

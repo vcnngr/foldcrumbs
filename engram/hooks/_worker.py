@@ -11,6 +11,7 @@ Usage: _worker.py <transcript_path> <cwd> <source>
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,9 @@ from engram.hooks._common import read_transcript_text  # noqa: E402
 
 
 def main() -> int:
+    # Recursion guard: never distill inside an engram-spawned `claude -p`.
+    if os.environ.get("ENGRAM_DISABLE"):
+        return 0
     if len(sys.argv) < 3:
         return 0
     transcript_path = sys.argv[1]
