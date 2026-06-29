@@ -104,6 +104,25 @@ def _is_artifact(text: str) -> bool:
     return bool(_ARTIFACT_RE.search(text or ""))
 
 
+# Stricter subset for DELETION (auto-prune / prune): only structural artifacts
+# that are never legitimate durable prose. Excludes the MEMORY.md/untitled.md and
+# markdown-link clauses, which can appear in genuine memories (notably engram's
+# own architecture notes) — those are fine to skip at capture time but must not
+# trigger deletion of an existing memory.
+_HARD_ARTIFACT_RE = re.compile(
+    r"```"                       # code fence
+    r"|^\s*\|.*\|"               # markdown table row
+    r"|\|\s*:?-{2,}"             # markdown table separator
+    r"|[✓✅❌✗]"                  # status glyphs from tool/UI output
+    r"|do not respond to these messages",  # local-command caveat boilerplate
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _is_hard_artifact(text: str) -> bool:
+    return bool(_HARD_ARTIFACT_RE.search(text or ""))
+
+
 def build_extraction_question(summary: str) -> str:
     summary = (summary or "").strip()[-_MAX_SUMMARY_CHARS:]
     return (
@@ -160,6 +179,14 @@ def persist(records: list[MemoryRecord], cwd: str | None = None) -> dict[str, in
             validated += 1
     if records:
         store.rebuild_index(cwd)
+    # Light auto-prune: clear any unambiguous artifact pollution that slipped in
+    # (e.g. older memories created before the guard existed). Rebuilds if needed.
+    if config.auto_prune_enabled():
+        from . import audit  # lazy: audit imports distill
+        pruned = audit.prune_artifacts(cwd)
+        if pruned:
+            config.log_event(f"auto-prune removed {len(pruned)} artifact(s): "
+                             + ", ".join(pruned))
     return {"created": created, "validated": validated, "total": len(records)}
 
 

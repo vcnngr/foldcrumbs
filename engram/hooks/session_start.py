@@ -34,6 +34,17 @@ def main() -> int:
     if source in ("clear", "compact") and session_id:
         clear_checkpoint(session_id)
 
+    # Self-heal a stale index (dead links / unlinked memories) before injecting.
+    # Only on a writing machine — a read-only consumer must not rewrite a shared
+    # index (avoids Syncthing churn). Cheap no-op when the index is healthy.
+    if config.distill_enabled():
+        try:
+            from engram import audit
+            if audit.heal_index(cwd):
+                config.log_event("session-start: healed stale index")
+        except Exception:
+            pass
+
     parts: list[str] = []
 
     idx = config.index_path(cwd)
