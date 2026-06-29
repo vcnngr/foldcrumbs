@@ -33,6 +33,8 @@ def chat(
     the heuristic path.
     """
     backend = config.llm_backend()
+    if backend in config._NO_LLM_BACKENDS:
+        return None  # heuristic-only: caller degrades to the keyword path
     if backend == "claude-cli":
         return _chat_claude_cli(messages)
     if backend == "codex":
@@ -174,6 +176,8 @@ def _chat_codex_cli(messages: list[dict[str, str]]) -> str | None:
 def available() -> bool:
     """Cheap reachability probe for the configured backend."""
     backend = config.llm_backend()
+    if backend in config._NO_LLM_BACKENDS:
+        return False  # no LLM by design; distill uses the heuristic path
     if backend == "claude-cli":
         # Unavailable inside an engram-spawned session (recursion guard) or when
         # the CLI isn't found.
