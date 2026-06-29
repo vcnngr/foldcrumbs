@@ -204,6 +204,23 @@ class TestDistillGate(unittest.TestCase):
         finally:
             config.STATE_DIR = saved
 
+    def test_machine_local_backend_override(self):
+        # A machine-local file selects the backend without any env var (the
+        # mechanism that lets one synced machine differ from the others).
+        from engram import config
+        saved_env = os.environ.pop("ENGRAM_LLM_BACKEND", None)
+        d = tempfile.mkdtemp(prefix="ccmem_state_")
+        saved = config.STATE_DIR
+        try:
+            config.STATE_DIR = Path(d)
+            self.assertEqual(config.llm_backend(), "openai")  # default
+            (Path(d) / "llm-backend").write_text("claude-cli\n", encoding="utf-8")
+            self.assertEqual(config.llm_backend(), "claude-cli")
+        finally:
+            config.STATE_DIR = saved
+            if saved_env is not None:
+                os.environ["ENGRAM_LLM_BACKEND"] = saved_env
+
 
 class TestRedact(unittest.TestCase):
     def test_scrubs_known_tokens(self):

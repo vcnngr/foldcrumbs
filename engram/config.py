@@ -19,13 +19,6 @@ LLM_ENDPOINT = os.environ.get("ENGRAM_LLM_ENDPOINT", "http://localhost:8081")
 LLM_MODEL = os.environ.get("ENGRAM_LLM_MODEL", "gemma-4-26b-a4b-it")
 LLM_API_KEY = os.environ.get("ENGRAM_LLM_API_KEY", "")
 LLM_TIMEOUT = float(os.environ.get("ENGRAM_LLM_TIMEOUT", "120"))
-# Completion backend for distillation: "openai" (HTTP to LLM_ENDPOINT, default)
-# or "claude-cli" (shell out to the Claude Code CLI in print mode). The CLI
-# backend is for machines with no local LLM server — it needs no endpoint.
-LLM_BACKEND = os.environ.get("ENGRAM_LLM_BACKEND", "openai").strip().lower()
-# Path/name of the Claude CLI for the claude-cli backend. Prefer an absolute
-# path: hooks run without the user's interactive shell, so PATH may be minimal.
-CLAUDE_BIN = os.environ.get("ENGRAM_CLAUDE_BIN", "claude")
 # Master kill-switch. engram sets this in the env of any `claude -p` subprocess
 # it spawns so the nested headless session's own hooks no-op and can't trigger
 # another distillation — i.e. it stops claude-cli distillation from recursing.
@@ -59,6 +52,41 @@ def distill_enabled() -> bool:
     if os.environ.get("ENGRAM_NO_DISTILL"):
         return False
     return not (STATE_DIR / "no-distill").exists()
+
+
+def _local_override(name: str) -> str | None:
+    """Read a machine-local override from the (non-synced) state dir.
+
+    Lets a single machine differ from a shared, synced settings.json — e.g. one
+    box with no local LLM selects the claude-cli backend here without forcing it
+    on the machines that share its memory store.
+    """
+    try:
+        p = STATE_DIR / name
+        if p.exists():
+            return p.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        pass
+    return None
+
+
+def llm_backend() -> str:
+    """Distillation backend: env > machine-local file > "openai" default.
+
+    "openai" = HTTP to LLM_ENDPOINT; "claude-cli" = shell out to the Claude CLI
+    in print mode (no endpoint, uses the CLI's own login — no API key).
+    """
+    val = os.environ.get("ENGRAM_LLM_BACKEND") or _local_override("llm-backend") or "openai"
+    return val.strip().lower()
+
+
+def claude_bin() -> str:
+    """Path/name of the Claude CLI for the claude-cli backend.
+
+    Prefer an absolute path (set via env or the ``claude-bin`` state file): hooks
+    run without the user's interactive shell, so PATH may be minimal.
+    """
+    return os.environ.get("ENGRAM_CLAUDE_BIN") or _local_override("claude-bin") or "claude"
 
 INDEX_NAME = "MEMORY.md"
 # Live working-state snapshot (overwritten each checkpoint), for resuming after

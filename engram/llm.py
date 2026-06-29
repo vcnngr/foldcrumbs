@@ -31,7 +31,7 @@ def chat(
     endpoint. Either way, any failure returns None so the caller degrades to
     the heuristic path.
     """
-    if config.LLM_BACKEND == "claude-cli":
+    if config.llm_backend() == "claude-cli":
         return _chat_claude_cli(messages)
     return _chat_openai(messages, temperature, max_tokens, json_schema)
 
@@ -92,7 +92,8 @@ def _chat_claude_cli(messages: list[dict[str, str]]) -> str | None:
     # Never recurse: a `claude -p` we spawned must not spawn another distill.
     if config.DISABLED:
         return None
-    binpath = shutil.which(config.CLAUDE_BIN) or config.CLAUDE_BIN
+    bin_ = config.claude_bin()
+    binpath = shutil.which(bin_) or bin_
     prompt = "\n\n".join(m.get("content", "") for m in messages if m.get("content"))
     if not prompt.strip():
         return None
@@ -116,12 +117,12 @@ def _chat_claude_cli(messages: list[dict[str, str]]) -> str | None:
 
 def available() -> bool:
     """Cheap reachability probe for the configured backend."""
-    if config.LLM_BACKEND == "claude-cli":
+    if config.llm_backend() == "claude-cli":
         # Unavailable inside an engram-spawned session (recursion guard) or when
         # the CLI isn't found.
         if config.DISABLED:
             return False
-        return shutil.which(config.CLAUDE_BIN) is not None
+        return shutil.which(config.claude_bin()) is not None
     url = config.LLM_ENDPOINT.rstrip("/") + "/v1/models"
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
