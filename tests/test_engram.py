@@ -68,6 +68,27 @@ class TestStore(TmpStore):
         self.assertIn("## Rules", idx)
         self.assertIn("## Facts", idx)
 
+    def test_index_links_to_real_file_not_derived_name(self):
+        # A file imported under a non-canonical name (e.g. by another tool) must
+        # still get a resolvable index link pointing at the real file on disk.
+        weird = Path(self.dir) / "voice-clone.md"
+        weird.write_text(
+            "---\nname: Voice Clone App\ndescription: hook\ntype: project\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        idx = store.rebuild_index().read_text()
+        self.assertIn("(voice-clone.md)", idx)
+        # And every link in the index resolves to an existing file.
+        import re as _re
+        for target in _re.findall(r"\]\(([^)]+\.md)\)", idx):
+            self.assertTrue((Path(self.dir) / target).exists(), target)
+
+    def test_degenerate_titles_get_distinct_files(self):
+        a = MemoryRecord(title="", content="one", type="fact")
+        b = MemoryRecord(title="", content="two", type="fact")
+        self.assertEqual(a.title, "Untitled")
+        self.assertNotEqual(a.filename(), b.filename())
+
 
 class TestDistill(unittest.TestCase):
     def test_parser_tolerates_fences(self):
@@ -87,6 +108,20 @@ class TestDistill(unittest.TestCase):
         types = {m["type"] for m in h}
         self.assertIn("decision", types)
         self.assertIn("instruction", types)
+
+    def test_is_artifact_flags_tooling_output(self):
+        self.assertTrue(distill._is_artifact("| Index | File | Stato |"))
+        self.assertTrue(distill._is_artifact("see fact_untitled.md on disk"))
+        self.assertTrue(distill._is_artifact("the index has broken links"))
+        self.assertTrue(distill._is_artifact("Link OK ✓"))
+        self.assertFalse(distill._is_artifact("We use os.replace for atomic writes."))
+
+    def test_heuristic_drops_self_referential_artifacts(self):
+        h = distill.heuristic_memories(
+            "We decided to use Postgres. Bug: dead links in MEMORY.md after rename.")
+        joined = " ".join(m["content"] for m in h).lower()
+        self.assertIn("postgres", joined)
+        self.assertNotIn("dead links", joined)
 
 
 class TestRedact(unittest.TestCase):

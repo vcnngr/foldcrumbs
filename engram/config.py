@@ -16,7 +16,7 @@ from pathlib import Path
 
 # --- LLM (distillation only; recall never touches the LLM) ------------------
 LLM_ENDPOINT = os.environ.get("ENGRAM_LLM_ENDPOINT", "http://localhost:8081")
-LLM_MODEL = os.environ.get("ENGRAM_LLM_MODEL", "gemma-4-26b-a4b")
+LLM_MODEL = os.environ.get("ENGRAM_LLM_MODEL", "gemma-4-26b-a4b-it")
 LLM_API_KEY = os.environ.get("ENGRAM_LLM_API_KEY", "")
 LLM_TIMEOUT = float(os.environ.get("ENGRAM_LLM_TIMEOUT", "120"))
 # Request OpenAI structured output (response_format json_schema) for distill.

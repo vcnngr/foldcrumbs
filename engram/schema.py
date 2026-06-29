@@ -80,6 +80,23 @@ def slugify(text: str, max_len: int = 50) -> str:
     return (s or "memory")[:max_len]
 
 
+# Markdown noise that must never leak into a title/description (would break the
+# YAML frontmatter and produce ugly slugs/index lines).
+_MD_NOISE_RE = re.compile(r"[*_`#>]+|^\s*[-*•]\s+|^\s*\d+\.\s+", re.MULTILINE)
+
+
+def clean_line(text: str, max_len: int = 100) -> str:
+    """Collapse to a single clean line: strip markdown, fold whitespace, trim.
+
+    Titles and the index hook are written verbatim into YAML frontmatter and
+    MEMORY.md, so an embedded newline or list marker corrupts both. This makes
+    any string safe to embed.
+    """
+    s = _MD_NOISE_RE.sub(" ", text or "")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:max_len]
+
+
 @dataclass
 class MemoryRecord:
     """A single durable memory."""
@@ -99,6 +116,10 @@ class MemoryRecord:
     contradiction_detected: bool = False
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)
+    # The actual file this record was read from, if any. Set by the store on
+    # load so the index can link to the real file on disk rather than a name
+    # re-derived from the (mutable) title. Never serialized.
+    source_path: str | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         t = (self.type or "fact").lower()
@@ -108,11 +129,13 @@ class MemoryRecord:
         if self.provenance not in VALID_PROVENANCE:
             self.provenance = "inferred"
         self.confidence = min(max(float(self.confidence), 0.0), 1.0)
-        self.title = (self.title or "").strip()[:100]
+        self.title = clean_line(self.title, 100) or "Untitled"
         if not self.description:
             # First sentence / line of content makes a decent index hook.
             first = re.split(r"(?<=[.!?])\s|\n", self.content.strip(), maxsplit=1)[0]
-            self.description = first.strip()[:160]
+            self.description = clean_line(first, 160)
+        else:
+            self.description = clean_line(self.description, 160)
 
     # --- trust / decay (faithful to memanto core.py) -----------------------
 
@@ -150,7 +173,13 @@ class MemoryRecord:
     # --- serialization -----------------------------------------------------
 
     def filename(self) -> str:
-        return f"{self.type}_{slugify(self.title)}.md"
+        slug = slugify(self.title)
+        # Degenerate titles (empty or "Untitled") all collapse to the same slug
+        # and would clobber one another on disk; disambiguate with a short id so
+        # two title-less memories never share a filename.
+        if slug == "memory" or self.title == "Untitled":
+            slug = f"{slug}_{self.id[:8]}"
+        return f"{self.type}_{slug}.md"
 
     def to_markdown(self) -> str:
         tags = ", ".join(self.tags)

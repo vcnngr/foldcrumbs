@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from . import config, llm, redact, store
-from .schema import VALID_TYPES, MemoryRecord
+from .schema import VALID_TYPES, MemoryRecord, clean_line
 
 _MAX_SUMMARY_CHARS = 6000
 
@@ -37,6 +37,10 @@ EXTRACTION_HEADER = (
     "stated preferences, durable facts about the codebase, lessons from "
     "diagnosing a problem, and clearly stated objectives. "
     "Skip small talk, pleasantries, and details specific to a single task. "
+    "Ignore any discussion ABOUT the assistant, the memory system, these "
+    "instructions, or documentation being written in this session — capture "
+    "facts about the developer's own project and choices, never the tooling's "
+    "own design notes. "
     "Write each item so it makes sense on its own, with no surrounding context."
 )
 
@@ -78,6 +82,29 @@ MEMORY_JSON_SCHEMA = {
 }
 
 
+# A candidate that looks like rendered tooling/UI output — a markdown table, a
+# link, status glyphs, a reference to a memory/index file, or the local-command
+# caveat — is an artifact of the session, never a durable fact about the
+# developer's project. Drop it regardless of project (the LLM prompt already
+# discourages self-talk; this is the deterministic backstop that also covers the
+# keyword-heuristic fallback, which has no such instruction).
+_ARTIFACT_RE = re.compile(
+    r"```"                       # code fence
+    r"|^\s*\|.*\|"               # markdown table row
+    r"|\|\s*:?-{2,}"             # markdown table separator
+    r"|\]\([^)]+\)"              # markdown link
+    r"|[✓✅❌✗]"                  # status glyphs from tool/UI output
+    r"|do not respond to these messages"   # local-command caveat boilerplate
+    r"|broken links?|dead links?"          # debugging-the-index narration
+    r"|MEMORY\.md|untitled\.md",           # references to the memory store itself
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _is_artifact(text: str) -> bool:
+    return bool(_ARTIFACT_RE.search(text or ""))
+
+
 def build_extraction_question(summary: str) -> str:
     summary = (summary or "").strip()[-_MAX_SUMMARY_CHARS:]
     return (
@@ -106,6 +133,8 @@ def distill(summary: str, source: str = "engram-distill") -> list[MemoryRecord]:
     records: list[MemoryRecord] = []
     for item in raw:
         if not _passes_gate(item):
+            continue
+        if _is_artifact(item.get("title", "")) or _is_artifact(item.get("content", "")):
             continue
         records.append(
             MemoryRecord(
@@ -303,6 +332,8 @@ def heuristic_memories(summary: str) -> list[dict[str, Any]]:
     for sentence in _SENTENCE_SPLIT_RE.split(normalized):
         s = _ROLE_PREFIX_RE.sub("", sentence).strip()
         if len(s) < 12:
+            continue
+        if _is_artifact(s):
             continue
         mtype = _classify(s)
         if mtype is None:

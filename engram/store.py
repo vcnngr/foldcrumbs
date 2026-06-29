@@ -80,9 +80,14 @@ def iter_memories(cwd: str | os.PathLike[str] | None = None) -> Iterator[MemoryR
         if path.name in (config.INDEX_NAME, config.HANDOFF_NAME):
             continue
         try:
-            yield MemoryRecord.from_markdown(path.read_text(encoding="utf-8"))
+            rec = MemoryRecord.from_markdown(path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        # Remember where it actually lives so the index links to the real file,
+        # not a name re-derived from the title (which breaks on imported files
+        # or after a title edit).
+        rec.source_path = path.name
+        yield rec
 
 
 def load_all(cwd: str | os.PathLike[str] | None = None) -> list[MemoryRecord]:
@@ -232,7 +237,8 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
         for m in grouped[t]:
             tag = "" if m.compute_confidence() >= 0.6 else " *(tentative)*"
             hook = m.description or m.title
-            lines.append(f"- [{m.title}]({m.filename()}) — {hook}{tag}")
+            target = m.source_path or m.filename()
+            lines.append(f"- [{m.title}]({target}) — {hook}{tag}")
         lines.append("")
 
     target = d / config.INDEX_NAME
