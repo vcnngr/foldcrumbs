@@ -166,6 +166,43 @@ class TestLLMBackend(unittest.TestCase):
         self.assertTrue(llm.available())  # sys.executable always exists
 
 
+class TestDistillGate(unittest.TestCase):
+    """Per-machine distill opt-out (shared-store read-only consumer)."""
+
+    def setUp(self):
+        self._saved = os.environ.get("ENGRAM_NO_DISTILL")
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("ENGRAM_NO_DISTILL", None)
+        else:
+            os.environ["ENGRAM_NO_DISTILL"] = self._saved
+
+    def test_enabled_by_default(self):
+        os.environ.pop("ENGRAM_NO_DISTILL", None)
+        from engram import config
+        # No marker in a throwaway state dir → enabled.
+        self.assertTrue(config.distill_enabled() or (config.STATE_DIR / "no-distill").exists())
+
+    def test_env_disables(self):
+        os.environ["ENGRAM_NO_DISTILL"] = "1"
+        from engram import config
+        self.assertFalse(config.distill_enabled())
+
+    def test_marker_disables(self):
+        os.environ.pop("ENGRAM_NO_DISTILL", None)
+        from engram import config
+        d = tempfile.mkdtemp(prefix="ccmem_state_")
+        saved = config.STATE_DIR
+        try:
+            config.STATE_DIR = Path(d)
+            self.assertTrue(config.distill_enabled())
+            (Path(d) / "no-distill").write_text("", encoding="utf-8")
+            self.assertFalse(config.distill_enabled())
+        finally:
+            config.STATE_DIR = saved
+
+
 class TestRedact(unittest.TestCase):
     def test_scrubs_known_tokens(self):
         out = redact.scrub("key is sk-abcdefabcdefabcdefabcdef and gho_" + "a" * 36)

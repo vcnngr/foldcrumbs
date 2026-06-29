@@ -17,13 +17,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from engram import distill, store  # noqa: E402
+from engram import config, distill, store  # noqa: E402
 from engram.hooks._common import read_transcript_text  # noqa: E402
 
 
 def main() -> int:
     # Recursion guard: never distill inside an engram-spawned `claude -p`.
     if os.environ.get("ENGRAM_DISABLE"):
+        return 0
+    # Per-machine opt-out: on a shared store, only the designated indexer writes.
+    if not config.distill_enabled():
         return 0
     if len(sys.argv) < 3:
         return 0

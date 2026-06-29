@@ -104,6 +104,7 @@ def _cmd_status(_: argparse.Namespace) -> int:
     else:
         print(f"LLM backend: openai — {config.LLM_ENDPOINT} (model {config.LLM_MODEL})")
     print(f"LLM reachable: {llm.available()}")
+    print(f"distill here : {'on' if config.distill_enabled() else 'off (read-only consumer)'}")
     print(f"context budget: {config.CONTEXT_BUDGET} @ {int(config.CONTEXT_PCT*100)}%")
     return 0
 
