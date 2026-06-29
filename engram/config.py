@@ -44,6 +44,22 @@ MIN_CONFIDENCE = float(os.environ.get("ENGRAM_MIN_CONFIDENCE", "0.7"))
 # Ephemeral per-session state (checkpoint flags). Not the memory store.
 STATE_DIR = Path(os.environ.get("ENGRAM_STATE_DIR", str(Path.home() / ".engram")))
 
+
+def distill_enabled() -> bool:
+    """Whether this machine should distill/write memories.
+
+    Off when ENGRAM_NO_DISTILL is set or a ``no-distill`` marker exists in the
+    state dir. The state dir is machine-local (a sibling of ~/.claude, not under
+    it), so when the memory store is shared across machines — e.g. via Syncthing
+    — one machine with a local LLM can be the sole indexer while the others stay
+    read-only consumers (recall + index injection still work; only writing is
+    disabled). Evaluated live so dropping/removing the marker takes effect at
+    once.
+    """
+    if os.environ.get("ENGRAM_NO_DISTILL"):
+        return False
+    return not (STATE_DIR / "no-distill").exists()
+
 INDEX_NAME = "MEMORY.md"
 # Live working-state snapshot (overwritten each checkpoint), for resuming after
 # a /clear. Distinct from durable memories; never indexed as one.

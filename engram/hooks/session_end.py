@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from engram import config  # noqa: E402
 from engram.hooks._common import (  # noqa: E402
     read_hook_input,
     run,
@@ -28,6 +29,8 @@ def main() -> int:
     transcript_path = data.get("transcript_path")
     cwd = data.get("cwd") or ""
     if not transcript_path:
+        return 0
+    if not config.distill_enabled():  # read-only machine on a shared store
         return 0
     spawn_detached(
         [sys.executable or "python3", str(WORKER), str(transcript_path),

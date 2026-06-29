@@ -45,20 +45,27 @@ def main() -> int:
     if checkpoint_done(session_id, threshold):
         return 0
 
-    # Persist a checkpoint in the background (does not block).
-    spawn_detached(
-        [sys.executable or "python3", str(WORKER), str(transcript_path or ""),
-         str(cwd), "engram-checkpoint"]
-    )
+    # Persist a checkpoint in the background (does not block). Skipped on a
+    # read-only machine (shared store, another machine is the indexer).
+    distilling = config.distill_enabled()
+    if distilling:
+        spawn_detached(
+            [sys.executable or "python3", str(WORKER), str(transcript_path or ""),
+             str(cwd), "engram-checkpoint"]
+        )
     mark_checkpoint(session_id, tokens)
 
     pct = int(tokens / config.CONTEXT_BUDGET * 100)
+    saved = (
+        "Memory checkpoint saved in the background — durable decisions persist "
+        "across sessions. "
+        if distilling
+        else ""
+    )
     emit_additional_context(
         EVENT,
-        f"🧠 engram: context ~{pct}% (~{tokens} tok). Memory checkpoint saved "
-        "in the background — durable decisions persist across sessions. This is "
-        "a good moment to /compact or /clear to avoid context rot; nothing will "
-        "be lost.",
+        f"🧠 engram: context ~{pct}% (~{tokens} tok). {saved}This is a good "
+        "moment to /compact or /clear to avoid context rot; nothing will be lost.",
     )
     return 0
 
