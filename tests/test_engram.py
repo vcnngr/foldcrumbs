@@ -239,6 +239,62 @@ class TestRedact(unittest.TestCase):
         self.assertEqual(redact.scrub(text), text)
 
 
+class TestAudit(TmpStore):
+    def _write_raw(self, name, name_field, content, type_="fact"):
+        (Path(self.dir) / name).write_text(
+            f"---\nname: {name_field}\ndescription: d\ntype: {type_}\n---\n\n{content}\n",
+            encoding="utf-8")
+
+    def test_heal_index_relinks_orphan(self):
+        from engram import audit
+        # A memory file present on disk but not in the index → heal rebuilds.
+        self._write_raw("note.md", "Some note", "body")
+        a = audit.audit()
+        self.assertIn("note.md", a["orphans"])
+        self.assertTrue(audit.heal_index())
+        self.assertIn("(note.md)", store.rebuild_index().read_text())
+        self.assertEqual(audit.audit()["orphans"], [])
+
+    def test_audit_flags_pollution(self):
+        from engram import audit
+        store.upsert(MemoryRecord(title="Good", content="We use os.replace.", type="decision"))
+        self._write_raw("error_junk.md", "junk", "| Index | File | Stato |", "error")
+        self.assertIn("error_junk.md", audit.audit()["pollution"])
+
+    def test_prune_dry_run_then_apply(self):
+        from engram import audit
+        self._write_raw("error_tbl.md", "tbl", "| a | b | c |", "error")
+        store.upsert(MemoryRecord(title="Keep", content="Real decision here.", type="decision"))
+        dry = audit.prune(apply=False)
+        self.assertIn("error_tbl.md", dry["candidates"])
+        self.assertEqual(dry["removed"], [])
+        self.assertTrue((Path(self.dir) / "error_tbl.md").exists())
+        done = audit.prune(apply=True)
+        self.assertIn("error_tbl.md", done["removed"])
+        self.assertFalse((Path(self.dir) / "error_tbl.md").exists())
+
+    def test_auto_prune_on_persist(self):
+        from engram import audit
+        # An artifact memory among real ones is auto-pruned by persist().
+        recs = [
+            MemoryRecord(title="Real", content="We chose Postgres.", type="decision"),
+            MemoryRecord(title="junk", content="| col a | col b | col c |", type="error"),
+        ]
+        distill.persist(recs)
+        names = {m.title for m in store.load_all()}
+        self.assertIn("Real", names)
+        self.assertNotIn("junk", names)
+
+    def test_auto_prune_spares_legit_memory_mentioning_index(self):
+        from engram import audit
+        # A real engram design memory mentions MEMORY.md — must NOT be pruned.
+        self._write_raw("decision_arch.md", "Dual-layer architecture",
+                        "Durable layer is MEMORY.md; live state is HANDOFF.md.", "decision")
+        self.assertNotIn("decision_arch.md", audit.audit()["pollution"])
+        self.assertEqual(audit.prune_artifacts(), [])
+        self.assertTrue((Path(self.dir) / "decision_arch.md").exists())
+
+
 class TestSearch(TmpStore):
     def test_search_ranks_relevant(self):
         store.upsert(MemoryRecord(title="Recall via grep",

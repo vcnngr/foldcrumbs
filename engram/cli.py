@@ -93,6 +93,37 @@ def _cmd_distill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_doctor(_: argparse.Namespace) -> int:
+    from engram import audit
+    a = audit.audit()
+    print(f"memories   : {a['active']} active / {a['total']} total")
+    print(f"dead links : {len(a['dead_links'])}" + (f"  {a['dead_links']}" if a['dead_links'] else ""))
+    print(f"orphans    : {len(a['orphans'])}" + (f"  {a['orphans']}" if a['orphans'] else ""))
+    print(f"pollution  : {len(a['pollution'])}" + (f"  {a['pollution']}" if a['pollution'] else ""))
+    print(f"low-trust  : {len(a['stale'])}" + (f"  {a['stale']}" if a['stale'] else ""))
+    if a["dead_links"] or a["orphans"]:
+        print("hint: run `engram index` to rebuild, or `engram doctor` after a distill.")
+    if a["pollution"]:
+        print("hint: run `engram prune` (dry-run) then `engram prune --apply`.")
+    return 0
+
+
+def _cmd_prune(args: argparse.Namespace) -> int:
+    from engram import audit
+    res = audit.prune(apply=args.apply, include_stale=args.include_stale)
+    if not res["candidates"]:
+        print("nothing to prune.")
+        return 0
+    for name, reason in sorted(res["candidates"].items()):
+        mark = "removed" if name in res["removed"] else ("would remove" if not args.apply else "kept")
+        print(f"  [{reason}] {name} — {mark}")
+    if not args.apply:
+        print(f"\n{len(res['candidates'])} candidate(s). Re-run with --apply to delete.")
+    else:
+        print(f"\nremoved {len(res['removed'])} file(s); index rebuilt.")
+    return 0
+
+
 def _cmd_status(_: argparse.Namespace) -> int:
     mems = store.load_all()
     active = [m for m in mems if m.status == "active"]
@@ -177,6 +208,15 @@ def build_parser() -> argparse.ArgumentParser:
     d.set_defaults(func=_cmd_distill)
 
     sub.add_parser("status", help="show config + stats").set_defaults(func=_cmd_status)
+
+    sub.add_parser("doctor", help="audit store: dead links, orphans, pollution"
+                   ).set_defaults(func=_cmd_doctor)
+
+    pr = sub.add_parser("prune", help="delete pollution / superseded memories (dry-run by default)")
+    pr.add_argument("--apply", action="store_true", help="actually delete (default: dry-run)")
+    pr.add_argument("--include-stale", action="store_true",
+                    help="also prune low-trust memories")
+    pr.set_defaults(func=_cmd_prune)
 
     ins = sub.add_parser("install", help="wire engram into a coding agent")
     ins.add_argument("--agent", choices=["claude", "codex", "opencode"], default="claude")

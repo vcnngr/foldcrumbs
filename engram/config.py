@@ -54,6 +54,27 @@ def distill_enabled() -> bool:
     return not (STATE_DIR / "no-distill").exists()
 
 
+def log_event(msg: str) -> None:
+    """Append a line to the machine-local engram log (best-effort, never raises).
+
+    Background hooks/workers have nowhere visible to print; this gives auto-prune
+    and index self-heal an audit trail in ~/.engram/engram.log."""
+    try:
+        from datetime import datetime, timezone
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with (STATE_DIR / "engram.log").open("a", encoding="utf-8") as fh:
+            fh.write(f"{stamp} {msg.rstrip()}\n")
+    except OSError:
+        pass
+
+
+def auto_prune_enabled() -> bool:
+    """Auto-prune obvious artifact pollution after distill. On by default; off
+    when ENGRAM_NO_AUTO_PRUNE is set."""
+    return not os.environ.get("ENGRAM_NO_AUTO_PRUNE")
+
+
 def _local_override(name: str) -> str | None:
     """Read a machine-local override from the (non-synced) state dir.
 
