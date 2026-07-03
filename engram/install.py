@@ -19,6 +19,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import config
+
 HOOKS_DIR = Path(__file__).resolve().parent / "hooks"
 _MARKER = "engram/hooks/"  # any command containing this path is ours
 
@@ -50,6 +52,90 @@ def _mcp_command() -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# LLM backend selection (machine-local; written to ~/.engram)
+# --------------------------------------------------------------------------- #
+
+# Ordered for the interactive menu. Each: (key, one-line description).
+BACKEND_CHOICES: list[tuple[str, str]] = [
+    ("claude-cli", "Claude subscription — shell out to `claude -p` (no API key)"),
+    ("codex", "Codex subscription — shell out to `codex exec` (no API key)"),
+    ("openai", "OpenAI-compatible HTTP endpoint (local server or remote gateway)"),
+    ("none", "No LLM — keyword heuristic only (last resort, lower quality)"),
+]
+_BACKEND_BIN = {"claude-cli": ("claude-bin", "claude"), "codex": ("codex-bin", "codex")}
+
+
+def detect_bin(name: str) -> str | None:
+    """Absolute path of a CLI on PATH, or None. Hooks run with a minimal PATH, so
+    we persist the resolved absolute path rather than the bare name."""
+    return shutil.which(name)
+
+
+def configure_backend(
+    choice: str,
+    *,
+    state_dir: Path | None = None,
+    bin_path: str | None = None,
+    endpoint: str | None = None,
+    model: str | None = None,
+) -> list[str]:
+    """Persist the LLM backend choice to the machine-local state dir.
+
+    Writes ``llm-backend`` plus the backend's companion file: the CLI binary
+    path for claude-cli/codex (auto-detected when not given), or endpoint/model
+    for openai. ``none`` writes only the backend marker. Returns the relative
+    filenames written, for reporting.
+    """
+    choice = choice.strip().lower()
+    if choice not in config.BACKENDS:
+        raise ValueError(f"unknown backend {choice!r}; pick one of {', '.join(config.BACKENDS)}")
+    d = Path(state_dir or config.STATE_DIR)
+    d.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+
+    def _write(name: str, value: str) -> None:
+        (d / name).write_text(value.strip() + "\n", encoding="utf-8")
+        written.append(name)
+
+    _write("llm-backend", choice)
+    if choice in _BACKEND_BIN:
+        fname, exe = _BACKEND_BIN[choice]
+        resolved = bin_path or detect_bin(exe) or exe
+        _write(fname, resolved)
+    elif choice == "openai":
+        if endpoint:
+            _write("llm-endpoint", endpoint)
+        if model:
+            _write("llm-model", model)
+    return written
+
+
+def prompt_backend(in_fn=input, out_fn=print) -> str | None:
+    """Interactively ask which LLM backend to use. Returns the chosen key, or
+    None if the user aborts (EOF/blank at a non-default). Pure-IO via injected
+    callables so it's testable and so callers can skip it when non-interactive."""
+    out_fn("\nHow should engram distill memories? (recall never uses an LLM)\n")
+    for i, (key, desc) in enumerate(BACKEND_CHOICES, 1):
+        hint = ""
+        if key in _BACKEND_BIN and detect_bin(_BACKEND_BIN[key][1]):
+            hint = "  [detected]"
+        out_fn(f"  {i}) {key:<11} {desc}{hint}")
+    default_idx = 1
+    try:
+        raw = in_fn(f"\nChoose [1-{len(BACKEND_CHOICES)}] (default {default_idx}): ").strip()
+    except EOFError:
+        return None
+    if not raw:
+        return BACKEND_CHOICES[default_idx - 1][0]
+    # Accept either the number or the backend name.
+    for i, (key, _) in enumerate(BACKEND_CHOICES, 1):
+        if raw == str(i) or raw.lower() == key:
+            return key
+    out_fn(f"Unrecognised choice {raw!r}; leaving backend unchanged.")
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Hook installer (JSON settings: Claude Code settings.json, Codex hooks.json)
 # --------------------------------------------------------------------------- #
 
@@ -67,7 +153,7 @@ def default_settings_path(agent: str = "claude", global_scope: bool = True) -> P
     if agent == "codex":
         return Path.home() / ".codex" / "hooks.json"
     if global_scope:
-        return Path.home() / ".claude" / "settings.json"
+        return config.claude_config_dir() / "settings.json"
     return Path.cwd() / ".claude" / "settings.json"
 
 

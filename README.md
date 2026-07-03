@@ -59,6 +59,20 @@ engram install --agent opencode     # OpenCode: opencode.json MCP + plugin + AGE
 The installer is merge-safe and idempotent: it appends its own hook groups and leaves existing
 hooks (GSD, graphify, …) untouched. A `.engram-bak` backup is written first.
 
+On a TTY, install asks **how to distill** (recall never uses an LLM):
+
+```
+1) claude-cli   Claude subscription — `claude -p`, no API key
+2) codex        Codex subscription — `codex exec`, no API key
+3) openai       OpenAI-compatible HTTP endpoint (local server or remote gateway)
+4) none         no LLM — keyword heuristic only (last resort)
+```
+
+The choice is saved per-machine in `~/.engram` (not synced), so a shared store can have one
+indexer with a local model and others using their own CLI subscription. Skip the prompt with
+`engram install --backend codex` (or `--no-backend-prompt`), and change it anytime with
+`engram backend <name>` (`engram backend` alone shows the current one).
+
 All agents share **one** memory store per project, so a decision recorded in Claude Code is
 recalled in Codex and OpenCode.
 

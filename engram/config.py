@@ -6,7 +6,10 @@ where <encoded-cwd> is the absolute cwd with every "/" replaced by "-".
 This matches the convention already used by the host (see CLAUDE.md).
 
 Everything is overridable via env so the same code serves the CLI (uses
-os.getcwd()) and the hooks (use the cwd passed in the hook payload).
+os.getcwd()) and the hooks (use the cwd passed in the hook payload). Settings
+that a single machine should own (which LLM backend, its binary/endpoint) also
+fall back to small files in the machine-local state dir (~/.engram), written by
+`engram install`/`engram backend` — see ``_local_override``.
 """
 
 from __future__ import annotations
@@ -14,9 +17,35 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# Ephemeral per-machine state (backend choice, checkpoint flags). Resolved first
+# so the LLM constants below can fall back to it. NOT the memory store, and (when
+# the store is shared via Syncthing) deliberately NOT synced — it's how one
+# machine differs from the others.
+STATE_DIR = Path(os.environ.get("ENGRAM_STATE_DIR", str(Path.home() / ".engram")))
+
+
+def _local_override(name: str) -> str | None:
+    """Read a machine-local override from the (non-synced) state dir.
+
+    Lets a single machine differ from a shared, synced settings.json — e.g. one
+    box with no local LLM selects the claude-cli backend here without forcing it
+    on the machines that share its memory store.
+    """
+    try:
+        p = STATE_DIR / name
+        if p.exists():
+            return p.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        pass
+    return None
+
+
 # --- LLM (distillation only; recall never touches the LLM) ------------------
-LLM_ENDPOINT = os.environ.get("ENGRAM_LLM_ENDPOINT", "http://localhost:8081")
-LLM_MODEL = os.environ.get("ENGRAM_LLM_MODEL", "gemma-4-26b-a4b-it")
+# Order for each: env var > machine-local state file > built-in default.
+LLM_ENDPOINT = (os.environ.get("ENGRAM_LLM_ENDPOINT")
+                or _local_override("llm-endpoint") or "http://localhost:8081")
+LLM_MODEL = (os.environ.get("ENGRAM_LLM_MODEL")
+             or _local_override("llm-model") or "gemma-4-26b-a4b-it")
 LLM_API_KEY = os.environ.get("ENGRAM_LLM_API_KEY", "")
 LLM_TIMEOUT = float(os.environ.get("ENGRAM_LLM_TIMEOUT", "120"))
 # Master kill-switch. engram sets this in the env of any `claude -p` subprocess
@@ -34,8 +63,11 @@ CONTEXT_PCT = float(os.environ.get("ENGRAM_CONTEXT_PCT", "0.45"))
 # --- Distillation gate ------------------------------------------------------
 MIN_CONFIDENCE = float(os.environ.get("ENGRAM_MIN_CONFIDENCE", "0.7"))
 
-# Ephemeral per-session state (checkpoint flags). Not the memory store.
-STATE_DIR = Path(os.environ.get("ENGRAM_STATE_DIR", str(Path.home() / ".engram")))
+# Recognised distillation backends. "none" (a.k.a. heuristic-only) skips the LLM
+# entirely and always falls through to the keyword heuristic — the last rung for
+# a machine that can't host or reach any model.
+BACKENDS = ("claude-cli", "codex", "openai", "none")
+_NO_LLM_BACKENDS = ("none", "heuristic", "off")
 
 
 def distill_enabled() -> bool:
@@ -75,27 +107,13 @@ def auto_prune_enabled() -> bool:
     return not os.environ.get("ENGRAM_NO_AUTO_PRUNE")
 
 
-def _local_override(name: str) -> str | None:
-    """Read a machine-local override from the (non-synced) state dir.
-
-    Lets a single machine differ from a shared, synced settings.json — e.g. one
-    box with no local LLM selects the claude-cli backend here without forcing it
-    on the machines that share its memory store.
-    """
-    try:
-        p = STATE_DIR / name
-        if p.exists():
-            return p.read_text(encoding="utf-8").strip() or None
-    except OSError:
-        pass
-    return None
-
-
 def llm_backend() -> str:
     """Distillation backend: env > machine-local file > "openai" default.
 
     "openai" = HTTP to LLM_ENDPOINT; "claude-cli" = shell out to the Claude CLI
-    in print mode (no endpoint, uses the CLI's own login — no API key).
+    in print mode; "codex" = shell out to the Codex CLI in exec mode; "none"
+    (or "heuristic"/"off") = no LLM, keyword heuristic only. The two CLI backends
+    use the tool's own login — no endpoint, no API key.
     """
     val = os.environ.get("ENGRAM_LLM_BACKEND") or _local_override("llm-backend") or "openai"
     return val.strip().lower()
@@ -109,10 +127,33 @@ def claude_bin() -> str:
     """
     return os.environ.get("ENGRAM_CLAUDE_BIN") or _local_override("claude-bin") or "claude"
 
+
+def codex_bin() -> str:
+    """Path/name of the Codex CLI for the codex backend.
+
+    Prefer an absolute path (set via env or the ``codex-bin`` state file): hooks
+    run without the user's interactive shell, so PATH may be minimal.
+    """
+    return os.environ.get("ENGRAM_CODEX_BIN") or _local_override("codex-bin") or "codex"
+
 INDEX_NAME = "MEMORY.md"
 # Live working-state snapshot (overwritten each checkpoint), for resuming after
 # a /clear. Distinct from durable memories; never indexed as one.
 HANDOFF_NAME = "HANDOFF.md"
+
+
+def claude_config_dir() -> Path:
+    """Claude Code's config root for the *current* instance.
+
+    Honors CLAUDE_CONFIG_DIR so engram follows the same per-instance dirs used by
+    aliases like ``claude-work``/``claude-peo``/``claude-3sez`` (each of which
+    runs ``CLAUDE_CONFIG_DIR=~/.claude-<x> claude``). When unset, falls back to
+    the default ~/.claude. This keeps each instance's memory namespaced under its
+    own config dir instead of bleeding into the personal store.
+    """
+    return Path(
+        os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    ).expanduser()
 
 
 def encode_cwd(cwd: str | os.PathLike[str]) -> str:
@@ -123,15 +164,15 @@ def encode_cwd(cwd: str | os.PathLike[str]) -> str:
 def memory_dir(cwd: str | os.PathLike[str] | None = None) -> Path:
     """Resolve the memory directory for a given working directory.
 
-    Order: explicit ENGRAM_DIR env wins; otherwise derive from cwd.
+    Order: explicit ENGRAM_DIR env wins; otherwise derive from cwd under the
+    current instance's Claude config dir (CLAUDE_CONFIG_DIR-aware).
     """
     override = os.environ.get("ENGRAM_DIR")
     if override:
         return Path(override).expanduser()
     cwd = cwd or os.getcwd()
     return (
-        Path.home()
-        / ".claude"
+        claude_config_dir()
         / "projects"
         / encode_cwd(cwd)
         / "memory"

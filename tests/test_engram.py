@@ -127,14 +127,15 @@ class TestDistill(unittest.TestCase):
 
 
 class TestLLMBackend(unittest.TestCase):
-    """claude-cli backend: dispatch + the anti-recursion kill-switch."""
+    """CLI backends (claude-cli, codex): dispatch + the anti-recursion kill-switch."""
 
     def setUp(self):
         import importlib
         from engram import config, llm
         self.config, self.llm, self._reload = config, llm, importlib.reload
         self._saved = {k: os.environ.get(k)
-                       for k in ("ENGRAM_LLM_BACKEND", "ENGRAM_DISABLE", "ENGRAM_CLAUDE_BIN")}
+                       for k in ("ENGRAM_LLM_BACKEND", "ENGRAM_DISABLE",
+                                 "ENGRAM_CLAUDE_BIN", "ENGRAM_CODEX_BIN")}
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -166,6 +167,131 @@ class TestLLMBackend(unittest.TestCase):
         self._reload(self.config)
         self._reload(self.llm)
         self.assertTrue(llm.available())  # sys.executable always exists
+
+    def test_disabled_blocks_codex_and_never_spawns(self):
+        # Same recursion-guard parity for the codex backend: disabled => no spawn.
+        llm = self._reload_with(ENGRAM_LLM_BACKEND="codex", ENGRAM_DISABLE="1")
+        self.assertFalse(llm.available())
+        self.assertIsNone(llm.chat([{"role": "user", "content": "hi"}]))
+
+    def test_codex_available_true_when_cli_present(self):
+        llm = self._reload_with(
+            ENGRAM_LLM_BACKEND="codex", ENGRAM_CODEX_BIN=sys.executable)
+        os.environ.pop("ENGRAM_DISABLE", None)
+        self._reload(self.config)
+        self._reload(self.llm)
+        self.assertTrue(llm.available())  # sys.executable always exists
+
+    def test_codex_available_false_when_cli_missing(self):
+        llm = self._reload_with(
+            ENGRAM_LLM_BACKEND="codex",
+            ENGRAM_CODEX_BIN="/nonexistent/codex-binary-xyz")
+        os.environ.pop("ENGRAM_DISABLE", None)
+        self._reload(self.config)
+        self._reload(self.llm)
+        self.assertFalse(llm.available())
+
+    def test_none_backend_skips_llm_entirely(self):
+        # The heuristic-only rung: chat() returns None without any network/CLI,
+        # and available() is False by design (distill falls to the keyword path).
+        llm = self._reload_with(ENGRAM_LLM_BACKEND="none")
+        os.environ.pop("ENGRAM_DISABLE", None)
+        self._reload(self.config)
+        self._reload(self.llm)
+        self.assertFalse(llm.available())
+        self.assertIsNone(llm.chat([{"role": "user", "content": "hi"}]))
+
+
+class TestBackendConfig(unittest.TestCase):
+    """Install-time backend selection: configure_backend + prompt_backend."""
+
+    def setUp(self):
+        import importlib
+        from engram import config
+        self.config = config
+        self._dir = Path(tempfile.mkdtemp(prefix="ccmem_backend_"))
+        # Drive STATE_DIR via env so an importlib.reload (below) keeps the temp
+        # dir instead of snapping back to ~/.engram.
+        self._saved_env = os.environ.get("ENGRAM_STATE_DIR")
+        os.environ["ENGRAM_STATE_DIR"] = str(self._dir)
+        importlib.reload(config)
+
+    def tearDown(self):
+        import importlib
+        if self._saved_env is None:
+            os.environ.pop("ENGRAM_STATE_DIR", None)
+        else:
+            os.environ["ENGRAM_STATE_DIR"] = self._saved_env
+        importlib.reload(self.config)
+
+    def _read(self, name):
+        return (self._dir / name).read_text(encoding="utf-8").strip()
+
+    def test_configure_codex_writes_backend_and_bin(self):
+        written = install.configure_backend("codex", bin_path="/opt/homebrew/bin/codex")
+        self.assertIn("llm-backend", written)
+        self.assertIn("codex-bin", written)
+        self.assertEqual(self._read("llm-backend"), "codex")
+        self.assertEqual(self._read("codex-bin"), "/opt/homebrew/bin/codex")
+
+    def test_configure_claude_writes_backend_and_bin(self):
+        install.configure_backend("claude-cli", bin_path="/usr/local/bin/claude")
+        self.assertEqual(self._read("llm-backend"), "claude-cli")
+        self.assertEqual(self._read("claude-bin"), "/usr/local/bin/claude")
+
+    def test_configure_openai_persists_endpoint_and_model(self):
+        install.configure_backend(
+            "openai", endpoint="http://localhost:8081", model="gemma-4-26b-a4b-it")
+        self.assertEqual(self._read("llm-backend"), "openai")
+        self.assertEqual(self._read("llm-endpoint"), "http://localhost:8081")
+        self.assertEqual(self._read("llm-model"), "gemma-4-26b-a4b-it")
+
+    def test_configure_none_writes_only_marker(self):
+        written = install.configure_backend("none")
+        self.assertEqual(written, ["llm-backend"])
+        self.assertEqual(self._read("llm-backend"), "none")
+
+    def test_configure_rejects_unknown_backend(self):
+        with self.assertRaises(ValueError):
+            install.configure_backend("gpt-9000")
+
+    def test_config_reads_endpoint_from_state_file(self):
+        # The openai endpoint/model written above must be picked up by config
+        # (env unset) — that's what makes the install prompt meaningful.
+        import importlib
+        install.configure_backend("openai", endpoint="http://host:9999", model="m-1")
+        saved = {k: os.environ.pop(k, None)
+                 for k in ("ENGRAM_LLM_ENDPOINT", "ENGRAM_LLM_MODEL")}
+        try:
+            importlib.reload(self.config)
+            self.assertEqual(self.config.LLM_ENDPOINT, "http://host:9999")
+            self.assertEqual(self.config.LLM_MODEL, "m-1")
+        finally:
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+            importlib.reload(self.config)
+
+    def test_prompt_picks_by_number(self):
+        choice = install.prompt_backend(in_fn=lambda _: "2", out_fn=lambda *_: None)
+        self.assertEqual(choice, "codex")
+
+    def test_prompt_picks_by_name(self):
+        choice = install.prompt_backend(in_fn=lambda _: "openai", out_fn=lambda *_: None)
+        self.assertEqual(choice, "openai")
+
+    def test_prompt_blank_is_default_first_choice(self):
+        choice = install.prompt_backend(in_fn=lambda _: "", out_fn=lambda *_: None)
+        self.assertEqual(choice, install.BACKEND_CHOICES[0][0])
+
+    def test_prompt_unrecognised_returns_none(self):
+        choice = install.prompt_backend(in_fn=lambda _: "zzz", out_fn=lambda *_: None)
+        self.assertIsNone(choice)
+
+    def test_prompt_eof_returns_none(self):
+        def _eof(_):
+            raise EOFError
+        self.assertIsNone(install.prompt_backend(in_fn=_eof, out_fn=lambda *_: None))
 
 
 class TestDistillGate(unittest.TestCase):
@@ -209,6 +335,7 @@ class TestDistillGate(unittest.TestCase):
         # mechanism that lets one synced machine differ from the others).
         from engram import config
         saved_env = os.environ.pop("ENGRAM_LLM_BACKEND", None)
+        saved_codex_bin = os.environ.pop("ENGRAM_CODEX_BIN", None)
         d = tempfile.mkdtemp(prefix="ccmem_state_")
         saved = config.STATE_DIR
         try:
@@ -216,10 +343,18 @@ class TestDistillGate(unittest.TestCase):
             self.assertEqual(config.llm_backend(), "openai")  # default
             (Path(d) / "llm-backend").write_text("claude-cli\n", encoding="utf-8")
             self.assertEqual(config.llm_backend(), "claude-cli")
+            (Path(d) / "llm-backend").write_text("codex\n", encoding="utf-8")
+            self.assertEqual(config.llm_backend(), "codex")
+            # codex_bin honours the machine-local file too (no env var).
+            self.assertEqual(config.codex_bin(), "codex")  # default name
+            (Path(d) / "codex-bin").write_text("/opt/homebrew/bin/codex\n", encoding="utf-8")
+            self.assertEqual(config.codex_bin(), "/opt/homebrew/bin/codex")
         finally:
             config.STATE_DIR = saved
             if saved_env is not None:
                 os.environ["ENGRAM_LLM_BACKEND"] = saved_env
+            if saved_codex_bin is not None:
+                os.environ["ENGRAM_CODEX_BIN"] = saved_codex_bin
 
 
 class TestRedact(unittest.TestCase):
