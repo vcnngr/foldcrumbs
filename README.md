@@ -87,15 +87,15 @@ recalled in Codex and OpenCode.
 
 | var | default | meaning |
 |-----|---------|---------|
-| `ENGRAM_LLM_ENDPOINT` | `http://localhost:8081` | OpenAI-compatible endpoint (MLX server) |
-| `ENGRAM_LLM_MODEL` | `gemma-4-26b-a4b` | model name |
-| `ENGRAM_LLM_API_KEY` | – | optional bearer token |
-| `ENGRAM_CONTEXT_BUDGET` | `200000` | context window size (tokens) for the monitor |
-| `ENGRAM_CONTEXT_PCT` | `0.45` | fraction at which to checkpoint + nudge |
-| `ENGRAM_MIN_CONFIDENCE` | `0.7` | write gate floor |
-| `ENGRAM_DIR` | derived from cwd | override the memory directory |
+| `FOLDCRUMBS_LLM_ENDPOINT` | `http://localhost:8081` | OpenAI-compatible endpoint (MLX server) |
+| `FOLDCRUMBS_LLM_MODEL` | `gemma-4-26b-a4b` | model name |
+| `FOLDCRUMBS_LLM_API_KEY` | – | optional bearer token |
+| `FOLDCRUMBS_CONTEXT_BUDGET` | `200000` | context window size (tokens) for the monitor |
+| `FOLDCRUMBS_CONTEXT_PCT` | `0.45` | fraction at which to checkpoint + nudge |
+| `FOLDCRUMBS_MIN_CONFIDENCE` | `0.7` | write gate floor |
+| `FOLDCRUMBS_DIR` | derived from cwd | override the memory directory |
 
-Swap the LLM for a remote gateway or OpenRouter by changing `ENGRAM_LLM_ENDPOINT` — recall is
+Swap the LLM for a remote gateway or OpenRouter by changing `FOLDCRUMBS_LLM_ENDPOINT` — recall is
 unaffected.
 
 ## CLI
@@ -126,7 +126,7 @@ either way the next turn is re-primed. Force a snapshot anytime with `foldcrumbs
 
 ## Local LLM
 
-Distillation needs any OpenAI-compatible chat endpoint — point `ENGRAM_LLM_ENDPOINT`
+Distillation needs any OpenAI-compatible chat endpoint — point `FOLDCRUMBS_LLM_ENDPOINT`
 at whatever you run. It's used only for async distillation, so a cold model load is
 invisible to the editor, and **recall needs no model at all**.
 
@@ -142,7 +142,7 @@ ollama serve                                            # endpoint :11434/v1
 # llama.cpp / LM Studio / vLLM — also OpenAI-compatible
 ```
 
-Then e.g. `export ENGRAM_LLM_ENDPOINT=http://localhost:11434 ENGRAM_LLM_MODEL=qwen2.5`.
+Then e.g. `export FOLDCRUMBS_LLM_ENDPOINT=http://localhost:11434 FOLDCRUMBS_LLM_MODEL=qwen2.5`.
 A remote gateway or OpenRouter works the same way — only the env var changes.
 
 ## Tests
