@@ -212,7 +212,13 @@ def search(
 
 
 def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
-    """Regenerate MEMORY.md from the store (grouped by type, recency within)."""
+    """Regenerate MEMORY.md from the store (grouped by type, stable within).
+
+    Within each type memories are ordered by immutable ``created_at`` (newest
+    first) so the index is deterministic: only adding/removing a memory changes
+    it, not a trust bump or re-touch. This keeps the injected prefix cacheable
+    and the file diff-stable for Syncthing.
+    """
     d = _ensure_dir(cwd)
     mems = [m for m in iter_memories(cwd) if m.status == "active"]
 
@@ -220,7 +226,13 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
     for m in mems:
         grouped.setdefault(m.type, []).append(m)
     for lst in grouped.values():
-        lst.sort(key=lambda m: m.updated_at, reverse=True)
+        # Order by created_at (immutable) so trust bumps / re-touches / distills
+        # never reorder the same set of memories. A stable index keeps the
+        # SessionStart-injected prefix identical across sessions (rides the
+        # agent's prompt cache) and stops Syncthing from seeing spurious line
+        # moves. filename() is the deterministic tiebreak for equal timestamps.
+        lst.sort(key=lambda m: m.filename())
+        lst.sort(key=lambda m: m.created_at, reverse=True)
 
     ordered = [t for t in _TYPE_ORDER if t in grouped]
     ordered += [t for t in grouped if t not in _TYPE_ORDER]

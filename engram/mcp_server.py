@@ -158,7 +158,7 @@ def handle(msg: dict) -> dict | None:
         return _result(msg_id, {
             "protocolVersion": client_proto or DEFAULT_PROTOCOL,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": SERVER_NAME, "version": "0.1.0"},
+            "serverInfo": {"name": SERVER_NAME, "version": "0.2.0"},
             "instructions": "Project memory. Call recall before a task; remember "
                             "durable decisions after.",
         })

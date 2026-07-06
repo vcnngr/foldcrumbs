@@ -30,6 +30,13 @@ The retrieval engine is the agent itself: it greps the folder when relevant. The
 
 Pure Python stdlib: hook scripts never fail on a missing import.
 
+The `MEMORY.md` index is written in a **deterministic order** (by immutable
+creation time, newest first within each type), so a trust bump, re-touch or
+re-distillation never reshuffles existing entries. Only adding or removing a
+memory changes the file. This keeps the SessionStart-injected prefix identical
+across sessions — so it rides the agent's own prompt cache instead of busting it
+— and keeps the file diff-clean for sync tools like Syncthing.
+
 ## What's different from memanto
 
 engram started from ideas in [memanto](https://github.com/moorcheh-ai/memanto), but takes a

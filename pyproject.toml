@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engram"
-version = "0.1.0"
+version = "0.2.0"
 description = "Persistent cross-session memory for coding agents — file-based, no vector DB, no external service."
 readme = "README.md"
 requires-python = ">=3.10"
