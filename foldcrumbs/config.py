@@ -1,4 +1,4 @@
-"""Paths and environment configuration for engram.
+"""Paths and environment configuration for foldcrumbs.
 
 Memory lives in Claude Code's per-project directory:
     ~/.claude/projects/<encoded-cwd>/memory/
@@ -8,8 +8,12 @@ This matches the convention already used by the host (see CLAUDE.md).
 Everything is overridable via env so the same code serves the CLI (uses
 os.getcwd()) and the hooks (use the cwd passed in the hook payload). Settings
 that a single machine should own (which LLM backend, its binary/endpoint) also
-fall back to small files in the machine-local state dir (~/.engram), written by
-`engram install`/`engram backend` — see ``_local_override``.
+fall back to small files in the machine-local state dir (~/.foldcrumbs), written
+by `foldcrumbs install`/`foldcrumbs backend` — see ``_local_override``.
+
+Env vars are read as FOLDCRUMBS_<NAME> with a fallback to the legacy
+ENGRAM_<NAME> (see ``_env``), so a machine mid-migration — or one that syncs a
+not-yet-updated settings.json from another box — keeps working.
 """
 
 from __future__ import annotations
@@ -17,11 +21,43 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+
+def _env(name: str, default: str | None = None) -> str | None:
+    """Read FOLDCRUMBS_<name>, falling back to the legacy ENGRAM_<name>.
+
+    The fallback is transitional: it lets a box that still has ENGRAM_* in its
+    (possibly Syncthing-synced) settings.json run under the renamed package
+    until it is fully migrated.
+    """
+    return (
+        os.environ.get(f"FOLDCRUMBS_{name}")
+        or os.environ.get(f"ENGRAM_{name}")
+        or default
+    )
+
+
+def _resolve_state_dir() -> Path:
+    """Machine-local state dir: env > ~/.foldcrumbs > legacy ~/.engram > default.
+
+    Prefers the new ~/.foldcrumbs, but falls back to an existing ~/.engram so a
+    machine that hasn't run ``foldcrumbs migrate`` yet still finds its backend
+    choice and checkpoint flags.
+    """
+    env = _env("STATE_DIR")
+    if env:
+        return Path(env).expanduser()
+    new = Path.home() / ".foldcrumbs"
+    old = Path.home() / ".engram"
+    if not new.exists() and old.exists():
+        return old
+    return new
+
+
 # Ephemeral per-machine state (backend choice, checkpoint flags). Resolved first
 # so the LLM constants below can fall back to it. NOT the memory store, and (when
 # the store is shared via Syncthing) deliberately NOT synced — it's how one
 # machine differs from the others.
-STATE_DIR = Path(os.environ.get("ENGRAM_STATE_DIR", str(Path.home() / ".engram")))
+STATE_DIR = _resolve_state_dir()
 
 
 def _local_override(name: str) -> str | None:
@@ -42,26 +78,27 @@ def _local_override(name: str) -> str | None:
 
 # --- LLM (distillation only; recall never touches the LLM) ------------------
 # Order for each: env var > machine-local state file > built-in default.
-LLM_ENDPOINT = (os.environ.get("ENGRAM_LLM_ENDPOINT")
+LLM_ENDPOINT = (_env("LLM_ENDPOINT")
                 or _local_override("llm-endpoint") or "http://localhost:8081")
-LLM_MODEL = (os.environ.get("ENGRAM_LLM_MODEL")
+LLM_MODEL = (_env("LLM_MODEL")
              or _local_override("llm-model") or "gemma-4-26b-a4b-it")
-LLM_API_KEY = os.environ.get("ENGRAM_LLM_API_KEY", "")
-LLM_TIMEOUT = float(os.environ.get("ENGRAM_LLM_TIMEOUT", "120"))
-# Master kill-switch. engram sets this in the env of any `claude -p` subprocess
-# it spawns so the nested headless session's own hooks no-op and can't trigger
-# another distillation — i.e. it stops claude-cli distillation from recursing.
-DISABLED = bool(os.environ.get("ENGRAM_DISABLE"))
+LLM_API_KEY = _env("LLM_API_KEY", "")
+LLM_TIMEOUT = float(_env("LLM_TIMEOUT", "120"))
+# Master kill-switch. foldcrumbs sets this in the env of any `claude -p`
+# subprocess it spawns so the nested headless session's own hooks no-op and
+# can't trigger another distillation — i.e. it stops claude-cli distillation
+# from recursing.
+DISABLED = bool(_env("DISABLE"))
 # Request OpenAI structured output (response_format json_schema) for distill.
 # Best-effort: servers that ignore it still work (tolerant parser). Default on.
-LLM_JSON_SCHEMA = os.environ.get("ENGRAM_LLM_JSON_SCHEMA", "1") not in ("0", "false", "")
+LLM_JSON_SCHEMA = _env("LLM_JSON_SCHEMA", "1") not in ("0", "false", "")
 
 # --- Anti-rot monitor -------------------------------------------------------
-CONTEXT_BUDGET = int(os.environ.get("ENGRAM_CONTEXT_BUDGET", "200000"))
-CONTEXT_PCT = float(os.environ.get("ENGRAM_CONTEXT_PCT", "0.45"))
+CONTEXT_BUDGET = int(_env("CONTEXT_BUDGET", "200000"))
+CONTEXT_PCT = float(_env("CONTEXT_PCT", "0.45"))
 
 # --- Distillation gate ------------------------------------------------------
-MIN_CONFIDENCE = float(os.environ.get("ENGRAM_MIN_CONFIDENCE", "0.7"))
+MIN_CONFIDENCE = float(_env("MIN_CONFIDENCE", "0.7"))
 
 # Recognised distillation backends. "none" (a.k.a. heuristic-only) skips the LLM
 # entirely and always falls through to the keyword heuristic — the last rung for
@@ -73,29 +110,30 @@ _NO_LLM_BACKENDS = ("none", "heuristic", "off")
 def distill_enabled() -> bool:
     """Whether this machine should distill/write memories.
 
-    Off when ENGRAM_NO_DISTILL is set or a ``no-distill`` marker exists in the
-    state dir. The state dir is machine-local (a sibling of ~/.claude, not under
-    it), so when the memory store is shared across machines — e.g. via Syncthing
-    — one machine with a local LLM can be the sole indexer while the others stay
-    read-only consumers (recall + index injection still work; only writing is
-    disabled). Evaluated live so dropping/removing the marker takes effect at
-    once.
+    Off when FOLDCRUMBS_NO_DISTILL (or legacy ENGRAM_NO_DISTILL) is set or a
+    ``no-distill`` marker exists in the state dir. The state dir is machine-local
+    (a sibling of ~/.claude, not under it), so when the memory store is shared
+    across machines — e.g. via Syncthing — one machine with a local LLM can be
+    the sole indexer while the others stay read-only consumers (recall + index
+    injection still work; only writing is disabled). Evaluated live so
+    dropping/removing the marker takes effect at once.
     """
-    if os.environ.get("ENGRAM_NO_DISTILL"):
+    if _env("NO_DISTILL"):
         return False
     return not (STATE_DIR / "no-distill").exists()
 
 
 def log_event(msg: str) -> None:
-    """Append a line to the machine-local engram log (best-effort, never raises).
+    """Append a line to the machine-local foldcrumbs log (best-effort, never
+    raises).
 
     Background hooks/workers have nowhere visible to print; this gives auto-prune
-    and index self-heal an audit trail in ~/.engram/engram.log."""
+    and index self-heal an audit trail in ~/.foldcrumbs/foldcrumbs.log."""
     try:
         from datetime import datetime, timezone
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with (STATE_DIR / "engram.log").open("a", encoding="utf-8") as fh:
+        with (STATE_DIR / "foldcrumbs.log").open("a", encoding="utf-8") as fh:
             fh.write(f"{stamp} {msg.rstrip()}\n")
     except OSError:
         pass
@@ -103,8 +141,8 @@ def log_event(msg: str) -> None:
 
 def auto_prune_enabled() -> bool:
     """Auto-prune obvious artifact pollution after distill. On by default; off
-    when ENGRAM_NO_AUTO_PRUNE is set."""
-    return not os.environ.get("ENGRAM_NO_AUTO_PRUNE")
+    when FOLDCRUMBS_NO_AUTO_PRUNE (or legacy ENGRAM_NO_AUTO_PRUNE) is set."""
+    return not _env("NO_AUTO_PRUNE")
 
 
 def llm_backend() -> str:
@@ -115,7 +153,7 @@ def llm_backend() -> str:
     (or "heuristic"/"off") = no LLM, keyword heuristic only. The two CLI backends
     use the tool's own login — no endpoint, no API key.
     """
-    val = os.environ.get("ENGRAM_LLM_BACKEND") or _local_override("llm-backend") or "openai"
+    val = _env("LLM_BACKEND") or _local_override("llm-backend") or "openai"
     return val.strip().lower()
 
 
@@ -125,7 +163,7 @@ def claude_bin() -> str:
     Prefer an absolute path (set via env or the ``claude-bin`` state file): hooks
     run without the user's interactive shell, so PATH may be minimal.
     """
-    return os.environ.get("ENGRAM_CLAUDE_BIN") or _local_override("claude-bin") or "claude"
+    return _env("CLAUDE_BIN") or _local_override("claude-bin") or "claude"
 
 
 def codex_bin() -> str:
@@ -134,7 +172,7 @@ def codex_bin() -> str:
     Prefer an absolute path (set via env or the ``codex-bin`` state file): hooks
     run without the user's interactive shell, so PATH may be minimal.
     """
-    return os.environ.get("ENGRAM_CODEX_BIN") or _local_override("codex-bin") or "codex"
+    return _env("CODEX_BIN") or _local_override("codex-bin") or "codex"
 
 INDEX_NAME = "MEMORY.md"
 # Live working-state snapshot (overwritten each checkpoint), for resuming after
@@ -145,11 +183,11 @@ HANDOFF_NAME = "HANDOFF.md"
 def claude_config_dir() -> Path:
     """Claude Code's config root for the *current* instance.
 
-    Honors CLAUDE_CONFIG_DIR so engram follows the same per-instance dirs used by
-    aliases like ``claude-work``/``claude-peo``/``claude-3sez`` (each of which
-    runs ``CLAUDE_CONFIG_DIR=~/.claude-<x> claude``). When unset, falls back to
-    the default ~/.claude. This keeps each instance's memory namespaced under its
-    own config dir instead of bleeding into the personal store.
+    Honors CLAUDE_CONFIG_DIR so foldcrumbs follows the same per-instance dirs
+    used by aliases like ``claude-work``/``claude-peo``/``claude-3sez`` (each of
+    which runs ``CLAUDE_CONFIG_DIR=~/.claude-<x> claude``). When unset, falls back
+    to the default ~/.claude. This keeps each instance's memory namespaced under
+    its own config dir instead of bleeding into the personal store.
     """
     return Path(
         os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
@@ -164,10 +202,11 @@ def encode_cwd(cwd: str | os.PathLike[str]) -> str:
 def memory_dir(cwd: str | os.PathLike[str] | None = None) -> Path:
     """Resolve the memory directory for a given working directory.
 
-    Order: explicit ENGRAM_DIR env wins; otherwise derive from cwd under the
-    current instance's Claude config dir (CLAUDE_CONFIG_DIR-aware).
+    Order: explicit FOLDCRUMBS_DIR (or legacy ENGRAM_DIR) env wins; otherwise
+    derive from cwd under the current instance's Claude config dir
+    (CLAUDE_CONFIG_DIR-aware).
     """
-    override = os.environ.get("ENGRAM_DIR")
+    override = _env("DIR")
     if override:
         return Path(override).expanduser()
     cwd = cwd or os.getcwd()

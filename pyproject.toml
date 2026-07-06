@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "engram"
-version = "0.2.0"
+name = "foldcrumbs"
+version = "0.3.0"
 description = "Persistent cross-session memory for coding agents — file-based, no vector DB, no external service."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,14 +25,14 @@ dependencies = []
 dev = ["ruff>=0.5", "mypy>=1.10"]
 
 [project.scripts]
-engram = "engram.cli:main"
-engram-mcp = "engram.mcp_server:main"
+foldcrumbs = "foldcrumbs.cli:main"
+foldcrumbs-mcp = "foldcrumbs.mcp_server:main"
 
 [project.urls]
-Repository = "https://github.com/vcnngr/engram"
+Repository = "https://github.com/vcnngr/foldcrumbs"
 
 [tool.setuptools.packages.find]
-include = ["engram*"]
+include = ["foldcrumbs*"]
 
 [tool.setuptools.package-data]
-engram = ["hooks/*.py"]
+foldcrumbs = ["hooks/*.py"]

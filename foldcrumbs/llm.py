@@ -1,7 +1,7 @@
 """Minimal OpenAI-compatible chat client (stdlib urllib only).
 
 Used solely for async distillation/maintenance — recall never touches the LLM.
-Points at ENGRAM_LLM_ENDPOINT (default local MLX server on :8081). Swap to a
+Points at FOLDCRUMBS_LLM_ENDPOINT (default local MLX server on :8081). Swap to a
 remote gateway or OpenRouter by changing the env var. Fail-soft: any error
 returns None and the caller degrades to the heuristic path.
 """
@@ -28,7 +28,7 @@ def chat(
     """Return assistant text for ``messages``, or None on failure.
 
     Routes to the configured backend: the Claude CLI (print mode) when
-    ``ENGRAM_LLM_BACKEND=claude-cli``, otherwise an OpenAI-compatible HTTP
+    ``FOLDCRUMBS_LLM_BACKEND=claude-cli``, otherwise an OpenAI-compatible HTTP
     endpoint. Either way, any failure returns None so the caller degrades to
     the heuristic path.
     """
@@ -104,7 +104,9 @@ def _chat_claude_cli(messages: list[dict[str, str]]) -> str | None:
     if not prompt.strip():
         return None
     env = dict(os.environ)
-    env["ENGRAM_DISABLE"] = "1"  # kill-switch for the nested session's hooks
+    # kill-switch for the nested session's hooks (both names during migration)
+    env["FOLDCRUMBS_DISABLE"] = "1"
+    env["ENGRAM_DISABLE"] = "1"
     try:
         proc = subprocess.run(
             [binpath, "-p", prompt],
@@ -132,7 +134,7 @@ def _chat_codex_cli(messages: list[dict[str, str]]) -> str | None:
     and skips the git-repo check so it works from any cwd. Returns None on any
     failure so the caller falls back to the heuristic path.
     """
-    # Defense in depth: Codex doesn't fire engram's hooks (it isn't Claude
+    # Defense in depth: Codex doesn't fire foldcrumbs's hooks (it isn't Claude
     # Code), so there's no recursion to guard — but honour the kill-switch all
     # the same, for parity with the claude-cli path.
     if config.DISABLED:
@@ -143,7 +145,9 @@ def _chat_codex_cli(messages: list[dict[str, str]]) -> str | None:
     if not prompt.strip():
         return None
     env = dict(os.environ)
-    env["ENGRAM_DISABLE"] = "1"  # parity with claude-cli; harmless for Codex
+    # parity with claude-cli; harmless for Codex (both names during migration)
+    env["FOLDCRUMBS_DISABLE"] = "1"
+    env["ENGRAM_DISABLE"] = "1"
     with tempfile.TemporaryDirectory() as td:
         outfile = os.path.join(td, "last.txt")
         try:
@@ -179,7 +183,7 @@ def available() -> bool:
     if backend in config._NO_LLM_BACKENDS:
         return False  # no LLM by design; distill uses the heuristic path
     if backend == "claude-cli":
-        # Unavailable inside an engram-spawned session (recursion guard) or when
+        # Unavailable inside a foldcrumbs-spawned session (recursion guard) or when
         # the CLI isn't found.
         if config.DISABLED:
             return False

@@ -238,7 +238,7 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
     ordered += [t for t in grouped if t not in _TYPE_ORDER]
 
     lines = [
-        "# MEMORY.md — engram index",
+        "# MEMORY.md — foldcrumbs index",
         "",
         f"_{len(mems)} memories. One line each; read the linked file for detail._",
         "",

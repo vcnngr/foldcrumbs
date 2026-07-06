@@ -1,4 +1,4 @@
-"""Shared plumbing for engram's Claude Code lifecycle hooks.
+"""Shared plumbing for foldcrumbs's Claude Code lifecycle hooks.
 
 Design rules (these run on the developer's hot path):
 * Never break Claude Code — any failure exits 0 silently (``run``).
@@ -7,7 +7,7 @@ Design rules (these run on the developer's hot path):
 * Be schema-tolerant — the transcript JSONL format is not officially pinned.
 
 The schema-tolerant transcript reader follows the approach used by memanto's
-hooks (MIT); the token estimator and detached-spawn helper are engram's.
+hooks (MIT); the token estimator and detached-spawn helper are foldcrumbs's.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def run(main: Callable[[], int]) -> None:
     # Master kill-switch: a `claude -p` distillation subprocess sets this so the
     # nested headless session's hooks no-op — otherwise claude-cli distillation
     # would recurse (session_end → worker → claude -p → session_end → ...).
-    if os.environ.get("ENGRAM_DISABLE"):
+    if os.environ.get("FOLDCRUMBS_DISABLE") or os.environ.get("ENGRAM_DISABLE"):
         raise SystemExit(0)
     try:
         code = main()

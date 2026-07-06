@@ -1,4 +1,4 @@
-"""Regression tests for engram (stdlib unittest, no external deps).
+"""Regression tests for foldcrumbs (stdlib unittest, no external deps).
 
 Run: python3 -m unittest discover -s tests
 """
@@ -14,8 +14,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from engram import distill, install, redact, store  # noqa: E402
-from engram.schema import MemoryRecord  # noqa: E402
+from foldcrumbs import distill, install, redact, store  # noqa: E402
+from foldcrumbs.schema import MemoryRecord  # noqa: E402
 
 
 class TmpStore(unittest.TestCase):
@@ -131,7 +131,7 @@ class TestLLMBackend(unittest.TestCase):
 
     def setUp(self):
         import importlib
-        from engram import config, llm
+        from foldcrumbs import config, llm
         self.config, self.llm, self._reload = config, llm, importlib.reload
         self._saved = {k: os.environ.get(k)
                        for k in ("ENGRAM_LLM_BACKEND", "ENGRAM_DISABLE",
@@ -154,7 +154,7 @@ class TestLLMBackend(unittest.TestCase):
         return self.llm
 
     def test_disabled_blocks_claude_cli_and_never_spawns(self):
-        # Recursion guard: inside an engram-spawned session the CLI backend is
+        # Recursion guard: inside a foldcrumbs-spawned session the CLI backend is
         # unavailable and chat() returns None without shelling out.
         llm = self._reload_with(ENGRAM_LLM_BACKEND="claude-cli", ENGRAM_DISABLE="1")
         self.assertFalse(llm.available())
@@ -207,11 +207,11 @@ class TestBackendConfig(unittest.TestCase):
 
     def setUp(self):
         import importlib
-        from engram import config
+        from foldcrumbs import config
         self.config = config
         self._dir = Path(tempfile.mkdtemp(prefix="ccmem_backend_"))
         # Drive STATE_DIR via env so an importlib.reload (below) keeps the temp
-        # dir instead of snapping back to ~/.engram.
+        # dir instead of snapping back to ~/.foldcrumbs.
         self._saved_env = os.environ.get("ENGRAM_STATE_DIR")
         os.environ["ENGRAM_STATE_DIR"] = str(self._dir)
         importlib.reload(config)
@@ -308,18 +308,18 @@ class TestDistillGate(unittest.TestCase):
 
     def test_enabled_by_default(self):
         os.environ.pop("ENGRAM_NO_DISTILL", None)
-        from engram import config
+        from foldcrumbs import config
         # No marker in a throwaway state dir → enabled.
         self.assertTrue(config.distill_enabled() or (config.STATE_DIR / "no-distill").exists())
 
     def test_env_disables(self):
         os.environ["ENGRAM_NO_DISTILL"] = "1"
-        from engram import config
+        from foldcrumbs import config
         self.assertFalse(config.distill_enabled())
 
     def test_marker_disables(self):
         os.environ.pop("ENGRAM_NO_DISTILL", None)
-        from engram import config
+        from foldcrumbs import config
         d = tempfile.mkdtemp(prefix="ccmem_state_")
         saved = config.STATE_DIR
         try:
@@ -333,7 +333,7 @@ class TestDistillGate(unittest.TestCase):
     def test_machine_local_backend_override(self):
         # A machine-local file selects the backend without any env var (the
         # mechanism that lets one synced machine differ from the others).
-        from engram import config
+        from foldcrumbs import config
         saved_env = os.environ.pop("ENGRAM_LLM_BACKEND", None)
         saved_codex_bin = os.environ.pop("ENGRAM_CODEX_BIN", None)
         d = tempfile.mkdtemp(prefix="ccmem_state_")
@@ -381,7 +381,7 @@ class TestAudit(TmpStore):
             encoding="utf-8")
 
     def test_heal_index_relinks_orphan(self):
-        from engram import audit
+        from foldcrumbs import audit
         # A memory file present on disk but not in the index → heal rebuilds.
         self._write_raw("note.md", "Some note", "body")
         a = audit.audit()
@@ -391,13 +391,13 @@ class TestAudit(TmpStore):
         self.assertEqual(audit.audit()["orphans"], [])
 
     def test_audit_flags_pollution(self):
-        from engram import audit
+        from foldcrumbs import audit
         store.upsert(MemoryRecord(title="Good", content="We use os.replace.", type="decision"))
         self._write_raw("error_junk.md", "junk", "| Index | File | Stato |", "error")
         self.assertIn("error_junk.md", audit.audit()["pollution"])
 
     def test_prune_dry_run_then_apply(self):
-        from engram import audit
+        from foldcrumbs import audit
         self._write_raw("error_tbl.md", "tbl", "| a | b | c |", "error")
         store.upsert(MemoryRecord(title="Keep", content="Real decision here.", type="decision"))
         dry = audit.prune(apply=False)
@@ -409,7 +409,7 @@ class TestAudit(TmpStore):
         self.assertFalse((Path(self.dir) / "error_tbl.md").exists())
 
     def test_auto_prune_on_persist(self):
-        from engram import audit
+        from foldcrumbs import audit
         # An artifact memory among real ones is auto-pruned by persist().
         recs = [
             MemoryRecord(title="Real", content="We chose Postgres.", type="decision"),
@@ -421,8 +421,8 @@ class TestAudit(TmpStore):
         self.assertNotIn("junk", names)
 
     def test_auto_prune_spares_legit_memory_mentioning_index(self):
-        from engram import audit
-        # A real engram design memory mentions MEMORY.md — must NOT be pruned.
+        from foldcrumbs import audit
+        # A real foldcrumbs design memory mentions MEMORY.md — must NOT be pruned.
         self._write_raw("decision_arch.md", "Dual-layer architecture",
                         "Durable layer is MEMORY.md; live state is HANDOFF.md.", "decision")
         self.assertNotIn("decision_arch.md", audit.audit()["pollution"])
@@ -476,7 +476,7 @@ class TestInstaller(unittest.TestCase):
 class TestHooksIsolation(TmpStore):
     def _run_hook(self, script, payload):
         return subprocess.run(
-            [sys.executable, str(REPO / "engram" / "hooks" / script)],
+            [sys.executable, str(REPO / "foldcrumbs" / "hooks" / script)],
             input=json.dumps(payload), capture_output=True, text=True,
             env={**os.environ}, timeout=30,
         )
@@ -488,13 +488,61 @@ class TestHooksIsolation(TmpStore):
                             {"session_id": "t", "cwd": "/x", "source": "startup"})
         self.assertEqual(r.returncode, 0)
         out = json.loads(r.stdout)
-        self.assertIn("engram-index", out["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("foldcrumbs-index", out["hookSpecificOutput"]["additionalContext"])
 
     def test_hook_survives_garbage_stdin(self):
         r = subprocess.run(
-            [sys.executable, str(REPO / "engram" / "hooks" / "session_start.py")],
+            [sys.executable, str(REPO / "foldcrumbs" / "hooks" / "session_start.py")],
             input="not json", capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0)
+
+
+class TestMigration(unittest.TestCase):
+    """Rename back-compat + engram -> foldcrumbs migration paths."""
+
+    def test_install_clears_legacy_engram_hook_keeps_foreign(self):
+        d = tempfile.mkdtemp(prefix="ccmem_mig_")
+        sp = Path(d) / "settings.json"
+        sp.write_text(json.dumps({"hooks": {
+            "SessionStart": [{"hooks": [{"type": "command",
+                "command": "/usr/local/bin/python3 /x/engram/engram/hooks/session_start.py"}]}],
+            "PostToolUse": [{"hooks": [{"type": "command",
+                "command": "node /y/graphify.js"}]}],
+        }}))
+        install.install_hooks(sp, "claude")
+        s = json.loads(sp.read_text())
+        cmds = [h["command"] for ev in s["hooks"].values()
+                for g in ev for h in g["hooks"]]
+        self.assertFalse(any("engram/hooks" in c for c in cmds))   # legacy gone
+        self.assertTrue(any("foldcrumbs/hooks" in c for c in cmds))  # ours added
+        self.assertTrue(any("graphify" in c for c in cmds))          # foreign kept
+
+    def test_uninstall_removes_legacy_too(self):
+        d = tempfile.mkdtemp(prefix="ccmem_mig_")
+        sp = Path(d) / "settings.json"
+        sp.write_text(json.dumps({"hooks": {
+            "SessionEnd": [{"hooks": [{"type": "command",
+                "command": "python3 /x/engram/engram/hooks/session_end.py"}]}],
+        }}))
+        install.uninstall_hooks(sp)
+        s = json.loads(sp.read_text())
+        cmds = [h["command"] for ev in s.get("hooks", {}).values()
+                for g in ev for h in g["hooks"]]
+        self.assertFalse(any("engram" in c for c in cmds))
+
+    def test_foldcrumbs_dir_env_is_primary(self):
+        d = tempfile.mkdtemp(prefix="ccmem_fc_")
+        os.environ["FOLDCRUMBS_DIR"] = d
+        try:
+            import importlib
+            from foldcrumbs import config as _c
+            importlib.reload(_c)
+            self.assertEqual(str(_c.memory_dir()), d)
+        finally:
+            os.environ.pop("FOLDCRUMBS_DIR", None)
+            import importlib
+            from foldcrumbs import config as _c
+            importlib.reload(_c)
 
 
 if __name__ == "__main__":

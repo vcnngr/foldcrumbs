@@ -1,6 +1,6 @@
 """Minimal MCP (Model Context Protocol) server over stdio — stdlib only.
 
-Exposes three tools on the shared engram store so MCP-speaking agents (Codex,
+Exposes three tools on the shared foldcrumbs store so MCP-speaking agents (Codex,
 OpenCode, any MCP client) read/write the same memory Claude Code uses:
 
   * remember(content, type, title, confidence, tags) — store a memory
@@ -13,7 +13,7 @@ initialize / notifications / tools.list / tools.call / ping — so there are no
 extra dependencies and nothing to keep running between sessions (the client
 spawns this process on demand).
 
-Run:  python3 -m engram.mcp_server     (or the `engram-mcp` console script)
+Run:  python3 -m foldcrumbs.mcp_server     (or the `foldcrumbs-mcp` console script)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from . import config, llm, store
 from .profile import format_context_block
 from .schema import VALID_TYPES, MemoryRecord
 
-SERVER_NAME = "engram"
+SERVER_NAME = "foldcrumbs"
 DEFAULT_PROTOCOL = "2025-06-18"
 
 # --- tool registry --------------------------------------------------------- #
@@ -35,7 +35,7 @@ TOOLS = [
     {
         "name": "remember",
         "description": (
-            "Store a durable memory in the project's engram store so future "
+            "Store a durable memory in the project's foldcrumbs store so future "
             "sessions recall it. Use for decisions, conventions, preferences, "
             "stable facts, lessons and goals."
         ),
@@ -54,7 +54,7 @@ TOOLS = [
     {
         "name": "recall",
         "description": (
-            "Search the project's engram memory and return the most relevant "
+            "Search the project's foldcrumbs memory and return the most relevant "
             "memories as a context block. Call this at the start of a task to "
             "load prior decisions and conventions."
         ),
@@ -158,7 +158,7 @@ def handle(msg: dict) -> dict | None:
         return _result(msg_id, {
             "protocolVersion": client_proto or DEFAULT_PROTOCOL,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": SERVER_NAME, "version": "0.2.0"},
+            "serverInfo": {"name": SERVER_NAME, "version": "0.3.0"},
             "instructions": "Project memory. Call recall before a task; remember "
                             "durable decisions after.",
         })
