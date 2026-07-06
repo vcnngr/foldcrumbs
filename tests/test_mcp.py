@@ -15,12 +15,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from engram import mcp_server  # noqa: E402
+from foldcrumbs import mcp_server  # noqa: E402
 
 
 class TestHandler(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="engram_mcp_")
+        self.dir = tempfile.mkdtemp(prefix="foldcrumbs_mcp_")
         os.environ["ENGRAM_DIR"] = self.dir
 
     def tearDown(self):
@@ -31,7 +31,7 @@ class TestHandler(unittest.TestCase):
                                "params": {"protocolVersion": "2025-06-18"}})
         self.assertEqual(r["result"]["protocolVersion"], "2025-06-18")
         self.assertIn("tools", r["result"]["capabilities"])
-        self.assertEqual(r["result"]["serverInfo"]["name"], "engram")
+        self.assertEqual(r["result"]["serverInfo"]["name"], "foldcrumbs")
 
     def test_initialized_notification_no_response(self):
         self.assertIsNone(mcp_server.handle(
@@ -66,10 +66,10 @@ class TestHandler(unittest.TestCase):
 
 class TestSubprocessRoundTrip(unittest.TestCase):
     def test_full_stdio_session(self):
-        d = tempfile.mkdtemp(prefix="engram_mcp_sp_")
+        d = tempfile.mkdtemp(prefix="foldcrumbs_mcp_sp_")
         env = {**os.environ, "ENGRAM_DIR": d}
         proc = subprocess.Popen(
-            [sys.executable, "-m", "engram.mcp_server"],
+            [sys.executable, "-m", "foldcrumbs.mcp_server"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, cwd=str(REPO), env=env,
         )
@@ -86,7 +86,7 @@ class TestSubprocessRoundTrip(unittest.TestCase):
         responses = [json.loads(line) for line in out.splitlines() if line.strip()]
         by_id = {r.get("id"): r for r in responses}
         # initialize, tools/list, tools/call answered; notification got no response.
-        self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "engram")
+        self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "foldcrumbs")
         self.assertEqual({t["name"] for t in by_id[2]["result"]["tools"]},
                          {"remember", "recall", "answer"})
         self.assertFalse(by_id[3]["result"]["isError"])

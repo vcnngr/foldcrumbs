@@ -13,13 +13,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from engram import config, store  # noqa: E402
-from engram.hooks._common import (  # noqa: E402
+from foldcrumbs import config, store  # noqa: E402
+from foldcrumbs.hooks._common import (  # noqa: E402
     emit_additional_context,
     read_hook_input,
     run,
 )
-from engram.hooks._state import clear_checkpoint  # noqa: E402
+from foldcrumbs.hooks._state import clear_checkpoint  # noqa: E402
 
 EVENT = "SessionStart"
 
@@ -39,7 +39,7 @@ def main() -> int:
     # index (avoids Syncthing churn). Cheap no-op when the index is healthy.
     if config.distill_enabled():
         try:
-            from engram import audit
+            from foldcrumbs import audit
             if audit.heal_index(cwd):
                 config.log_event("session-start: healed stale index")
         except Exception:
@@ -55,22 +55,22 @@ def main() -> int:
             body = ""
         if body:
             parts.append(
-                "<engram-index>\n"
+                "<foldcrumbs-index>\n"
                 "Persistent project memory (from previous sessions). Honour it; "
                 "do not re-ask what is already recorded. To recall detail, read "
                 "the linked file or grep the memory folder:\n"
                 f"{config.memory_dir(cwd)}\n\n"
                 f"{body}\n"
-                "</engram-index>"
+                "</foldcrumbs-index>"
             )
 
     handoff = store.read_handoff(cwd)
     if handoff:
         parts.append(
-            "<engram-handoff>\n"
+            "<foldcrumbs-handoff>\n"
             "Where the last session left off — resume from here:\n\n"
             f"{handoff}\n"
-            "</engram-handoff>"
+            "</foldcrumbs-handoff>"
         )
 
     if parts:

@@ -1,11 +1,11 @@
-# engram
+# foldcrumbs
 
-[![tests](https://github.com/vcnngr/engram/actions/workflows/test.yml/badge.svg)](https://github.com/vcnngr/engram/actions/workflows/test.yml)
+[![tests](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml/badge.svg)](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Persistent cross-session memory for coding agents — **no Docker, no vector DB, no external service**.
 
-`/clear` and compaction wipe Claude Code's knowledge every session. engram keeps a small
+`/clear` and compaction wipe Claude Code's knowledge every session. foldcrumbs keeps a small
 folder of typed memory files so the agent reopens already knowing your decisions, conventions
 and codebase facts. It also fights context rot: around 45% context it checkpoints memory in the
 background and nudges you to `/compact` or `/clear` — nothing is lost.
@@ -39,10 +39,10 @@ across sessions — so it rides the agent's own prompt cache instead of busting 
 
 ## What's different from memanto
 
-engram started from ideas in [memanto](https://github.com/moorcheh-ai/memanto), but takes a
+foldcrumbs started from ideas in [memanto](https://github.com/moorcheh-ai/memanto), but takes a
 deliberately different shape:
 
-| | memanto | engram |
+| | memanto | foldcrumbs |
 |--|--|--|
 | Retrieval | Moorcheh engine (closed) | the agent's own grep — no engine |
 | Footprint | Docker + engine + LLM + REST API | a folder + hooks |
@@ -58,13 +58,13 @@ adapted from memanto.
 ## Install
 
 ```bash
-engram install                      # Claude Code, global (~/.claude/settings.json)
-engram install --local              # Claude Code, project (.claude/settings.json)
-engram install --agent codex        # Codex: hooks.json + prints the config.toml MCP snippet
-engram install --agent opencode     # OpenCode: opencode.json MCP + plugin + AGENTS.md block
+foldcrumbs install                      # Claude Code, global (~/.claude/settings.json)
+foldcrumbs install --local              # Claude Code, project (.claude/settings.json)
+foldcrumbs install --agent codex        # Codex: hooks.json + prints the config.toml MCP snippet
+foldcrumbs install --agent opencode     # OpenCode: opencode.json MCP + plugin + AGENTS.md block
 ```
 The installer is merge-safe and idempotent: it appends its own hook groups and leaves existing
-hooks (GSD, graphify, …) untouched. A `.engram-bak` backup is written first.
+hooks (GSD, graphify, …) untouched. A `.foldcrumbs-bak` backup is written first.
 
 On a TTY, install asks **how to distill** (recall never uses an LLM):
 
@@ -75,10 +75,10 @@ On a TTY, install asks **how to distill** (recall never uses an LLM):
 4) none         no LLM — keyword heuristic only (last resort)
 ```
 
-The choice is saved per-machine in `~/.engram` (not synced), so a shared store can have one
+The choice is saved per-machine in `~/.foldcrumbs` (not synced), so a shared store can have one
 indexer with a local model and others using their own CLI subscription. Skip the prompt with
-`engram install --backend codex` (or `--no-backend-prompt`), and change it anytime with
-`engram backend <name>` (`engram backend` alone shows the current one).
+`foldcrumbs install --backend codex` (or `--no-backend-prompt`), and change it anytime with
+`foldcrumbs backend <name>` (`foldcrumbs backend` alone shows the current one).
 
 All agents share **one** memory store per project, so a decision recorded in Claude Code is
 recalled in Codex and OpenCode.
@@ -101,14 +101,14 @@ unaffected.
 ## CLI
 
 ```bash
-python3 -m engram status
-python3 -m engram remember "Recall is grep, no vector DB" --type decision --tag arch
-python3 -m engram recall "vector db"
-python3 -m engram index
-python3 -m engram distill transcript.txt    # distil durable memories (LLM)
-python3 -m engram checkpoint transcript.txt # write a resume handoff (LLM)
-python3 -m engram handoff                   # print the current handoff
-python3 -m engram answer "how does recall work?"
+python3 -m foldcrumbs status
+python3 -m foldcrumbs remember "Recall is grep, no vector DB" --type decision --tag arch
+python3 -m foldcrumbs recall "vector db"
+python3 -m foldcrumbs index
+python3 -m foldcrumbs distill transcript.txt    # distil durable memories (LLM)
+python3 -m foldcrumbs checkpoint transcript.txt # write a resume handoff (LLM)
+python3 -m foldcrumbs handoff                   # print the current handoff
+python3 -m foldcrumbs answer "how does recall work?"
 ```
 
 ## Surviving `/clear` and `/compact`
@@ -121,8 +121,8 @@ Two layers cross the context switch:
   in flight and next steps, written at each checkpoint and re-injected so you resume the
   exact task after a hard `/clear`.
 
-At ~45% context engram nudges you; pick `/compact` (keep working) or `/clear` (fresh start) —
-either way the next turn is re-primed. Force a snapshot anytime with `engram checkpoint`.
+At ~45% context foldcrumbs nudges you; pick `/compact` (keep working) or `/clear` (fresh start) —
+either way the next turn is re-primed. Force a snapshot anytime with `foldcrumbs checkpoint`.
 
 ## Local LLM
 
@@ -153,13 +153,13 @@ python3 -m unittest discover -s tests -v
 
 ## MCP server
 
-engram ships a minimal MCP server (stdio, stdlib only — no `mcp` SDK dependency) exposing
+foldcrumbs ships a minimal MCP server (stdio, stdlib only — no `mcp` SDK dependency) exposing
 `remember`, `recall` and `answer` to any MCP client:
 
 ```bash
-engram-mcp            # or: python3 -m engram.mcp_server
+foldcrumbs-mcp            # or: python3 -m foldcrumbs.mcp_server
 ```
-Codex and OpenCode are wired to it by `engram install --agent …`. Use it directly from any
+Codex and OpenCode are wired to it by `foldcrumbs install --agent …`. Use it directly from any
 MCP-speaking tool by registering the command above.
 
 ## How each agent is wired
@@ -178,7 +178,7 @@ MCP-speaking tool by registering the command above.
 
 ## Credits
 
-engram adapts a few utilities from [memanto](https://github.com/moorcheh-ai/memanto)
+foldcrumbs adapts a few utilities from [memanto](https://github.com/moorcheh-ai/memanto)
 (MIT, © Moorcheh / Edge AI Innovations): the typed-memory categories and confidence/decay
 model, the session-distillation approach, the transcript-reading helper, and the context-block
 rendering idea. These are reimplemented here against a file store; the Moorcheh retrieval engine

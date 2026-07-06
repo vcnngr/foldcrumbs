@@ -18,15 +18,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from engram import config  # noqa: E402
-from engram.hooks._common import (  # noqa: E402
+from foldcrumbs import config  # noqa: E402
+from foldcrumbs.hooks._common import (  # noqa: E402
     emit_additional_context,
     estimate_tokens,
     read_hook_input,
     run,
     spawn_detached,
 )
-from engram.hooks._state import checkpoint_done, mark_checkpoint  # noqa: E402
+from foldcrumbs.hooks._state import checkpoint_done, mark_checkpoint  # noqa: E402
 
 EVENT = "PostToolUse"
 WORKER = Path(__file__).resolve().parent / "_worker.py"
@@ -51,7 +51,7 @@ def main() -> int:
     if distilling:
         spawn_detached(
             [sys.executable or "python3", str(WORKER), str(transcript_path or ""),
-             str(cwd), "engram-checkpoint"]
+             str(cwd), "foldcrumbs-checkpoint"]
         )
     mark_checkpoint(session_id, tokens)
 
@@ -64,7 +64,7 @@ def main() -> int:
     )
     emit_additional_context(
         EVENT,
-        f"🧠 engram: context ~{pct}% (~{tokens} tok). {saved}This is a good "
+        f"🧠 foldcrumbs: context ~{pct}% (~{tokens} tok). {saved}This is a good "
         "moment to /compact or /clear to avoid context rot; nothing will be lost.",
     )
     return 0

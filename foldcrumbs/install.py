@@ -1,4 +1,4 @@
-"""Merge-safe installers for engram across coding agents.
+"""Merge-safe installers for foldcrumbs across coding agents.
 
 The hook scripts are agent-agnostic (they read cwd/transcript from the payload
 and emit ``hookSpecificOutput.additionalContext``), so Claude Code and Codex
@@ -22,7 +22,8 @@ from pathlib import Path
 from . import config
 
 HOOKS_DIR = Path(__file__).resolve().parent / "hooks"
-_MARKER = "engram/hooks/"  # any command containing this path is ours
+_MARKER = "foldcrumbs/hooks/"  # any command containing this path is ours
+_LEGACY_MARKERS = ("engram/hooks/",)  # pre-rename installs to clean up on migrate
 
 # Per-agent hook maps: event -> (script, matcher). The same scripts are reused;
 # only event names and matcher conventions differ between agents.
@@ -48,11 +49,11 @@ def _command_for(script: str) -> str:
 
 
 def _mcp_command() -> list[str]:
-    return [sys.executable or "python3", "-m", "engram.mcp_server"]
+    return [sys.executable or "python3", "-m", "foldcrumbs.mcp_server"]
 
 
 # --------------------------------------------------------------------------- #
-# LLM backend selection (machine-local; written to ~/.engram)
+# LLM backend selection (machine-local; written to ~/.foldcrumbs)
 # --------------------------------------------------------------------------- #
 
 # Ordered for the interactive menu. Each: (key, one-line description).
@@ -114,7 +115,7 @@ def prompt_backend(in_fn=input, out_fn=print) -> str | None:
     """Interactively ask which LLM backend to use. Returns the chosen key, or
     None if the user aborts (EOF/blank at a non-default). Pure-IO via injected
     callables so it's testable and so callers can skip it when non-interactive."""
-    out_fn("\nHow should engram distill memories? (recall never uses an LLM)\n")
+    out_fn("\nHow should foldcrumbs distill memories? (recall never uses an LLM)\n")
     for i, (key, desc) in enumerate(BACKEND_CHOICES, 1):
         hint = ""
         if key in _BACKEND_BIN and detect_bin(_BACKEND_BIN[key][1]):
@@ -149,6 +150,20 @@ def _already_present(groups: list, script: str) -> bool:
     )
 
 
+def _has_legacy(group: dict) -> bool:
+    """True if a group is a pre-rename (engram) install of ours.
+
+    A migrating machine still has ``engram/hooks/...`` commands in its
+    settings.json; those paths no longer exist after the package is renamed, so
+    install/uninstall must recognise and clear them instead of leaving orphans.
+    """
+    return any(
+        m in h.get("command", "")
+        for h in group.get("hooks", [])
+        for m in _LEGACY_MARKERS
+    )
+
+
 def default_settings_path(agent: str = "claude", global_scope: bool = True) -> Path:
     if agent == "codex":
         return Path.home() / ".codex" / "hooks.json"
@@ -158,7 +173,7 @@ def default_settings_path(agent: str = "claude", global_scope: bool = True) -> P
 
 
 def install_hooks(settings_path: Path, agent: str = "claude", timeout: int = 15) -> list[str]:
-    """Merge engram hooks into a JSON settings/hooks file. Returns changes."""
+    """Merge foldcrumbs hooks into a JSON settings/hooks file. Returns changes."""
     hooks_map = _AGENT_HOOKS[agent]
     settings_path = Path(settings_path)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,12 +184,17 @@ def install_hooks(settings_path: Path, agent: str = "claude", timeout: int = 15)
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
         except Exception:
             settings = {}
-        shutil.copy2(settings_path, settings_path.with_suffix(".json.engram-bak"))
+        shutil.copy2(settings_path, settings_path.with_suffix(".json.foldcrumbs-bak"))
 
     hooks = settings.setdefault("hooks", {})
     changes: list[str] = []
     for event, (script, matcher) in hooks_map.items():
         groups = hooks.setdefault(event, [])
+        # Clear any pre-rename (engram) group for this event first, so a migrating
+        # machine ends up with foldcrumbs hooks only — no orphaned engram commands.
+        if any(_has_legacy(g) for g in groups):
+            groups[:] = [g for g in groups if not _has_legacy(g)]
+            changes.append(f"{event} -> removed legacy engram hook")
         if _already_present(groups, script):
             continue
         entry = {"type": "command", "command": _command_for(script), "timeout": timeout}
@@ -200,7 +220,8 @@ def uninstall_hooks(settings_path: Path) -> list[str]:
     removed: list[str] = []
     for event in list(hooks.keys()):
         kept = [g for g in hooks[event]
-                if not any(_MARKER in h.get("command", "") for h in g.get("hooks", []))]
+                if not any(_MARKER in h.get("command", "") for h in g.get("hooks", []))
+                and not _has_legacy(g)]
         if len(kept) != len(hooks[event]):
             removed.append(event)
         if kept:
@@ -226,7 +247,7 @@ def uninstall(settings_path: Path) -> list[str]:
 
 
 def install_opencode_mcp(config_path: Path) -> list[str]:
-    """Merge an engram MCP server into opencode.json. Returns changes."""
+    """Merge a foldcrumbs MCP server into opencode.json. Returns changes."""
     config_path = Path(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     cfg: dict = {}
@@ -235,27 +256,27 @@ def install_opencode_mcp(config_path: Path) -> list[str]:
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
         except Exception:
             cfg = {}
-        shutil.copy2(config_path, config_path.with_suffix(".json.engram-bak"))
+        shutil.copy2(config_path, config_path.with_suffix(".json.foldcrumbs-bak"))
     mcp = cfg.setdefault("mcp", {})
-    if "engram" in mcp:
+    if "foldcrumbs" in mcp:
         return []
-    mcp["engram"] = {"type": "local", "command": _mcp_command(), "enabled": True}
+    mcp["foldcrumbs"] = {"type": "local", "command": _mcp_command(), "enabled": True}
     config_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-    return ["mcp.engram"]
+    return ["mcp.foldcrumbs"]
 
 
 OPENCODE_PLUGIN = '''\
-// engram memory plugin for OpenCode — distills the session on idle/compaction.
-// Recall is prompt-driven via AGENTS.md (the agent calls the engram MCP tools).
+// foldcrumbs memory plugin for OpenCode — distills the session on idle/compaction.
+// Recall is prompt-driven via AGENTS.md (the agent calls the foldcrumbs MCP tools).
 import { spawn } from "node:child_process";
 
 function distill(kind) {
-  // Fire-and-forget; engram reads the transcript and writes durable memories.
-  try { spawn("engram", ["index"], { detached: true, stdio: "ignore" }).unref(); }
+  // Fire-and-forget; foldcrumbs reads the transcript and writes durable memories.
+  try { spawn("foldcrumbs", ["index"], { detached: true, stdio: "ignore" }).unref(); }
   catch (_) {}
 }
 
-export default function engramPlugin() {
+export default function foldcrumbsPlugin() {
   return {
     hooks: {
       "session.idle": async () => distill("idle"),
@@ -266,9 +287,9 @@ export default function engramPlugin() {
 '''
 
 AGENTS_MD_BLOCK = """\
-## Memory (engram)
+## Memory (foldcrumbs)
 
-This project has a persistent memory store. Use the `engram` MCP tools:
+This project has a persistent memory store. Use the `foldcrumbs` MCP tools:
 - At the start of a task, call `recall` with your task to load prior decisions,
   conventions and preferences — do not re-ask what is already recorded.
 - When a durable decision, rule, preference or lesson is established, call
@@ -279,17 +300,17 @@ This project has a persistent memory store. Use the `engram` MCP tools:
 def write_opencode_plugin(plugins_dir: Path) -> Path:
     d = Path(plugins_dir)
     d.mkdir(parents=True, exist_ok=True)
-    path = d / "engram.ts"
+    path = d / "foldcrumbs.ts"
     path.write_text(OPENCODE_PLUGIN, encoding="utf-8")
     return path
 
 
 def append_agents_md(agents_path: Path) -> Path | None:
-    """Append the engram instruction block to an AGENTS.md if not already there."""
+    """Append the foldcrumbs instruction block to an AGENTS.md if not already there."""
     path = Path(agents_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    if "Memory (engram)" in existing:
+    if "Memory (foldcrumbs)" in existing:
         return None
     sep = "" if not existing or existing.endswith("\n\n") else "\n\n"
     path.write_text(existing + sep + AGENTS_MD_BLOCK, encoding="utf-8")
@@ -316,14 +337,14 @@ def codex_mcp_snippet() -> str:
     cmd = _mcp_command()
     args = ", ".join(json.dumps(a) for a in cmd[1:])
     return (
-        "[mcp_servers.engram]\n"
+        "[mcp_servers.foldcrumbs]\n"
         f"command = {json.dumps(cmd[0])}\n"
         f"args = [{args}]\n"
     )
 
 
 def install_codex_mcp_toml(config_path: Path | None = None) -> str:
-    """Append [mcp_servers.engram] to ~/.codex/config.toml if not present.
+    """Append [mcp_servers.foldcrumbs] to ~/.codex/config.toml if not present.
 
     Appending a new table at EOF is safe for existing TOML; we never rewrite or
     reorder existing content. Returns a status string.
@@ -331,10 +352,10 @@ def install_codex_mcp_toml(config_path: Path | None = None) -> str:
     config_path = Path(config_path or (Path.home() / ".codex" / "config.toml"))
     config_path.parent.mkdir(parents=True, exist_ok=True)
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    if "[mcp_servers.engram]" in existing:
+    if "[mcp_servers.foldcrumbs]" in existing:
         return "already present"
     if existing:
-        shutil.copy2(config_path, config_path.with_suffix(".toml.engram-bak"))
+        shutil.copy2(config_path, config_path.with_suffix(".toml.foldcrumbs-bak"))
     sep = "" if not existing or existing.endswith("\n\n") else "\n\n" if existing.endswith("\n") else "\n\n"
     config_path.write_text(existing + sep + codex_mcp_snippet(), encoding="utf-8")
     return f"added to {config_path}"

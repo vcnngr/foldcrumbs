@@ -14,8 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from engram import config  # noqa: E402
-from engram.hooks._common import (  # noqa: E402
+from foldcrumbs import config  # noqa: E402
+from foldcrumbs.hooks._common import (  # noqa: E402
     read_hook_input,
     run,
     spawn_detached,
@@ -34,7 +34,7 @@ def main() -> int:
         return 0
     spawn_detached(
         [sys.executable or "python3", str(WORKER), str(transcript_path),
-         str(cwd), "engram-session-end"]
+         str(cwd), "foldcrumbs-session-end"]
     )
     return 0
 

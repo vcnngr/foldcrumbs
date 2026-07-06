@@ -6,7 +6,7 @@ just means the index is stale; ``heal_index`` rebuilds it. Pollution: a memory
 whose title/content is a structural tooling artifact (markdown table, code
 fence, status glyphs, the local-command caveat — distill's strict detector) is
 never durable knowledge and can be pruned. The strict detector deliberately
-excludes prose that merely mentions MEMORY.md so legitimate engram design notes
+excludes prose that merely mentions MEMORY.md so legitimate foldcrumbs design notes
 are never deleted. Superseded/deleted records keep their
 files but drop out of the index/recall; ``prune`` clears those too.
 """

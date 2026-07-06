@@ -110,7 +110,7 @@ class MemoryRecord:
     provenance: str = "explicit_statement"
     status: str = "active"
     tags: list[str] = field(default_factory=list)
-    source: str = "engram"
+    source: str = "foldcrumbs"
     superseded_by: str | None = None
     validation_count: int = 0
     contradiction_detected: bool = False

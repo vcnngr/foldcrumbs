@@ -4,7 +4,7 @@ Leads with the local LLM (config endpoint); degrades to a conservative keyword
 heuristic if the LLM yields nothing parseable, so a hook never silently
 no-ops. The idea of distilling a finished session into typed memories is
 inspired by memanto (MIT); the prompts, the OpenAI-compatible call, the write
-gate and the dedup step are engram's own.
+gate and the dedup step are foldcrumbs's own.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ def _is_artifact(text: str) -> bool:
 
 # Stricter subset for DELETION (auto-prune / prune): only structural artifacts
 # that are never legitimate durable prose. Excludes the MEMORY.md/untitled.md and
-# markdown-link clauses, which can appear in genuine memories (notably engram's
+# markdown-link clauses, which can appear in genuine memories (notably foldcrumbs's
 # own architecture notes) — those are fine to skip at capture time but must not
 # trigger deletion of an existing memory.
 _HARD_ARTIFACT_RE = re.compile(
@@ -133,7 +133,7 @@ def build_extraction_question(summary: str) -> str:
     )
 
 
-def distill(summary: str, source: str = "engram-distill") -> list[MemoryRecord]:
+def distill(summary: str, source: str = "foldcrumbs-distill") -> list[MemoryRecord]:
     """Return gated MemoryRecords distilled from a transcript summary.
 
     Secrets are scrubbed up front (before the LLM ever sees the text) and again
@@ -191,7 +191,7 @@ def persist(records: list[MemoryRecord], cwd: str | None = None) -> dict[str, in
 
 
 def distill_and_store(
-    summary: str, cwd: str | None = None, source: str = "engram-distill"
+    summary: str, cwd: str | None = None, source: str = "foldcrumbs-distill"
 ) -> dict[str, int]:
     return persist(distill(summary, source=source), cwd)
 
@@ -227,7 +227,7 @@ def make_handoff(summary: str) -> str | None:
     else:
         # Fallback: last slice of the conversation, lightly framed.
         body = "_(LLM unavailable — raw tail)_\n\n" + summary[-1500:]
-    stamp = "<!-- engram handoff -->\n# Resume point\n\n"
+    stamp = "<!-- foldcrumbs handoff -->\n# Resume point\n\n"
     return redact.scrub(stamp + body)
 
 
@@ -321,7 +321,7 @@ def _coerce_memory(item: Any) -> dict[str, Any] | None:
     }
 
 
-# --- heuristic fallback (keyword classifier, engram) ---------------------- #
+# --- heuristic fallback (keyword classifier, foldcrumbs) ---------------------- #
 
 _ROLE_PREFIX_RE = re.compile(
     r"^\s*(?:user|assistant|human|claude|system)\s*:\s*", re.IGNORECASE

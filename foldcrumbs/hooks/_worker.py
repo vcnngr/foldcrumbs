@@ -17,13 +17,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from engram import config, distill, store  # noqa: E402
-from engram.hooks._common import read_transcript_text  # noqa: E402
+from foldcrumbs import config, distill, store  # noqa: E402
+from foldcrumbs.hooks._common import read_transcript_text  # noqa: E402
 
 
 def main() -> int:
-    # Recursion guard: never distill inside an engram-spawned `claude -p`.
-    if os.environ.get("ENGRAM_DISABLE"):
+    # Recursion guard: never distill inside a foldcrumbs-spawned `claude -p`.
+    if os.environ.get("FOLDCRUMBS_DISABLE") or os.environ.get("ENGRAM_DISABLE"):
         return 0
     # Per-machine opt-out: on a shared store, only the designated indexer writes.
     if not config.distill_enabled():
@@ -32,7 +32,7 @@ def main() -> int:
         return 0
     transcript_path = sys.argv[1]
     cwd = sys.argv[2] or None
-    source = sys.argv[3] if len(sys.argv) > 3 else "engram-distill"
+    source = sys.argv[3] if len(sys.argv) > 3 else "foldcrumbs-distill"
 
     summary = read_transcript_text(transcript_path, max_messages=80, max_chars=8000)
     if not summary:

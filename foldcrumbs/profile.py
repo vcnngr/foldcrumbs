@@ -57,7 +57,7 @@ def format_context_block(
 
     safe = html.escape(heading, quote=True) if heading else ""
     lines = [
-        "<engram-recall>",
+        "<foldcrumbs-recall>",
         f"Relevant memory{f' for {safe}' if safe else ''} "
         "(carried over from previous sessions — honour it, do not re-ask):",
     ]
@@ -71,5 +71,5 @@ def format_context_block(
             if m.compute_confidence() < 0.6:
                 text += " (tentative)"
             lines.append(f"  - {text}")
-    lines.append("</engram-recall>")
+    lines.append("</foldcrumbs-recall>")
     return "\n".join(lines)

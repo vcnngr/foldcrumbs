@@ -1,4 +1,4 @@
-"""engram CLI (stdlib argparse).
+"""foldcrumbs CLI (stdlib argparse).
 
 Commands:
   remember   store a memory
@@ -7,7 +7,8 @@ Commands:
   distill    distill a transcript/text file into memories (uses the LLM)
   status     show config + store stats
   install    merge hooks into Claude Code settings.json
-  uninstall  remove engram hooks
+  migrate    move a legacy engram install to foldcrumbs
+  uninstall  remove foldcrumbs hooks
 """
 
 from __future__ import annotations
@@ -94,7 +95,7 @@ def _cmd_distill(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(_: argparse.Namespace) -> int:
-    from engram import audit
+    from foldcrumbs import audit
     a = audit.audit()
     print(f"memories   : {a['active']} active / {a['total']} total")
     print(f"dead links : {len(a['dead_links'])}" + (f"  {a['dead_links']}" if a['dead_links'] else ""))
@@ -102,14 +103,14 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
     print(f"pollution  : {len(a['pollution'])}" + (f"  {a['pollution']}" if a['pollution'] else ""))
     print(f"low-trust  : {len(a['stale'])}" + (f"  {a['stale']}" if a['stale'] else ""))
     if a["dead_links"] or a["orphans"]:
-        print("hint: run `engram index` to rebuild, or `engram doctor` after a distill.")
+        print("hint: run `foldcrumbs index` to rebuild, or `foldcrumbs doctor` after a distill.")
     if a["pollution"]:
-        print("hint: run `engram prune` (dry-run) then `engram prune --apply`.")
+        print("hint: run `foldcrumbs prune` (dry-run) then `foldcrumbs prune --apply`.")
     return 0
 
 
 def _cmd_prune(args: argparse.Namespace) -> int:
-    from engram import audit
+    from foldcrumbs import audit
     res = audit.prune(apply=args.apply, include_stale=args.include_stale)
     if not res["candidates"]:
         print("nothing to prune.")
@@ -142,6 +143,58 @@ def _cmd_status(_: argparse.Namespace) -> int:
     print(f"LLM reachable: {llm.available()}")
     print(f"distill here : {'on' if config.distill_enabled() else 'off (read-only consumer)'}")
     print(f"context budget: {config.CONTEXT_BUDGET} @ {int(config.CONTEXT_PCT*100)}%")
+    return 0
+
+
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    """Migrate a legacy engram install to foldcrumbs (non-destructive).
+
+    1. State dir: copy ~/.engram -> ~/.foldcrumbs (backend choice, CLI bins,
+       checkpoint flags) when the new dir doesn't exist yet. The source is never
+       deleted, so a machine can be rolled back.
+    2. Memory (opt-in): with --from <old-project-dir>, copy that project's memory
+       store into the *current* project's memory dir (deterministic slug). Never
+       overwrites a non-empty target unless --force; never deletes the source.
+
+    Recall still needs no LLM; this only moves files. Back-compat in config.py
+    means foldcrumbs already reads a legacy ~/.engram, so this is about making the
+    move explicit, not about restoring function.
+    """
+    import shutil
+
+    old_state = Path.home() / ".engram"
+    new_state = Path.home() / ".foldcrumbs"
+    if new_state.exists():
+        print(f"state : {new_state} already exists — skipped")
+    elif old_state.exists():
+        shutil.copytree(old_state, new_state)
+        print(f"state : copied {old_state} -> {new_state}")
+    else:
+        print("state : no ~/.engram to migrate")
+
+    if args.from_dir:
+        src = config.memory_dir(args.from_dir)
+        dst = config.memory_dir()
+        if not src.exists():
+            print(f"memory: source {src} not found — nothing to copy")
+        elif src.resolve() == dst.resolve():
+            print(f"memory: source and target are the same ({dst}) — skipped")
+        elif dst.exists() and any(dst.iterdir()) and not args.force:
+            print(f"memory: target {dst} not empty — pass --force to merge")
+            return 1
+        else:
+            dst.mkdir(parents=True, exist_ok=True)
+            for item in src.iterdir():
+                target = dst / item.name
+                if item.is_dir():
+                    shutil.copytree(item, target, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, target)
+            print(f"memory: copied {src} -> {dst}")
+    else:
+        print(f"memory: (skipped) pass --from <old-project-dir> to copy its store "
+              f"into {config.memory_dir()}")
+    print("done. reinstall hooks with `foldcrumbs install` if not already.")
     return 0
 
 
@@ -182,7 +235,7 @@ def _configure_backend_at_install(args: argparse.Namespace) -> None:
     if not choice:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             print("LLM backend: left as-is "
-                  f"({config.llm_backend()}); set later with `engram backend <name>`")
+                  f"({config.llm_backend()}); set later with `foldcrumbs backend <name>`")
             return
         choice = install.prompt_backend()
     if not choice:
@@ -216,7 +269,7 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="engram", description=__doc__)
+    p = argparse.ArgumentParser(prog="foldcrumbs", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("remember", help="store a memory")
@@ -252,6 +305,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="show config + stats").set_defaults(func=_cmd_status)
 
+    mg = sub.add_parser("migrate", help="migrate a legacy engram install to foldcrumbs")
+    mg.add_argument("--from", dest="from_dir", metavar="OLD_PROJECT_DIR",
+                    help="also copy this project's memory store into the current one")
+    mg.add_argument("--force", action="store_true",
+                    help="merge into a non-empty target memory dir")
+    mg.set_defaults(func=_cmd_migrate)
+
     sub.add_parser("doctor", help="audit store: dead links, orphans, pollution"
                    ).set_defaults(func=_cmd_doctor)
 
@@ -261,7 +321,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also prune low-trust memories")
     pr.set_defaults(func=_cmd_prune)
 
-    ins = sub.add_parser("install", help="wire engram into a coding agent")
+    ins = sub.add_parser("install", help="wire foldcrumbs into a coding agent")
     ins.add_argument("--agent", choices=["claude", "codex", "opencode"], default="claude")
     ins.add_argument("--local", action="store_true", help="project scope instead of global")
     ins.add_argument("--settings", help="explicit settings.json path")
@@ -280,7 +340,7 @@ def build_parser() -> argparse.ArgumentParser:
     bk.add_argument("--model", help="model id for the openai backend")
     bk.set_defaults(func=_cmd_backend)
 
-    uns = sub.add_parser("uninstall", help="remove engram hooks")
+    uns = sub.add_parser("uninstall", help="remove foldcrumbs hooks")
     uns.add_argument("--agent", choices=["claude", "codex", "opencode"], default="claude")
     uns.add_argument("--local", action="store_true")
     uns.add_argument("--settings")
