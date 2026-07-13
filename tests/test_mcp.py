@@ -15,7 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from foldcrumbs import mcp_server  # noqa: E402
+from foldcrumbs import install, mcp_server  # noqa: E402
 
 
 class TestHandler(unittest.TestCase):
@@ -91,6 +91,29 @@ class TestSubprocessRoundTrip(unittest.TestCase):
                          {"remember", "recall", "answer"})
         self.assertFalse(by_id[3]["result"]["isError"])
         self.assertEqual(len(responses), 3)  # no response for the notification
+
+    def test_staged_runtime_works_outside_checkout(self):
+        with tempfile.TemporaryDirectory(prefix="foldcrumbs_mcp_runtime_") as d:
+            runtime = Path(d) / "runtime"
+            memory = Path(d) / "memory"
+            cmd = install._mcp_command(runtime)
+            proc = subprocess.run(
+                cmd,
+                input=json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18"},
+                }) + "\n",
+                capture_output=True,
+                text=True,
+                cwd="/",
+                env={**os.environ, "ENGRAM_DIR": str(memory)},
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            response = json.loads(proc.stdout)
+            self.assertEqual(response["result"]["serverInfo"]["name"], "foldcrumbs")
 
 
 if __name__ == "__main__":

@@ -65,6 +65,9 @@ foldcrumbs install --agent opencode     # OpenCode: opencode.json MCP + plugin +
 ```
 The installer is merge-safe and idempotent: it appends its own hook groups and leaves existing
 hooks (GSD, graphify, …) untouched. A `.foldcrumbs-bak` backup is written first.
+Hook and MCP commands use a self-contained runtime snapshot under `~/.foldcrumbs/runtime`, so
+editable checkouts can live in macOS-protected folders such as `~/Documents` without breaking
+agent subprocesses.
 
 On a TTY, install asks **how to distill** (recall never uses an LLM):
 

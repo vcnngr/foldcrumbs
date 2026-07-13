@@ -459,18 +459,79 @@ class TestHandoff(TmpStore):
 
 class TestInstaller(unittest.TestCase):
     def test_merge_preserves_and_is_idempotent(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump({"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "node existing.js"}]}]}}, f)
-            path = Path(f.name)
-        changes = install.install(path)
-        self.assertTrue(changes)
-        s = json.loads(path.read_text())
-        cmds = [h["command"] for g in s["hooks"]["SessionStart"] for h in g["hooks"]]
-        self.assertTrue(any("existing.js" in c for c in cmds))  # preserved
-        self.assertTrue(any("session_start.py" in c for c in cmds))  # added
-        self.assertEqual(install.install(path), [])  # idempotent
-        path.unlink()
+        with tempfile.TemporaryDirectory(prefix="ccmem_install_") as d:
+            path = Path(d) / "settings.json"
+            runtime = Path(d) / "runtime"
+            path.write_text(json.dumps({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": "node existing.js"}]}]}}))
+            changes = install.install_hooks(path, runtime_root=runtime)
+            self.assertTrue(changes)
+            s = json.loads(path.read_text())
+            cmds = [h["command"] for g in s["hooks"]["SessionStart"] for h in g["hooks"]]
+            self.assertTrue(any("existing.js" in c for c in cmds))  # preserved
+            self.assertTrue(any("session_start.py" in c for c in cmds))  # added
+            self.assertTrue((runtime / "foldcrumbs" / "hooks" / "session_start.py").exists())
+            self.assertEqual(
+                install.install_hooks(path, runtime_root=runtime), []
+            )  # idempotent
+
+    def test_install_refreshes_hook_from_protected_checkout(self):
+        with tempfile.TemporaryDirectory(prefix="ccmem_install_") as d:
+            path = Path(d) / "hooks.json"
+            runtime = Path(d) / "runtime"
+            source_hook = (
+                "/Users/me/Documents/claude/foldcrumbs/"
+                "foldcrumbs/hooks/session_start.py"
+            )
+            path.write_text(json.dumps({"hooks": {"SessionStart": [{
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": f'python3 "{source_hook}"'}],
+            }]}}))
+
+            changes = install.install_hooks(
+                path, agent="codex", runtime_root=runtime
+            )
+
+            self.assertIn("SessionStart -> refreshed session_start.py", changes)
+            settings = json.loads(path.read_text())
+            commands = [
+                hook["command"]
+                for groups in settings["hooks"].values()
+                for group in groups
+                for hook in group["hooks"]
+            ]
+            self.assertFalse(any("/Documents/" in command for command in commands))
+            self.assertTrue(any(str(runtime) in command for command in commands))
+            self.assertTrue((runtime / "foldcrumbs" / "config.py").exists())
+
+    def test_codex_mcp_refreshes_editable_install_and_preserves_options(self):
+        with tempfile.TemporaryDirectory(prefix="ccmem_install_") as d:
+            config_path = Path(d) / "config.toml"
+            runtime = Path(d) / "runtime"
+            config_path.write_text(
+                "model = \"example\"\n\n"
+                "[mcp_servers.foldcrumbs]\n"
+                "command = \"python3\"\n"
+                "args = [\"-m\", \"foldcrumbs.mcp_server\"]\n"
+                "enabled = true\n\n"
+                "[features]\n"
+                "hooks = true\n"
+            )
+
+            status = install.install_codex_mcp_toml(config_path, runtime)
+
+            updated = config_path.read_text()
+            launcher = runtime / "foldcrumbs_mcp.py"
+            self.assertIn("updated", status)
+            self.assertIn(f'args = ["{launcher}"]', updated)
+            self.assertNotIn('"-m", "foldcrumbs.mcp_server"', updated)
+            self.assertIn("enabled = true", updated)
+            self.assertIn("[features]", updated)
+            self.assertTrue(launcher.exists())
+            self.assertEqual(
+                install.install_codex_mcp_toml(config_path, runtime),
+                "already present",
+            )
 
 
 class TestHooksIsolation(TmpStore):

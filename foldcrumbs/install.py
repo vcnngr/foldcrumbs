@@ -8,20 +8,21 @@ are already registered (idempotent). Settings files are backed up first.
 
 OpenCode has no SessionStart-style hook that can inject context, so there we
 install an MCP server entry + a plugin + an AGENTS.md instruction (prompt-driven
-recall/remember). Codex also gets an MCP entry (printed as a TOML snippet, since
-we don't hand-edit TOML).
+recall/remember). Codex also gets an MCP entry merged into its TOML config.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
 
 from . import config
 
-HOOKS_DIR = Path(__file__).resolve().parent / "hooks"
+PACKAGE_DIR = Path(__file__).resolve().parent
+HOOKS_DIR = PACKAGE_DIR / "hooks"
 _MARKER = "foldcrumbs/hooks/"  # any command containing this path is ours
 _LEGACY_MARKERS = ("engram/hooks/",)  # pre-rename installs to clean up on migrate
 
@@ -43,13 +44,48 @@ _CODEX_HOOKS = {
 _AGENT_HOOKS = {"claude": _CLAUDE_HOOKS, "codex": _CODEX_HOOKS}
 
 
-def _command_for(script: str) -> str:
+def _stage_runtime(runtime_root: Path | None = None) -> tuple[Path, Path]:
+    """Copy a self-contained runtime outside the source checkout.
+
+    Codex lifecycle hooks run in a different macOS privacy context from the
+    terminal that launched Codex.  A hook command pointing into an editable
+    checkout under ~/Documents can therefore fail with ``Operation not
+    permitted`` even though the same interpreter can read it from a terminal.
+    Keep the registered command machine-local and independent of checkout
+    location by snapshotting the package under ~/.foldcrumbs/runtime.
+    """
+    root = Path(runtime_root or (config.STATE_DIR / "runtime")).expanduser()
+    package_dir = root / "foldcrumbs"
+    root.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        PACKAGE_DIR,
+        package_dir,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    mcp_launcher = root / "foldcrumbs_mcp.py"
+    mcp_launcher.write_text(
+        "from foldcrumbs.mcp_server import main\n\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    return package_dir, mcp_launcher
+
+
+def _stage_hook_runtime(runtime_root: Path | None = None) -> Path:
+    package_dir, _ = _stage_runtime(runtime_root)
+    return package_dir / "hooks"
+
+
+def _command_for(script: str, hooks_dir: Path = HOOKS_DIR) -> str:
     py = sys.executable or "python3"
-    return f'"{py}" "{HOOKS_DIR / script}"'
+    return f'"{py}" "{hooks_dir / script}"'
 
 
-def _mcp_command() -> list[str]:
-    return [sys.executable or "python3", "-m", "foldcrumbs.mcp_server"]
+def _mcp_command(runtime_root: Path | None = None) -> list[str]:
+    _, launcher = _stage_runtime(runtime_root)
+    return [sys.executable or "python3", str(launcher)]
 
 
 # --------------------------------------------------------------------------- #
@@ -172,11 +208,33 @@ def default_settings_path(agent: str = "claude", global_scope: bool = True) -> P
     return Path.cwd() / ".claude" / "settings.json"
 
 
-def install_hooks(settings_path: Path, agent: str = "claude", timeout: int = 15) -> list[str]:
+def _remove_script_hooks(groups: list, script: str) -> None:
+    """Remove one stale foldcrumbs script while preserving foreign hooks."""
+    needle = f"{_MARKER}{script}"
+    kept_groups = []
+    for group in groups:
+        kept_hooks = [
+            hook for hook in group.get("hooks", [])
+            if needle not in hook.get("command", "")
+        ]
+        if kept_hooks:
+            kept_group = dict(group)
+            kept_group["hooks"] = kept_hooks
+            kept_groups.append(kept_group)
+    groups[:] = kept_groups
+
+
+def install_hooks(
+    settings_path: Path,
+    agent: str = "claude",
+    timeout: int = 15,
+    runtime_root: Path | None = None,
+) -> list[str]:
     """Merge foldcrumbs hooks into a JSON settings/hooks file. Returns changes."""
     hooks_map = _AGENT_HOOKS[agent]
     settings_path = Path(settings_path)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_hooks_dir = _stage_hook_runtime(runtime_root)
 
     settings: dict = {}
     if settings_path.exists():
@@ -195,14 +253,23 @@ def install_hooks(settings_path: Path, agent: str = "claude", timeout: int = 15)
         if any(_has_legacy(g) for g in groups):
             groups[:] = [g for g in groups if not _has_legacy(g)]
             changes.append(f"{event} -> removed legacy engram hook")
-        if _already_present(groups, script):
+        command = _command_for(script, runtime_hooks_dir)
+        if any(
+            hook.get("command") == command
+            for group in groups
+            for hook in group.get("hooks", [])
+        ):
             continue
-        entry = {"type": "command", "command": _command_for(script), "timeout": timeout}
+        change = f"{event} -> {script}"
+        if _already_present(groups, script):
+            _remove_script_hooks(groups, script)
+            change = f"{event} -> refreshed {script}"
+        entry = {"type": "command", "command": command, "timeout": timeout}
         group: dict = {"hooks": [entry]}
         if matcher:
             group["matcher"] = matcher
         groups.append(group)
-        changes.append(f"{event} -> {script}")
+        changes.append(change)
 
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     return changes
@@ -329,12 +396,12 @@ def opencode_paths(global_scope: bool = True) -> dict[str, Path]:
 
 
 # --------------------------------------------------------------------------- #
-# Config snippets to print (TOML we don't hand-edit)
+# Codex MCP config
 # --------------------------------------------------------------------------- #
 
 
-def codex_mcp_snippet() -> str:
-    cmd = _mcp_command()
+def codex_mcp_snippet(runtime_root: Path | None = None) -> str:
+    cmd = _mcp_command(runtime_root)
     args = ", ".join(json.dumps(a) for a in cmd[1:])
     return (
         "[mcp_servers.foldcrumbs]\n"
@@ -343,19 +410,54 @@ def codex_mcp_snippet() -> str:
     )
 
 
-def install_codex_mcp_toml(config_path: Path | None = None) -> str:
-    """Append [mcp_servers.foldcrumbs] to ~/.codex/config.toml if not present.
+def _refresh_codex_mcp_table(existing: str, snippet: str) -> str:
+    """Refresh generated command/args while preserving other table settings."""
+    header = "[mcp_servers.foldcrumbs]"
+    match = re.search(r"(?m)^\[mcp_servers\.foldcrumbs\]\s*$", existing)
+    if not match:
+        sep = "" if not existing else "\n" if existing.endswith("\n") else "\n\n"
+        return existing + sep + snippet
+    start = match.start()
 
-    Appending a new table at EOF is safe for existing TOML; we never rewrite or
-    reorder existing content. Returns a status string.
+    next_table = re.search(r"(?m)^\[", existing[start + len(header):])
+    end = (
+        start + len(header) + next_table.start()
+        if next_table
+        else len(existing)
+    )
+    section = existing[start:end]
+    desired = dict(
+        line.split(" = ", 1)
+        for line in snippet.splitlines()[1:]
+        if " = " in line
+    )
+    for key in ("command", "args"):
+        line = f"{key} = {desired[key]}"
+        pattern = rf"(?m)^{key}\s*=.*$"
+        if re.search(pattern, section):
+            section = re.sub(pattern, line, section, count=1)
+        else:
+            section = section.replace(header, f"{header}\n{line}", 1)
+    return existing[:start] + section + existing[end:]
+
+
+def install_codex_mcp_toml(
+    config_path: Path | None = None,
+    runtime_root: Path | None = None,
+) -> str:
+    """Add or refresh [mcp_servers.foldcrumbs] in ~/.codex/config.toml.
+
+    Existing optional table settings are preserved. Returns a status string.
     """
     config_path = Path(config_path or (Path.home() / ".codex" / "config.toml"))
     config_path.parent.mkdir(parents=True, exist_ok=True)
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    if "[mcp_servers.foldcrumbs]" in existing:
+    snippet = codex_mcp_snippet(runtime_root)
+    updated = _refresh_codex_mcp_table(existing, snippet)
+    if updated == existing:
         return "already present"
     if existing:
         shutil.copy2(config_path, config_path.with_suffix(".toml.foldcrumbs-bak"))
-    sep = "" if not existing or existing.endswith("\n\n") else "\n\n" if existing.endswith("\n") else "\n\n"
-    config_path.write_text(existing + sep + codex_mcp_snippet(), encoding="utf-8")
-    return f"added to {config_path}"
+    config_path.write_text(updated, encoding="utf-8")
+    action = "updated" if "[mcp_servers.foldcrumbs]" in existing else "added"
+    return f"{action} {config_path}"
