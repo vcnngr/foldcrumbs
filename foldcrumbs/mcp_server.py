@@ -22,7 +22,7 @@ import json
 import sys
 from typing import Any
 
-from . import config, llm, store
+from . import llm, store
 from .profile import format_context_block
 from .schema import VALID_TYPES, MemoryRecord
 
