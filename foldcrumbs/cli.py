@@ -126,6 +126,45 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_import(args: argparse.Namespace) -> int:
+    """Merge memories from another store (dedup-aware, dry-run by default).
+
+    --from accepts either a memory directory itself or a project working
+    directory (resolved through the same convention as this instance). Covers
+    the structural multi-instance gap: per-CLAUDE_CONFIG_DIR stores mean one
+    instance can know everything while another starts empty.
+    """
+    src = Path(args.from_dir).expanduser()
+    # A memory dir contains record files directly; anything else is treated as
+    # a project dir and resolved to its memory dir.
+    if not (src.is_dir() and any(src.glob("*.md"))):
+        src = config.memory_dir(args.from_dir)
+    if not src.is_dir():
+        print(f"source {src} not found")
+        return 1
+    if src.resolve() == config.memory_dir().resolve():
+        print(f"source and target are the same store ({src}) — nothing to do")
+        return 1
+    plan = store.import_store(src, apply=args.apply)
+    total = sum(len(v) for v in plan.values())
+    if total == 0:
+        print(f"no memories found in {src}")
+        return 0
+    verb = "" if args.apply else "would be "
+    for action in ("created", "validated", "skipped"):
+        for name in plan[action]:
+            print(f"  [{action}] {name}")
+    print(f"\nfrom {src}:")
+    print(f"  {len(plan['created'])} {verb}created, "
+          f"{len(plan['validated'])} {verb}validated (near-duplicate), "
+          f"{len(plan['skipped'])} skipped")
+    if not args.apply:
+        print("re-run with --apply to import.")
+    else:
+        print("index rebuilt.")
+    return 0
+
+
 def _cmd_forget(args: argparse.Namespace) -> int:
     """Forget a memory by filename; with a query, list candidates instead.
 
@@ -361,6 +400,14 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--force", action="store_true",
                     help="merge into a non-empty target memory dir")
     mg.set_defaults(func=_cmd_migrate)
+
+    im = sub.add_parser("import",
+                        help="merge memories from another store (dry-run by default)")
+    im.add_argument("--from", dest="from_dir", required=True, metavar="DIR",
+                    help="source memory dir, or a project dir to resolve")
+    im.add_argument("--apply", action="store_true",
+                    help="actually import (default: dry-run)")
+    im.set_defaults(func=_cmd_import)
 
     sub.add_parser("doctor", help="audit store: dead links, orphans, pollution"
                    ).set_defaults(func=_cmd_doctor)

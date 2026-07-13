@@ -128,10 +128,16 @@ python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
+python3 -m foldcrumbs import --from ~/.claude/projects/<slug>/memory --apply
 ```
 
 `forget` is dry-run by default (like `prune`); soft-deleted and superseded files
 stay on disk out of the index until `foldcrumbs prune --apply` clears them.
+
+`import` merges another store's memories into the current one, record by record
+(dry-run by default). Unlike `migrate --from` (raw file copy) it is dedup-aware:
+near-duplicates validate the existing memory instead of doubling it. Useful when
+per-`CLAUDE_CONFIG_DIR` instances leave one store rich and another empty.
 
 ## Surviving `/clear` and `/compact`
 

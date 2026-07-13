@@ -513,6 +513,58 @@ class TestAudit(TmpStore):
         self.assertTrue((Path(self.dir) / "decision_arch.md").exists())
 
 
+class TestImportStore(TmpStore):
+    def _make_src(self) -> Path:
+        src = Path(tempfile.mkdtemp(prefix="ccmem_src_"))
+        for rec in (
+            MemoryRecord(title="Uses Postgres", content="We use Postgres.",
+                         type="decision"),
+            MemoryRecord(title="Use stdlib", content="Hooks use only stdlib here.",
+                         type="decision"),
+        ):
+            (src / rec.filename()).write_text(rec.to_markdown(), encoding="utf-8")
+        # Noise that must be skipped: index, handoffs, non-frontmatter, non-active.
+        (src / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+        (src / "HANDOFF.md").write_text("# resume\n", encoding="utf-8")
+        (src / "HANDOFF.engram-2026-07-06.md").write_text("# old\n", encoding="utf-8")
+        (src / "notes.md").write_text("just a note, no frontmatter\n", encoding="utf-8")
+        gone = MemoryRecord(title="Old way", content="We used MySQL.", type="decision")
+        gone.status = "superseded"
+        (src / gone.filename()).write_text(gone.to_markdown(), encoding="utf-8")
+        return src
+
+    def test_dry_run_plans_without_writing(self):
+        src = self._make_src()
+        # Target already holds a near-duplicate of one source memory.
+        store.upsert(MemoryRecord(title="Use stdlib only",
+                                  content="Hooks use only stdlib here now.",
+                                  type="decision"))
+        plan = store.import_store(src)
+        self.assertEqual(plan["created"], ["decision_uses_postgres.md"])
+        self.assertEqual(plan["validated"], ["decision_use_stdlib.md"])
+        self.assertEqual(sorted(plan["skipped"]),
+                         ["decision_old_way.md", "notes.md"])
+        # Dry-run: nothing was written.
+        self.assertEqual(len(store.load_all()), 1)
+
+    def test_apply_merges_and_rebuilds_index(self):
+        src = self._make_src()
+        plan = store.import_store(src, apply=True)
+        self.assertEqual(len(plan["created"]), 2)
+        titles = {m.title for m in store.load_all()}
+        self.assertEqual(titles, {"Uses Postgres", "Use stdlib"})
+        idx = (Path(self.dir) / "MEMORY.md").read_text()
+        self.assertIn("Uses Postgres", idx)
+
+    def test_apply_is_idempotent(self):
+        src = self._make_src()
+        store.import_store(src, apply=True)
+        plan = store.import_store(src, apply=True)
+        self.assertEqual(plan["created"], [])
+        self.assertEqual(len(plan["validated"]), 2)
+        self.assertEqual(len(store.load_all()), 2)
+
+
 class TestLifecycle(TmpStore):
     def _make(self, title="Old fact", content="We deploy on Fridays."):
         rec = MemoryRecord(title=title, content=content, type="fact")
