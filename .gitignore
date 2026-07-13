@@ -9,3 +9,4 @@ dist/
 .mypy_cache/
 .ruff_cache/
 reddit-launch-drafts.md
+graphify-out/

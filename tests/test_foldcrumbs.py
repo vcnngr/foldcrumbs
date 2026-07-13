@@ -409,7 +409,6 @@ class TestAudit(TmpStore):
         self.assertFalse((Path(self.dir) / "error_tbl.md").exists())
 
     def test_auto_prune_on_persist(self):
-        from foldcrumbs import audit
         # An artifact memory among real ones is auto-pruned by persist().
         recs = [
             MemoryRecord(title="Real", content="We chose Postgres.", type="decision"),

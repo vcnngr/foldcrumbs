@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from . import config, llm, redact, store
-from .schema import VALID_TYPES, MemoryRecord, clean_line
+from .schema import VALID_TYPES, MemoryRecord
 
 _MAX_SUMMARY_CHARS = 6000
 
