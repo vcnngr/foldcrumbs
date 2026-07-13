@@ -513,6 +513,55 @@ class TestAudit(TmpStore):
         self.assertTrue((Path(self.dir) / "decision_arch.md").exists())
 
 
+class TestLifecycle(TmpStore):
+    def _make(self, title="Old fact", content="We deploy on Fridays."):
+        rec = MemoryRecord(title=title, content=content, type="fact")
+        store.write_memory(rec)
+        return rec.filename()
+
+    def test_forget_soft_keeps_file_drops_from_index_and_recall(self):
+        name = self._make()
+        store.rebuild_index()
+        self.assertEqual(store.forget(name), "deleted")
+        self.assertTrue((Path(self.dir) / name).exists())
+        self.assertEqual(store.get(name).status, "deleted")
+        self.assertNotIn(name, (Path(self.dir) / "MEMORY.md").read_text())
+        self.assertEqual(store.search("deploy fridays"), [])
+
+    def test_forget_hard_removes_file(self):
+        name = self._make()
+        self.assertEqual(store.forget(name, hard=True), "removed")
+        self.assertFalse((Path(self.dir) / name).exists())
+
+    def test_forget_unknown_returns_none(self):
+        self.assertIsNone(store.forget("fact_nope.md"))
+
+    def test_supersede_marks_old_and_links_new(self):
+        old = self._make("Launch is GitHub only", "PyPI publishing is deferred.")
+        new = self._make("Published to PyPI", "foldcrumbs is on PyPI now.")
+        self.assertTrue(store.supersede(old, new))
+        old_rec, new_rec = store.get(old), store.get(new)
+        self.assertEqual(old_rec.status, "superseded")
+        self.assertEqual(old_rec.superseded_by, new_rec.id)
+        self.assertEqual(old_rec.compute_confidence(), 0.0)
+        idx = (Path(self.dir) / "MEMORY.md").read_text()
+        self.assertNotIn(old, idx)
+        self.assertIn(new, idx)
+
+    def test_supersede_unknown_or_self_fails(self):
+        name = self._make()
+        self.assertFalse(store.supersede(name, "fact_nope.md"))
+        self.assertFalse(store.supersede(name, name))
+
+    def test_forgotten_memory_is_prunable(self):
+        from foldcrumbs import audit
+        name = self._make()
+        store.forget(name)
+        res = audit.prune(apply=True)
+        self.assertIn(name, res["removed"])
+        self.assertFalse((Path(self.dir) / name).exists())
+
+
 class TestSearch(TmpStore):
     def test_search_ranks_relevant(self):
         store.upsert(MemoryRecord(title="Recall via grep",
@@ -522,6 +571,34 @@ class TestSearch(TmpStore):
         hits = store.search("vector db", limit=5)
         self.assertTrue(hits)
         self.assertEqual(hits[0].title, "Recall via grep")
+
+    def test_search_unicode_words(self):
+        # Accented words must survive tokenization ([a-z0-9]+ would split
+        # "città" into "citt" and lose the word-overlap match).
+        store.upsert(MemoryRecord(title="Config della città",
+                                  content="La città usa il fuso orario di Roma.",
+                                  type="fact"))
+        store.upsert(MemoryRecord(title="Atomic writes",
+                                  content="Use os.replace.", type="instruction"))
+        hits = store.search("fuso orario città", limit=5)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].title, "Config della città")
+
+    def test_search_type_filter(self):
+        store.upsert(MemoryRecord(title="Grep decision",
+                                  content="Recall uses grep.", type="decision"))
+        store.upsert(MemoryRecord(title="Grep fact",
+                                  content="Recall uses grep too.", type="fact"))
+        hits = store.search("grep", limit=5, types=["fact"])
+        self.assertEqual([m.title for m in hits], ["Grep fact"])
+
+    def test_search_tag_filter(self):
+        store.upsert(MemoryRecord(title="Tagged", content="Recall uses grep.",
+                                  type="decision", tags=["arch"]))
+        store.upsert(MemoryRecord(title="Untagged", content="Recall uses grep here.",
+                                  type="decision"))
+        hits = store.search("grep", limit=5, tags=["ARCH"])
+        self.assertEqual([m.title for m in hits], ["Tagged"])
 
 
 class TestHandoff(TmpStore):
