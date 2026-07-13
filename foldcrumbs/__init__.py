@@ -6,4 +6,4 @@ memory folder, and a local OpenAI-compatible LLM is used only for async
 distillation. Pure stdlib, so hook scripts never fail on a missing import.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
