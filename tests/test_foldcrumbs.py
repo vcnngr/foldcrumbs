@@ -294,6 +294,90 @@ class TestBackendConfig(unittest.TestCase):
         self.assertIsNone(install.prompt_backend(in_fn=_eof, out_fn=lambda *_: None))
 
 
+class TestAutoSupersede(TmpStore):
+    """The contradiction pass: a new memory can obsolete an old same-subject one."""
+
+    def _old_pypi_decision(self) -> MemoryRecord:
+        rec = MemoryRecord(
+            title="Launch is GitHub only",
+            content="PyPI publishing is deferred; the launch is GitHub-only for now.",
+            type="decision")
+        store.write_memory(rec)
+        return rec
+
+    def _new_pypi_fact(self) -> MemoryRecord:
+        return MemoryRecord(
+            title="Published to PyPI",
+            content="foldcrumbs is published on PyPI, installable via pip install foldcrumbs.",
+            type="fact")
+
+    def test_conflict_candidates_same_subject_cross_type(self):
+        self._old_pypi_decision()
+        store.write_memory(MemoryRecord(title="Postgres storage",
+                                        content="We use Postgres for storage.",
+                                        type="decision"))
+        names = [m.title for m in store.find_conflict_candidates(self._new_pypi_fact())]
+        self.assertEqual(names, ["Launch is GitHub only"])
+
+    def test_llm_yes_supersedes_old(self):
+        old = self._old_pypi_decision()
+        from unittest.mock import patch
+        with patch.object(distill.llm, "chat", return_value='{"supersedes": true}'):
+            res = distill.persist([self._new_pypi_fact()])
+        self.assertEqual(res["superseded"], 1)
+        reloaded = next(m for m in store.load_all() if m.id == old.id)
+        self.assertEqual(reloaded.status, "superseded")
+        self.assertEqual(reloaded.compute_confidence(), 0.0)
+        idx = (Path(self.dir) / "MEMORY.md").read_text()
+        self.assertNotIn("Launch is GitHub only", idx)
+        self.assertIn("Published to PyPI", idx)
+
+    def test_llm_no_keeps_old(self):
+        old = self._old_pypi_decision()
+        from unittest.mock import patch
+        with patch.object(distill.llm, "chat", return_value='{"supersedes": false}'):
+            res = distill.persist([self._new_pypi_fact()])
+        self.assertEqual(res["superseded"], 0)
+        reloaded = next(m for m in store.load_all() if m.id == old.id)
+        self.assertEqual(reloaded.status, "active")
+
+    def test_no_llm_fails_soft(self):
+        old = self._old_pypi_decision()
+        from unittest.mock import patch
+        with patch.object(distill.llm, "chat", return_value=None):
+            res = distill.persist([self._new_pypi_fact()])
+        self.assertEqual(res["superseded"], 0)
+        reloaded = next(m for m in store.load_all() if m.id == old.id)
+        self.assertEqual(reloaded.status, "active")
+
+    def test_kill_switch_skips_llm_entirely(self):
+        self._old_pypi_decision()
+        os.environ["FOLDCRUMBS_NO_AUTO_SUPERSEDE"] = "1"
+        try:
+            from unittest.mock import patch
+            with patch.object(distill.llm, "chat",
+                              side_effect=AssertionError("LLM must not be called")):
+                res = distill.persist([self._new_pypi_fact()])
+        finally:
+            os.environ.pop("FOLDCRUMBS_NO_AUTO_SUPERSEDE", None)
+        self.assertEqual(res["superseded"], 0)
+
+    def test_validated_duplicate_never_triggers_pass(self):
+        # A near-duplicate validates (dedup) instead of creating; the
+        # contradiction pass runs only for genuinely new memories.
+        rec = MemoryRecord(title="Use stdlib", content="Hooks use only stdlib here.",
+                           type="decision")
+        store.write_memory(rec)
+        dup = MemoryRecord(title="Use stdlib only",
+                           content="Hooks use only stdlib here now.", type="decision")
+        from unittest.mock import patch
+        with patch.object(distill.llm, "chat",
+                          side_effect=AssertionError("LLM must not be called")):
+            res = distill.persist([dup])
+        self.assertEqual(res["validated"], 1)
+        self.assertEqual(res["superseded"], 0)
+
+
 class TestDistillGate(unittest.TestCase):
     """Per-machine distill opt-out (shared-store read-only consumer)."""
 

@@ -138,6 +138,53 @@ def find_duplicate(
     return best
 
 
+def _stems(rec: MemoryRecord) -> set[str]:
+    """Crude 5-char prefix stems of the content words (>3 chars).
+
+    Enough to make "published"/"publishing" or "deferred"/"defer" collide
+    without a stemmer dependency; the LLM verdict downstream absorbs the noise.
+    """
+    import re
+
+    return {
+        w[:5]
+        for w in re.findall(r"\w+", f"{rec.title} {rec.content}".lower())
+        if len(w) > 3
+    }
+
+
+def find_conflict_candidates(
+    rec: MemoryRecord,
+    cwd: str | os.PathLike[str] | None = None,
+    limit: int = 3,
+    min_overlap: float = 0.4,
+) -> list[MemoryRecord]:
+    """Existing active memories that plausibly describe the same subject as
+    ``rec`` without being near-duplicates (those are handled by dedup).
+
+    Candidates share enough stemmed words to be about the same thing — e.g. a
+    "PyPI publishing deferred" decision vs a "published to PyPI" fact. Cross-type
+    on purpose: a new fact often obsoletes an old decision. This is only a cheap
+    pre-filter; whether one actually supersedes the other is the LLM's call."""
+    wa = _stems(rec)
+    if not wa:
+        return []
+    out: list[tuple[float, MemoryRecord]] = []
+    for m in iter_memories(cwd):
+        if m.status != "active" or m.id == rec.id:
+            continue
+        if _similarity(rec, m) >= _DEDUP_THRESHOLD:
+            continue
+        wb = _stems(m)
+        if not wb:
+            continue
+        overlap = len(wa & wb) / min(len(wa), len(wb))
+        if overlap >= min_overlap:
+            out.append((overlap, m))
+    out.sort(key=lambda t: (t[0], t[1].filename()), reverse=True)
+    return [m for _, m in out[:limit]]
+
+
 def upsert(
     rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None
 ) -> tuple[str, Path]:
@@ -152,6 +199,29 @@ def upsert(
         path = write_memory(dup, cwd)
         return "validated", path
     return "created", write_memory(rec, cwd)
+
+
+def mark_superseded_on_disk(
+    old: MemoryRecord, new_id: str, cwd: str | os.PathLike[str] | None = None
+) -> Path:
+    """Mark ``old`` as superseded by ``new_id`` and write it back in place.
+
+    Writes to the file the record was loaded from (``source_path``), not a name
+    re-derived from the title — imported files can live under non-canonical
+    names. The file stays on disk (auditable, cleared later by prune) but drops
+    out of the index and recall."""
+    old.mark_superseded(new_id)
+    d = _ensure_dir(cwd)
+    target = d / (old.source_path or old.filename())
+    fd, tmp = tempfile.mkstemp(dir=str(d), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(old.to_markdown())
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return target
 
 
 def write_handoff(text: str, cwd: str | os.PathLike[str] | None = None) -> Path:

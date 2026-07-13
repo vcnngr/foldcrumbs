@@ -28,6 +28,12 @@ HANDOFF   each checkpoint also writes a live working-state snapshot, re-injected
 The retrieval engine is the agent itself: it greps the folder when relevant. The LLM is used
 **only** for async distillation — so recall is instant and never depends on a model being up.
 
+Distillation also runs a **contradiction pass**: when a new memory covers the same subject as
+an old one (a reversed decision, a "deferred" thing that has since happened), the LLM is asked
+whether the new one makes the old obsolete — if yes, the old memory is marked superseded (file
+kept on disk, out of the index; `prune` clears it). Dedup alone can't catch this: it only merges
+near-identical text. Disable with `FOLDCRUMBS_NO_AUTO_SUPERSEDE=1`; with no LLM nothing changes.
+
 Pure Python stdlib: hook scripts never fail on a missing import.
 
 The `MEMORY.md` index is written in a **deterministic order** (by immutable
@@ -96,6 +102,7 @@ recalled in Codex and OpenCode.
 | `FOLDCRUMBS_CONTEXT_BUDGET` | `200000` | context window size (tokens) for the monitor |
 | `FOLDCRUMBS_CONTEXT_PCT` | `0.45` | fraction at which to checkpoint + nudge |
 | `FOLDCRUMBS_MIN_CONFIDENCE` | `0.7` | write gate floor |
+| `FOLDCRUMBS_NO_AUTO_SUPERSEDE` | – | set to disable the contradiction pass at distill time |
 | `FOLDCRUMBS_DIR` | derived from cwd | override the memory directory |
 
 Swap the LLM for a remote gateway or OpenRouter by changing `FOLDCRUMBS_LLM_ENDPOINT` — recall is
