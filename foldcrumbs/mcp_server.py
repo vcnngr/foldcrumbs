@@ -23,7 +23,7 @@ import json
 import sys
 from typing import Any
 
-from . import llm, store
+from . import __version__, llm, store
 from .profile import format_context_block
 from .schema import VALID_TYPES, MemoryRecord
 
@@ -193,7 +193,7 @@ def handle(msg: dict) -> dict | None:
         return _result(msg_id, {
             "protocolVersion": client_proto or DEFAULT_PROTOCOL,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": SERVER_NAME, "version": "0.3.0"},
+            "serverInfo": {"name": SERVER_NAME, "version": __version__},
             "instructions": "Project memory. Call recall before a task; remember "
                             "durable decisions after.",
         })

@@ -258,21 +258,34 @@ def read_handoff(cwd: str | os.PathLike[str] | None = None) -> str | None:
 
 
 def search(
-    query: str, limit: int = 10, cwd: str | os.PathLike[str] | None = None
+    query: str,
+    limit: int = 10,
+    cwd: str | os.PathLike[str] | None = None,
+    types: list[str] | None = None,
+    tags: list[str] | None = None,
 ) -> list[MemoryRecord]:
     """Grep-like search over active memories: substring + word-overlap + fuzzy.
 
     Shared by the CLI (recall/answer) and the MCP server so ranking is
     consistent. In-agent recall is still native grep; this is the programmatic
-    equivalent for tooling.
+    equivalent for tooling. ``types``/``tags`` narrow the candidates before
+    scoring (a memory matches ``tags`` if it carries at least one of them).
     """
     import re
 
     q = query.lower()
-    words = [w for w in re.findall(r"[a-z0-9]+", q) if len(w) > 2]
+    # \w+ (Unicode) instead of [a-z0-9]+: queries in accented languages must not
+    # lose their words ("città" would otherwise tokenize to "citt" + nothing).
+    words = [w for w in re.findall(r"\w+", q) if len(w) > 2]
+    want_types = {t.lower() for t in types} if types else None
+    want_tags = {t.lower() for t in tags} if tags else None
     scored: list[tuple[float, MemoryRecord]] = []
     for m in iter_memories(cwd):
         if m.status != "active":
+            continue
+        if want_types and m.type not in want_types:
+            continue
+        if want_tags and not (want_tags & {t.lower() for t in m.tags}):
             continue
         hay = f"{m.title}\n{m.content}\n{' '.join(m.tags)}".lower()
         if q in hay:

@@ -1,6 +1,7 @@
 # foldcrumbs
 
 [![tests](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml/badge.svg)](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/foldcrumbs.svg)](https://pypi.org/project/foldcrumbs/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Persistent cross-session memory for coding agents — **no Docker, no vector DB, no external service**.
@@ -56,6 +57,12 @@ anti-rot monitor, the merge-safe installer, the hooks and CLI. See **Credits** f
 adapted from memanto.
 
 ## Install
+
+```bash
+pip install foldcrumbs                  # from PyPI (or: pip install -e . from a checkout)
+```
+
+Then wire it into your agent:
 
 ```bash
 foldcrumbs install                      # Claude Code, global (~/.claude/settings.json)

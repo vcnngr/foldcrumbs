@@ -15,6 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+import foldcrumbs  # noqa: E402
 from foldcrumbs import install, mcp_server  # noqa: E402
 
 
@@ -32,6 +33,8 @@ class TestHandler(unittest.TestCase):
         self.assertEqual(r["result"]["protocolVersion"], "2025-06-18")
         self.assertIn("tools", r["result"]["capabilities"])
         self.assertEqual(r["result"]["serverInfo"]["name"], "foldcrumbs")
+        # Server version must track the package, not a hardcoded literal.
+        self.assertEqual(r["result"]["serverInfo"]["version"], foldcrumbs.__version__)
 
     def test_initialized_notification_no_response(self):
         self.assertIsNone(mcp_server.handle(
