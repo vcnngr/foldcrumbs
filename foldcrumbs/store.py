@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -152,6 +153,82 @@ def upsert(
         path = write_memory(dup, cwd)
         return "validated", path
     return "created", write_memory(rec, cwd)
+
+
+def get(
+    name: str, cwd: str | os.PathLike[str] | None = None
+) -> MemoryRecord | None:
+    """Load a single memory by its on-disk filename (as linked in MEMORY.md)."""
+    p = config.memory_dir(cwd) / name
+    if not p.is_file() or p.name in (config.INDEX_NAME, config.HANDOFF_NAME):
+        return None
+    try:
+        rec = MemoryRecord.from_markdown(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    rec.source_path = p.name
+    return rec
+
+
+def forget(
+    name: str, cwd: str | os.PathLike[str] | None = None, hard: bool = False
+) -> str | None:
+    """Forget a memory by filename; rebuilds the index. Returns the action taken.
+
+    Soft by default: mark ``status=deleted`` so the file stays on disk (auditable,
+    recoverable, cleaned later by ``prune``) but drops out of the index and
+    recall. ``hard=True`` unlinks the file instead. Returns "deleted" /
+    "removed", or None when the name doesn't resolve to a memory.
+    """
+    rec = get(name, cwd)
+    if rec is None:
+        return None
+    d = config.memory_dir(cwd)
+    if hard:
+        try:
+            (d / name).unlink()
+        except OSError:
+            return None
+        action = "removed"
+    else:
+        rec.status = "deleted"
+        rec.updated_at = datetime.now(timezone.utc)
+        # Write back to the file it was read from, not a name re-derived from
+        # the title (imported files can live under non-canonical names).
+        _write_text(d / name, rec.to_markdown())
+        action = "deleted"
+    rebuild_index(cwd)
+    return action
+
+
+def supersede(
+    old_name: str, new_name: str, cwd: str | os.PathLike[str] | None = None
+) -> bool:
+    """Mark ``old_name`` as superseded by ``new_name`` (both on-disk filenames).
+
+    The old file stays on disk with ``status: superseded`` (confidence collapses
+    to 0, drops out of index/recall; ``prune`` can clear it later). Returns False
+    when either name doesn't resolve.
+    """
+    old, new = get(old_name, cwd), get(new_name, cwd)
+    if old is None or new is None or old_name == new_name:
+        return False
+    old.mark_superseded(new.id)
+    _write_text(config.memory_dir(cwd) / old_name, old.to_markdown())
+    rebuild_index(cwd)
+    return True
+
+
+def _write_text(target: Path, text: str) -> None:
+    """Atomic write (tmp + os.replace) to an explicit path."""
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def write_handoff(text: str, cwd: str | os.PathLike[str] | None = None) -> Path:

@@ -43,7 +43,36 @@ class TestHandler(unittest.TestCase):
     def test_tools_list(self):
         r = mcp_server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = {t["name"] for t in r["result"]["tools"]}
-        self.assertEqual(names, {"remember", "recall", "answer"})
+        self.assertEqual(names, {"remember", "recall", "answer", "forget"})
+
+    def test_forget_by_filename(self):
+        rem = mcp_server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                                 "params": {"name": "remember", "arguments": {
+                                     "content": "We deploy on Fridays.",
+                                     "type": "fact", "title": "Deploy day"}}})
+        # remember reports "... at <filename>"; forget takes that filename.
+        fname = rem["result"]["content"][0]["text"].rsplit(" at ", 1)[1]
+        fg = mcp_server.handle({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                                "params": {"name": "forget",
+                                           "arguments": {"name": fname}}})
+        self.assertFalse(fg["result"]["isError"])
+        self.assertIn("deleted", fg["result"]["content"][0]["text"])
+        rec = mcp_server.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                                 "params": {"name": "recall", "arguments": {
+                                     "query": "deploy fridays"}}})
+        self.assertIn("no matching", rec["result"]["content"][0]["text"])
+
+    def test_forget_wrong_name_suggests_candidates(self):
+        mcp_server.handle({"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+                           "params": {"name": "remember", "arguments": {
+                               "content": "We deploy on Fridays.",
+                               "type": "fact", "title": "Deploy day"}}})
+        fg = mcp_server.handle({"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                                "params": {"name": "forget",
+                                           "arguments": {"name": "deploy day"}}})
+        text = fg["result"]["content"][0]["text"]
+        self.assertIn("exact filename", text)
+        self.assertIn("fact_deploy_day.md", text)
 
     def test_remember_then_recall(self):
         rem = mcp_server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -91,7 +120,7 @@ class TestSubprocessRoundTrip(unittest.TestCase):
         # initialize, tools/list, tools/call answered; notification got no response.
         self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "foldcrumbs")
         self.assertEqual({t["name"] for t in by_id[2]["result"]["tools"]},
-                         {"remember", "recall", "answer"})
+                         {"remember", "recall", "answer", "forget"})
         self.assertFalse(by_id[3]["result"]["isError"])
         self.assertEqual(len(responses), 3)  # no response for the notification
 

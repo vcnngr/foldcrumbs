@@ -126,6 +126,51 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_forget(args: argparse.Namespace) -> int:
+    """Forget a memory by filename; with a query, list candidates instead.
+
+    Deleting knowledge is the one operation dedup can't undo, so it follows the
+    prune convention: dry-run by default, --apply to do it.
+    """
+    target = args.target
+    if store.get(target) is None:
+        hits = store.search(target, limit=5)
+        if not hits:
+            print(f"no memory named or matching '{target}'")
+            return 1
+        print(f"'{target}' is not a filename; did you mean one of these?")
+        for m in hits:
+            print(f"  {m.source_path or m.filename()} — {m.title}")
+        print("re-run with the exact filename.")
+        return 1
+    verb = "remove (hard)" if args.hard else "mark deleted"
+    if not args.apply:
+        print(f"would {verb}: {target}  (re-run with --apply)")
+        return 0
+    action = store.forget(target, hard=args.hard)
+    if action is None:
+        print(f"failed to forget {target}")
+        return 1
+    print(f"{action}: {target}; index rebuilt."
+          + ("" if args.hard else " File kept on disk — `foldcrumbs prune --apply` clears it."))
+    return 0
+
+
+def _cmd_supersede(args: argparse.Namespace) -> int:
+    """Mark one memory as superseded by another (both exact filenames)."""
+    for name in (args.old, args.by):
+        if store.get(name) is None:
+            print(f"no memory file named '{name}' — use the exact filename "
+                  "linked in MEMORY.md")
+            return 1
+    if not store.supersede(args.old, args.by):
+        print(f"failed to supersede {args.old}")
+        return 1
+    print(f"superseded: {args.old} -> {args.by}; index rebuilt. "
+          "File kept on disk — `foldcrumbs prune --apply` clears it.")
+    return 0
+
+
 def _cmd_status(_: argparse.Namespace) -> int:
     mems = store.load_all()
     active = [m for m in mems if m.status == "active"]
@@ -319,6 +364,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="audit store: dead links, orphans, pollution"
                    ).set_defaults(func=_cmd_doctor)
+
+    fg = sub.add_parser("forget", help="forget one memory by filename (dry-run by default)")
+    fg.add_argument("target", help="memory filename as linked in MEMORY.md "
+                    "(a search query lists candidates)")
+    fg.add_argument("--apply", action="store_true", help="actually forget (default: dry-run)")
+    fg.add_argument("--hard", action="store_true",
+                    help="remove the file instead of marking it deleted")
+    fg.set_defaults(func=_cmd_forget)
+
+    sp = sub.add_parser("supersede", help="mark a memory as superseded by another")
+    sp.add_argument("old", help="filename of the outdated memory")
+    sp.add_argument("--by", required=True, help="filename of the memory that replaces it")
+    sp.set_defaults(func=_cmd_supersede)
 
     pr = sub.add_parser("prune", help="delete pollution / superseded memories (dry-run by default)")
     pr.add_argument("--apply", action="store_true", help="actually delete (default: dry-run)")
