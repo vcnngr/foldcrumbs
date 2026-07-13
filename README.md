@@ -112,7 +112,12 @@ python3 -m foldcrumbs distill transcript.txt    # distil durable memories (LLM)
 python3 -m foldcrumbs checkpoint transcript.txt # write a resume handoff (LLM)
 python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
+python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
+python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 ```
+
+`forget` is dry-run by default (like `prune`); soft-deleted and superseded files
+stay on disk out of the index until `foldcrumbs prune --apply` clears them.
 
 ## Surviving `/clear` and `/compact`
 
@@ -157,7 +162,7 @@ python3 -m unittest discover -s tests -v
 ## MCP server
 
 foldcrumbs ships a minimal MCP server (stdio, stdlib only — no `mcp` SDK dependency) exposing
-`remember`, `recall` and `answer` to any MCP client:
+`remember`, `recall`, `answer` and `forget` to any MCP client:
 
 ```bash
 foldcrumbs-mcp            # or: python3 -m foldcrumbs.mcp_server

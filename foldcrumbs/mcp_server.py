@@ -6,6 +6,7 @@ OpenCode, any MCP client) read/write the same memory Claude Code uses:
   * remember(content, type, title, confidence, tags) — store a memory
   * recall(query, limit)                              — search the store
   * answer(question, limit)                           — grounded answer (LLM)
+  * forget(name)                                      — soft-delete one memory
 
 Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout (the MCP stdio
 transport). We implement only what a client needs to list and call tools —
@@ -65,6 +66,23 @@ TOOLS = [
                 "limit": {"type": "integer", "description": "Max memories (default 10)."},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "forget",
+        "description": (
+            "Forget one memory: mark it deleted so it drops out of the index "
+            "and recall (the file is kept on disk for audit). Pass the exact "
+            "memory filename as shown in MEMORY.md or a recall result. Use when "
+            "a memory is wrong or explicitly revoked by the developer."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "Exact memory filename (e.g. decision_use_grep.md)."},
+            },
+            "required": ["name"],
         },
     },
     {
@@ -130,7 +148,24 @@ def tool_answer(args: dict[str, Any]) -> str:
     return answer or f"(LLM unavailable — relevant memories)\n{context}"
 
 
-_DISPATCH = {"remember": tool_remember, "recall": tool_recall, "answer": tool_answer}
+def tool_forget(args: dict[str, Any]) -> str:
+    name = str(args["name"])
+    if store.get(name) is None:
+        hits = store.search(name, limit=5)
+        if hits:
+            options = "\n".join(f"  {m.source_path or m.filename()} — {m.title}"
+                                for m in hits)
+            return (f"'{name}' is not a memory filename. Closest matches:\n"
+                    f"{options}\nCall forget again with the exact filename.")
+        return f"no memory named or matching '{name}'"
+    action = store.forget(name)
+    if action is None:
+        return f"failed to forget {name}"
+    return f"{action}: {name} (file kept on disk; index rebuilt)"
+
+
+_DISPATCH = {"remember": tool_remember, "recall": tool_recall,
+             "answer": tool_answer, "forget": tool_forget}
 
 
 # --- JSON-RPC / MCP plumbing ----------------------------------------------- #
