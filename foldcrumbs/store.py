@@ -154,6 +154,53 @@ def upsert(
     return "created", write_memory(rec, cwd)
 
 
+def import_store(
+    src_dir: str | os.PathLike[str],
+    cwd: str | os.PathLike[str] | None = None,
+    apply: bool = False,
+) -> dict[str, list[str]]:
+    """Merge another store's active memories into this one, record-level.
+
+    Unlike ``migrate --from`` (raw file copy), this goes through ``upsert`` so
+    near-duplicates validate the existing memory instead of clobbering or
+    doubling it. Skipped: index/handoff files, files without frontmatter, and
+    non-active records (superseded/deleted history stays where it is).
+
+    Dry-run by default — returns the plan {created, validated, skipped} as
+    lists of source filenames; with ``apply`` it writes and rebuilds the index.
+    """
+    src = Path(src_dir).expanduser()
+    plan: dict[str, list[str]] = {"created": [], "validated": [], "skipped": []}
+    for path in sorted(src.glob("*.md")):
+        if path.name == config.INDEX_NAME or path.name.startswith("HANDOFF"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            plan["skipped"].append(path.name)
+            continue
+        # No frontmatter -> not a memory record (a stray note, a README).
+        if not text.startswith("---"):
+            plan["skipped"].append(path.name)
+            continue
+        try:
+            rec = MemoryRecord.from_markdown(text)
+        except Exception:
+            plan["skipped"].append(path.name)
+            continue
+        if rec.status != "active":
+            plan["skipped"].append(path.name)
+            continue
+        if apply:
+            action, _ = upsert(rec, cwd)
+        else:
+            action = "validated" if find_duplicate(rec, cwd) else "created"
+        plan[action].append(path.name)
+    if apply and (plan["created"] or plan["validated"]):
+        rebuild_index(cwd)
+    return plan
+
+
 def write_handoff(text: str, cwd: str | os.PathLike[str] | None = None) -> Path:
     """Overwrite the single working-state handoff snapshot (atomic)."""
     d = _ensure_dir(cwd)

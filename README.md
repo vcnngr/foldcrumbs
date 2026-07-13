@@ -112,7 +112,13 @@ python3 -m foldcrumbs distill transcript.txt    # distil durable memories (LLM)
 python3 -m foldcrumbs checkpoint transcript.txt # write a resume handoff (LLM)
 python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
+python3 -m foldcrumbs import --from ~/.claude/projects/<slug>/memory --apply
 ```
+
+`import` merges another store's memories into the current one, record by record
+(dry-run by default). Unlike `migrate --from` (raw file copy) it is dedup-aware:
+near-duplicates validate the existing memory instead of doubling it. Useful when
+per-`CLAUDE_CONFIG_DIR` instances leave one store rich and another empty.
 
 ## Surviving `/clear` and `/compact`
 
