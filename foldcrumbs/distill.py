@@ -171,12 +171,20 @@ def distill(summary: str, source: str = "foldcrumbs-distill") -> list[MemoryReco
 def persist(records: list[MemoryRecord], cwd: str | None = None) -> dict[str, int]:
     """Upsert records (dedup-aware) and rebuild the index. Returns counts."""
     created = validated = 0
+    fresh: list[MemoryRecord] = []
     for rec in records:
         action, _ = store.upsert(rec, cwd)
         if action == "created":
             created += 1
+            fresh.append(rec)
         else:
             validated += 1
+    # Contradiction pass: a *new* memory can make an older one obsolete (a
+    # reversed decision, a completed goal). Dedup can't see this — it only
+    # merges near-identical text — so ask the LLM about same-subject pairs.
+    superseded = 0
+    if fresh and config.auto_supersede_enabled():
+        superseded = _auto_supersede(fresh, cwd)
     if records:
         store.rebuild_index(cwd)
     # Light auto-prune: clear any unambiguous artifact pollution that slipped in
@@ -187,7 +195,49 @@ def persist(records: list[MemoryRecord], cwd: str | None = None) -> dict[str, in
         if pruned:
             config.log_event(f"auto-prune removed {len(pruned)} artifact(s): "
                              + ", ".join(pruned))
-    return {"created": created, "validated": validated, "total": len(records)}
+    return {"created": created, "validated": validated,
+            "superseded": superseded, "total": len(records)}
+
+
+_SUPERSEDE_PROMPT = (
+    "You maintain a store of durable engineering memories. Given an OLD memory "
+    "and a NEW one about the same subject, decide whether the NEW memory makes "
+    "the OLD one obsolete: it reverses the decision, states the deferred thing "
+    "happened, or replaces the rule. Different aspects of the same subject do "
+    "NOT supersede each other. If unsure, answer false. "
+    'Reply with JSON and nothing else: {"supersedes": true|false}'
+)
+
+_SUPERSEDE_TRUE_RE = re.compile(r'"supersedes"\s*:\s*true', re.IGNORECASE)
+
+
+def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
+    """Mark old memories obsoleted by freshly created ones. Returns the count.
+
+    Conservative by construction: candidates come from a cheap same-subject
+    pre-filter (store.find_conflict_candidates), only an explicit LLM
+    ``supersedes: true`` flips anything, and with no LLM available nothing
+    happens. Superseded files stay on disk — recoverable, cleared by prune."""
+    count = 0
+    for rec in fresh:
+        for old in store.find_conflict_candidates(rec, cwd):
+            answer = llm.chat(
+                messages=[
+                    {"role": "system", "content": _SUPERSEDE_PROMPT},
+                    {"role": "user", "content": (
+                        f"OLD memory ({old.type}): {old.title}\n{old.content}\n\n"
+                        f"NEW memory ({rec.type}): {rec.title}\n{rec.content}")},
+                ],
+                temperature=0.0,
+                max_tokens=32,
+            )
+            if answer and _SUPERSEDE_TRUE_RE.search(answer):
+                store.mark_superseded_on_disk(old, rec.id, cwd)
+                count += 1
+                config.log_event(
+                    f"auto-supersede: {old.source_path or old.filename()} "
+                    f"obsoleted by {rec.filename()}")
+    return count
 
 
 def distill_and_store(

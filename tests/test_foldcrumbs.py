@@ -294,6 +294,90 @@ class TestBackendConfig(unittest.TestCase):
         self.assertIsNone(install.prompt_backend(in_fn=_eof, out_fn=lambda *_: None))
 
 
+class TestAutoSupersede(TmpStore):
+    """The contradiction pass: a new memory can obsolete an old same-subject one."""
+
+    def _old_pypi_decision(self) -> MemoryRecord:
+        rec = MemoryRecord(
+            title="Launch is GitHub only",
+            content="PyPI publishing is deferred; the launch is GitHub-only for now.",
+            type="decision")
+        store.write_memory(rec)
+        return rec
+
+    def _new_pypi_fact(self) -> MemoryRecord:
+        return MemoryRecord(
+            title="Published to PyPI",
+            content="foldcrumbs is published on PyPI, installable via pip install foldcrumbs.",
+            type="fact")
+
+    def test_conflict_candidates_same_subject_cross_type(self):
+        self._old_pypi_decision()
+        store.write_memory(MemoryRecord(title="Postgres storage",
+                                        content="We use Postgres for storage.",
+                                        type="decision"))
+        names = [m.title for m in store.find_conflict_candidates(self._new_pypi_fact())]
+        self.assertEqual(names, ["Launch is GitHub only"])
+
+    def test_llm_yes_supersedes_old(self):
+        old = self._old_pypi_decision()
+        from unittest.mock import patch
+        with patch.object(distill.llm, "chat", return_value='{"supersedes": true}'):
+            res = distill.persist([self._new_pypi_fact()])
+        self.assertEqual(res["superseded"], 1)
+        reloaded = next(m for m in store.load_all() if m.id == old.id)
+        self.assertEqual(reloaded.status, "superseded")
+        self.assertEqual(reloaded.compute_confidence(), 0.0)
+        idx = (Path(self.dir) / "MEMORY.md").read_text()
+        self.assertNotIn("Launch is GitHub only", idx)
+        self.assertIn("Published to PyPI", idx)
+
+    def test_llm_no_keeps_old(self):
+        old = self._old_pypi_decision()
+        from unittest.mock import patch
+        with patch.object(distill.llm, "chat", return_value='{"supersedes": false}'):
+            res = distill.persist([self._new_pypi_fact()])
+        self.assertEqual(res["superseded"], 0)
+        reloaded = next(m for m in store.load_all() if m.id == old.id)
+        self.assertEqual(reloaded.status, "active")
+
+    def test_no_llm_fails_soft(self):
+        old = self._old_pypi_decision()
+        from unittest.mock import patch
+        with patch.object(distill.llm, "chat", return_value=None):
+            res = distill.persist([self._new_pypi_fact()])
+        self.assertEqual(res["superseded"], 0)
+        reloaded = next(m for m in store.load_all() if m.id == old.id)
+        self.assertEqual(reloaded.status, "active")
+
+    def test_kill_switch_skips_llm_entirely(self):
+        self._old_pypi_decision()
+        os.environ["FOLDCRUMBS_NO_AUTO_SUPERSEDE"] = "1"
+        try:
+            from unittest.mock import patch
+            with patch.object(distill.llm, "chat",
+                              side_effect=AssertionError("LLM must not be called")):
+                res = distill.persist([self._new_pypi_fact()])
+        finally:
+            os.environ.pop("FOLDCRUMBS_NO_AUTO_SUPERSEDE", None)
+        self.assertEqual(res["superseded"], 0)
+
+    def test_validated_duplicate_never_triggers_pass(self):
+        # A near-duplicate validates (dedup) instead of creating; the
+        # contradiction pass runs only for genuinely new memories.
+        rec = MemoryRecord(title="Use stdlib", content="Hooks use only stdlib here.",
+                           type="decision")
+        store.write_memory(rec)
+        dup = MemoryRecord(title="Use stdlib only",
+                           content="Hooks use only stdlib here now.", type="decision")
+        from unittest.mock import patch
+        with patch.object(distill.llm, "chat",
+                          side_effect=AssertionError("LLM must not be called")):
+            res = distill.persist([dup])
+        self.assertEqual(res["validated"], 1)
+        self.assertEqual(res["superseded"], 0)
+
+
 class TestDistillGate(unittest.TestCase):
     """Per-machine distill opt-out (shared-store read-only consumer)."""
 
@@ -481,6 +565,55 @@ class TestImportStore(TmpStore):
         self.assertEqual(len(store.load_all()), 2)
 
 
+class TestLifecycle(TmpStore):
+    def _make(self, title="Old fact", content="We deploy on Fridays."):
+        rec = MemoryRecord(title=title, content=content, type="fact")
+        store.write_memory(rec)
+        return rec.filename()
+
+    def test_forget_soft_keeps_file_drops_from_index_and_recall(self):
+        name = self._make()
+        store.rebuild_index()
+        self.assertEqual(store.forget(name), "deleted")
+        self.assertTrue((Path(self.dir) / name).exists())
+        self.assertEqual(store.get(name).status, "deleted")
+        self.assertNotIn(name, (Path(self.dir) / "MEMORY.md").read_text())
+        self.assertEqual(store.search("deploy fridays"), [])
+
+    def test_forget_hard_removes_file(self):
+        name = self._make()
+        self.assertEqual(store.forget(name, hard=True), "removed")
+        self.assertFalse((Path(self.dir) / name).exists())
+
+    def test_forget_unknown_returns_none(self):
+        self.assertIsNone(store.forget("fact_nope.md"))
+
+    def test_supersede_marks_old_and_links_new(self):
+        old = self._make("Launch is GitHub only", "PyPI publishing is deferred.")
+        new = self._make("Published to PyPI", "foldcrumbs is on PyPI now.")
+        self.assertTrue(store.supersede(old, new))
+        old_rec, new_rec = store.get(old), store.get(new)
+        self.assertEqual(old_rec.status, "superseded")
+        self.assertEqual(old_rec.superseded_by, new_rec.id)
+        self.assertEqual(old_rec.compute_confidence(), 0.0)
+        idx = (Path(self.dir) / "MEMORY.md").read_text()
+        self.assertNotIn(old, idx)
+        self.assertIn(new, idx)
+
+    def test_supersede_unknown_or_self_fails(self):
+        name = self._make()
+        self.assertFalse(store.supersede(name, "fact_nope.md"))
+        self.assertFalse(store.supersede(name, name))
+
+    def test_forgotten_memory_is_prunable(self):
+        from foldcrumbs import audit
+        name = self._make()
+        store.forget(name)
+        res = audit.prune(apply=True)
+        self.assertIn(name, res["removed"])
+        self.assertFalse((Path(self.dir) / name).exists())
+
+
 class TestSearch(TmpStore):
     def test_search_ranks_relevant(self):
         store.upsert(MemoryRecord(title="Recall via grep",
@@ -490,6 +623,34 @@ class TestSearch(TmpStore):
         hits = store.search("vector db", limit=5)
         self.assertTrue(hits)
         self.assertEqual(hits[0].title, "Recall via grep")
+
+    def test_search_unicode_words(self):
+        # Accented words must survive tokenization ([a-z0-9]+ would split
+        # "città" into "citt" and lose the word-overlap match).
+        store.upsert(MemoryRecord(title="Config della città",
+                                  content="La città usa il fuso orario di Roma.",
+                                  type="fact"))
+        store.upsert(MemoryRecord(title="Atomic writes",
+                                  content="Use os.replace.", type="instruction"))
+        hits = store.search("fuso orario città", limit=5)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].title, "Config della città")
+
+    def test_search_type_filter(self):
+        store.upsert(MemoryRecord(title="Grep decision",
+                                  content="Recall uses grep.", type="decision"))
+        store.upsert(MemoryRecord(title="Grep fact",
+                                  content="Recall uses grep too.", type="fact"))
+        hits = store.search("grep", limit=5, types=["fact"])
+        self.assertEqual([m.title for m in hits], ["Grep fact"])
+
+    def test_search_tag_filter(self):
+        store.upsert(MemoryRecord(title="Tagged", content="Recall uses grep.",
+                                  type="decision", tags=["arch"]))
+        store.upsert(MemoryRecord(title="Untagged", content="Recall uses grep here.",
+                                  type="decision"))
+        hits = store.search("grep", limit=5, tags=["ARCH"])
+        self.assertEqual([m.title for m in hits], ["Tagged"])
 
 
 class TestHandoff(TmpStore):

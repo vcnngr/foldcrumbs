@@ -145,6 +145,14 @@ def auto_prune_enabled() -> bool:
     return not _env("NO_AUTO_PRUNE")
 
 
+def auto_supersede_enabled() -> bool:
+    """Ask the LLM whether a freshly distilled memory makes an older one
+    obsolete, and mark it superseded if so. On by default; off when
+    FOLDCRUMBS_NO_AUTO_SUPERSEDE is set. Safe: superseded files stay on disk
+    (recoverable, cleared later by prune), and with no LLM nothing happens."""
+    return not _env("NO_AUTO_SUPERSEDE")
+
+
 def llm_backend() -> str:
     """Distillation backend: env > machine-local file > "openai" default.
 

@@ -1,6 +1,7 @@
 # foldcrumbs
 
 [![tests](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml/badge.svg)](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/foldcrumbs.svg)](https://pypi.org/project/foldcrumbs/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Persistent cross-session memory for coding agents — **no Docker, no vector DB, no external service**.
@@ -27,6 +28,12 @@ HANDOFF   each checkpoint also writes a live working-state snapshot, re-injected
 
 The retrieval engine is the agent itself: it greps the folder when relevant. The LLM is used
 **only** for async distillation — so recall is instant and never depends on a model being up.
+
+Distillation also runs a **contradiction pass**: when a new memory covers the same subject as
+an old one (a reversed decision, a "deferred" thing that has since happened), the LLM is asked
+whether the new one makes the old obsolete — if yes, the old memory is marked superseded (file
+kept on disk, out of the index; `prune` clears it). Dedup alone can't catch this: it only merges
+near-identical text. Disable with `FOLDCRUMBS_NO_AUTO_SUPERSEDE=1`; with no LLM nothing changes.
 
 Pure Python stdlib: hook scripts never fail on a missing import.
 
@@ -56,6 +63,12 @@ anti-rot monitor, the merge-safe installer, the hooks and CLI. See **Credits** f
 adapted from memanto.
 
 ## Install
+
+```bash
+pip install foldcrumbs                  # from PyPI (or: pip install -e . from a checkout)
+```
+
+Then wire it into your agent:
 
 ```bash
 foldcrumbs install                      # Claude Code, global (~/.claude/settings.json)
@@ -96,6 +109,7 @@ recalled in Codex and OpenCode.
 | `FOLDCRUMBS_CONTEXT_BUDGET` | `200000` | context window size (tokens) for the monitor |
 | `FOLDCRUMBS_CONTEXT_PCT` | `0.45` | fraction at which to checkpoint + nudge |
 | `FOLDCRUMBS_MIN_CONFIDENCE` | `0.7` | write gate floor |
+| `FOLDCRUMBS_NO_AUTO_SUPERSEDE` | – | set to disable the contradiction pass at distill time |
 | `FOLDCRUMBS_DIR` | derived from cwd | override the memory directory |
 
 Swap the LLM for a remote gateway or OpenRouter by changing `FOLDCRUMBS_LLM_ENDPOINT` — recall is
@@ -112,8 +126,13 @@ python3 -m foldcrumbs distill transcript.txt    # distil durable memories (LLM)
 python3 -m foldcrumbs checkpoint transcript.txt # write a resume handoff (LLM)
 python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
+python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
+python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs import --from ~/.claude/projects/<slug>/memory --apply
 ```
+
+`forget` is dry-run by default (like `prune`); soft-deleted and superseded files
+stay on disk out of the index until `foldcrumbs prune --apply` clears them.
 
 `import` merges another store's memories into the current one, record by record
 (dry-run by default). Unlike `migrate --from` (raw file copy) it is dedup-aware:
@@ -163,7 +182,7 @@ python3 -m unittest discover -s tests -v
 ## MCP server
 
 foldcrumbs ships a minimal MCP server (stdio, stdlib only — no `mcp` SDK dependency) exposing
-`remember`, `recall` and `answer` to any MCP client:
+`remember`, `recall`, `answer` and `forget` to any MCP client:
 
 ```bash
 foldcrumbs-mcp            # or: python3 -m foldcrumbs.mcp_server
