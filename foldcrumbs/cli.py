@@ -39,7 +39,8 @@ def _cmd_remember(args: argparse.Namespace) -> int:
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
-    top = store.search(args.query, limit=args.limit)
+    top = store.search(args.query, limit=args.limit,
+                       types=args.type or None, tags=args.tag or None)
     block = format_context_block(top, heading=args.query)
     print(block or "(no matching memories)")
     return 0
@@ -283,6 +284,10 @@ def build_parser() -> argparse.ArgumentParser:
     rc = sub.add_parser("recall", help="search the store")
     rc.add_argument("query")
     rc.add_argument("--limit", type=int, default=10)
+    rc.add_argument("--type", action="append", choices=sorted(VALID_TYPES),
+                    help="only memories of this type (repeatable)")
+    rc.add_argument("--tag", action="append",
+                    help="only memories carrying this tag (repeatable)")
     rc.set_defaults(func=_cmd_recall)
 
     an = sub.add_parser("answer", help="answer a question grounded in memory (LLM)")

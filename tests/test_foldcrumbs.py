@@ -439,6 +439,34 @@ class TestSearch(TmpStore):
         self.assertTrue(hits)
         self.assertEqual(hits[0].title, "Recall via grep")
 
+    def test_search_unicode_words(self):
+        # Accented words must survive tokenization ([a-z0-9]+ would split
+        # "città" into "citt" and lose the word-overlap match).
+        store.upsert(MemoryRecord(title="Config della città",
+                                  content="La città usa il fuso orario di Roma.",
+                                  type="fact"))
+        store.upsert(MemoryRecord(title="Atomic writes",
+                                  content="Use os.replace.", type="instruction"))
+        hits = store.search("fuso orario città", limit=5)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].title, "Config della città")
+
+    def test_search_type_filter(self):
+        store.upsert(MemoryRecord(title="Grep decision",
+                                  content="Recall uses grep.", type="decision"))
+        store.upsert(MemoryRecord(title="Grep fact",
+                                  content="Recall uses grep too.", type="fact"))
+        hits = store.search("grep", limit=5, types=["fact"])
+        self.assertEqual([m.title for m in hits], ["Grep fact"])
+
+    def test_search_tag_filter(self):
+        store.upsert(MemoryRecord(title="Tagged", content="Recall uses grep.",
+                                  type="decision", tags=["arch"]))
+        store.upsert(MemoryRecord(title="Untagged", content="Recall uses grep here.",
+                                  type="decision"))
+        hits = store.search("grep", limit=5, tags=["ARCH"])
+        self.assertEqual([m.title for m in hits], ["Tagged"])
+
 
 class TestHandoff(TmpStore):
     def test_write_read(self):
