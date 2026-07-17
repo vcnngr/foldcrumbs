@@ -273,6 +273,8 @@ MCP-speaking tool by registering the command above.
 - **Phase 2 ✓** — Codex + OpenCode on the same store via a stdlib MCP server + installers.
 - **Phase 3** — embeddings + open vector DB only if scale outgrows grep; document ingest via OCR.
 
+Release history: [CHANGELOG.md](CHANGELOG.md).
+
 ## Credits
 
 foldcrumbs adapts a few utilities from [memanto](https://github.com/moorcheh-ai/memanto)
