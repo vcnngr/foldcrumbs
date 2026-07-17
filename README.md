@@ -120,7 +120,7 @@ unaffected.
 ```bash
 python3 -m foldcrumbs status
 python3 -m foldcrumbs remember "Recall is grep, no vector DB" --type decision --tag arch
-python3 -m foldcrumbs recall "vector db"
+python3 -m foldcrumbs recall "vector db" --type decision --tag arch   # filters, repeatable
 python3 -m foldcrumbs index
 python3 -m foldcrumbs distill transcript.txt    # distil durable memories (LLM)
 python3 -m foldcrumbs checkpoint transcript.txt # write a resume handoff (LLM)
@@ -131,13 +131,82 @@ python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs import --from ~/.claude/projects/<slug>/memory --apply
 ```
 
-`forget` is dry-run by default (like `prune`); soft-deleted and superseded files
-stay on disk out of the index until `foldcrumbs prune --apply` clears them.
+## Curating the store
 
-`import` merges another store's memories into the current one, record by record
-(dry-run by default). Unlike `migrate --from` (raw file copy) it is dedup-aware:
-near-duplicates validate the existing memory instead of doubling it. Useful when
-per-`CLAUDE_CONFIG_DIR` instances leave one store rich and another empty.
+Every memory has a status: **active** → (**superseded** | **deleted**) → *file removed*.
+Only active memories appear in `MEMORY.md` and recall. Non-active files stay on disk —
+auditable and recoverable — until `foldcrumbs prune --apply` removes them for real.
+
+Three ways a memory stops being true:
+
+**You say it's wrong — `forget`.** Takes the exact filename shown in `MEMORY.md`
+(or in a recall result). Dry-run by default, like `prune`:
+
+```bash
+foldcrumbs forget fact_wrong.md                 # dry-run: shows what would happen
+foldcrumbs forget fact_wrong.md --apply         # marks status: deleted, file kept
+foldcrumbs forget fact_wrong.md --apply --hard  # unlinks the file immediately
+foldcrumbs forget "wrong deploy"                # not a filename → lists candidate files
+```
+
+MCP agents get the same via the `forget` tool (soft-delete only).
+
+**Something replaced it — `supersede`.** You point at both sides; the old memory
+keeps a `superseded_by` link to the new one and its confidence collapses to 0:
+
+```bash
+foldcrumbs supersede decision_pypi_deferred.md --by fact_published_to_pypi.md
+```
+
+**Distillation notices on its own — the contradiction pass.** Dedup only merges
+*near-identical* text; a reversed decision reads completely differently. So at
+distill time, when a new memory covers the same subject as an old one (crude
+word-stem overlap picks candidates), the LLM is asked one question: *does the new
+memory make the old one obsolete?* Only an explicit yes supersedes anything.
+Example: an old decision "PyPI publishing is deferred" is auto-superseded when a
+new fact "published to PyPI" is distilled. Fail-soft (no LLM → nothing changes);
+disable with `FOLDCRUMBS_NO_AUTO_SUPERSEDE=1`. Superseded events are logged to
+`~/.foldcrumbs/foldcrumbs.log`.
+
+## Sharing memory between stores: `import`
+
+Stores are namespaced **per instance × per project**: memory lives in
+`<config-dir>/projects/<encoded-cwd>/memory/`, where `<config-dir>` honours
+`CLAUDE_CONFIG_DIR`. Run several instances (e.g. `~/.claude`, `~/.claude-work`) and
+it is *structural* that one store ends up rich while another starts empty for the
+same project. `import` closes that gap.
+
+The two sides of the command:
+
+- **target** (written to) — the store of the instance *running the command*, i.e.
+  your `CLAUDE_CONFIG_DIR` (default `~/.claude`) + the directory you run it from;
+- **source** (`--from`) — any path: a memory dir directly, or a project dir
+  resolved through the same convention.
+
+```bash
+# fill the work instance's store from the main one (run from the project dir):
+CLAUDE_CONFIG_DIR=~/.claude-work foldcrumbs import \
+  --from ~/.claude/projects/<slug>/memory --apply
+
+# promote what the work instance learned back into main:
+foldcrumbs import --from ~/.claude-work/projects/<slug>/memory --apply
+```
+
+What it does — and deliberately doesn't do:
+
+| | |
+|--|--|
+| record-level merge | each memory goes through `upsert`: new → created, near-duplicate → **validates** the existing one (trust bump, no doubles) |
+| skips noise | `MEMORY.md`, `HANDOFF*`, files without frontmatter, superseded/deleted records — dead history stays where it is |
+| dry-run first | default shows the `{created, validated, skipped}` plan; `--apply` writes and rebuilds the index |
+| idempotent | re-running only validates — safe to use as a periodic manual sync |
+| one-way | bidirectional = run it twice, once per direction |
+| no LLM | the contradiction pass does **not** run on import (predictability); an imported memory that contradicts a local one coexists until a distill reviews it or you `supersede` by hand |
+
+Contrast with `migrate --from`, which is a raw file copy for one-time moves.
+If the *main* store is synced across machines (e.g. Syncthing), a natural pattern
+is hub-and-spoke: import into main from one machine only, refresh the per-machine
+instances from main.
 
 ## Surviving `/clear` and `/compact`
 
