@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`publish.yml`, `PYPI_API_TOKEN` repo secret).
 
 ### Fixed
+- Codex prompts are written under `$CODEX_HOME/prompts` when a custom
+  `CODEX_HOME` is set (previously always `~/.codex/prompts`).
+- `uninstall --agent opencode` removes the foldcrumbs command entries from
+  `opencode.json` (user commands with the same name are kept).
 - Command frontmatter emits quoted YAML scalars — `/memory`'s description
   contained `: ` and produced invalid frontmatter (found by Codex review).
 - Codex prompts are documented under their real invocation names
