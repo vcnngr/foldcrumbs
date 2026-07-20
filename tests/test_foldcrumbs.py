@@ -685,6 +685,12 @@ class TestSurface(unittest.TestCase):
             self.assertIn(self.surface.MARKER, text)
             self.assertTrue(text.startswith("---"), name)
             self.assertIn("allowed-tools:", text)
+        # Frontmatter must stay valid YAML even when the description contains
+        # ": " — values are emitted as quoted scalars.
+        mem = (self.dir / "memory.md").read_text(encoding="utf-8")
+        self.assertIn(
+            'description: "Project memory dashboard: status, health, resume point"',
+            mem)
 
     def test_reinstall_is_idempotent_and_refreshes_stale(self):
         self.surface.install_commands(self.dir)
@@ -747,6 +753,9 @@ class TestSurface(unittest.TestCase):
         self.assertFalse(text.startswith("---"))  # no Claude frontmatter
         self.assertIn(self.surface.MARKER, text)
         self.assertIn("$ARGUMENTS", text)
+        # Codex namespaces prompt files: the header must advertise the real
+        # invocation name, /prompts:<stem>, not /<stem>.
+        self.assertIn("/prompts:remember", text)
         self.assertEqual(set(self.surface.install_codex_prompts(d).values()),
                          {"unchanged"})
         removed = self.surface.uninstall_codex_prompts(d)
@@ -781,12 +790,14 @@ class TestSurface(unittest.TestCase):
 
 
 class TestClaudeMcp(unittest.TestCase):
-    def _fake_claude(self, get_rc: int, add_rc: int) -> str:
+    def _fake_claude(self, get_rc: int, add_rc: int,
+                     get_scope: str = "User") -> str:
         d = Path(tempfile.mkdtemp(prefix="ccmem_mcp_"))
         script = d / "claude"
         script.write_text(
             "#!/bin/sh\n"
-            f'if [ "$2" = "get" ]; then exit {get_rc}; fi\n'
+            f'if [ "$2" = "get" ]; then echo "Scope: {get_scope} config"; '
+            f"exit {get_rc}; fi\n"
             f'if [ "$2" = "add" ]; then exit {add_rc}; fi\n'
             'if [ "$2" = "remove" ]; then exit 0; fi\n'
             "exit 1\n",
@@ -807,6 +818,14 @@ class TestClaudeMcp(unittest.TestCase):
     def test_registers_at_requested_scope(self):
         out = install.install_claude_mcp(claude_bin=self._fake_claude(1, 0),
                                          scope="project")
+        self.assertEqual(out, "registered (project scope)")
+
+    def test_scope_mismatch_still_registers(self):
+        # Server exists at user scope; a --local install must still create the
+        # project-scoped entry instead of reporting "already registered".
+        out = install.install_claude_mcp(
+            claude_bin=self._fake_claude(0, 0, get_scope="User"),
+            scope="project")
         self.assertEqual(out, "registered (project scope)")
 
     def test_add_failure_falls_back_to_snippet(self):

@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI publishes to PyPI automatically when a GitHub release is created
   (`publish.yml`, `PYPI_API_TOKEN` repo secret).
 
+### Fixed
+- Command frontmatter emits quoted YAML scalars — `/memory`'s description
+  contained `: ` and produced invalid frontmatter (found by Codex review).
+- Codex prompts are documented under their real invocation names
+  (`/prompts:remember` etc. — Codex namespaces `~/.codex/prompts` files).
+- Claude MCP registration is scope-aware on both ends: `install --local` now
+  registers the project scope even when a user-scoped entry exists, and
+  `uninstall --local` removes the project-scoped entry it installed.
+
 ### Changed
 - README: new "Curating the store" section (memory lifecycle: active →
   superseded/deleted → pruned; forget / supersede / contradiction pass) and

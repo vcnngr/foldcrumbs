@@ -15,6 +15,7 @@ hook installer.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from . import config
@@ -36,12 +37,14 @@ _ALLOWED = "Bash(foldcrumbs:*), Bash(python3 -m foldcrumbs:*)"
 
 
 def _cmd(description: str, argument_hint: str, body: str) -> str:
+    # json.dumps produces a double-quoted scalar that is also valid YAML —
+    # descriptions containing ": " would otherwise break the frontmatter.
     fm = [
         "---",
-        f"description: {description}",
+        f"description: {json.dumps(description)}",
     ]
     if argument_hint:
-        fm.append(f"argument-hint: {argument_hint}")
+        fm.append(f"argument-hint: {json.dumps(argument_hint)}")
     fm += [f"allowed-tools: {_ALLOWED}", "---"]
     return "\n".join(fm) + "\n" + _MARKER_LINE + "\n\n" + body.strip() + "\n"
 
@@ -129,10 +132,11 @@ COMMANDS: dict[str, str] = {
     for name, (desc, hint, body) in _BODIES.items()
 }
 
-# Codex custom prompts (~/.codex/prompts/<name>.md → /<name>): plain markdown,
-# no Claude-specific frontmatter. Codex substitutes $ARGUMENTS the same way.
+# Codex custom prompts: plain markdown, no Claude-specific frontmatter. Codex
+# substitutes $ARGUMENTS the same way, but namespaces prompt files — a file in
+# ~/.codex/prompts/<name>.md is invoked as `/prompts:<name>`, not `/<name>`.
 CODEX_PROMPTS: dict[str, str] = {
-    f"{name}.md": f"# /{name} — {desc}\n{_MARKER_LINE}\n\n{body.strip()}\n"
+    f"{name}.md": f"# /prompts:{name} — {desc}\n{_MARKER_LINE}\n\n{body.strip()}\n"
     for name, (desc, _hint, body) in _BODIES.items()
 }
 
