@@ -323,12 +323,12 @@ def uninstall_codex_prompts(target_dir: Path | None = None) -> list[str]:
     return _remove_managed(d, CODEX_PROMPTS)
 
 
-def install_opencode_commands(config_path: Path) -> list[str]:
+def install_opencode_commands(config_path: Path) -> dict[str, str]:
     """Merge /remember etc. into opencode.json's ``command`` table.
 
-    Same merge policy as the MCP entry: existing keys (user's own commands)
-    are never overwritten; ours are recognisable by the foldcrumbs mention in
-    the template. Returns the commands added.
+    Same managed-entry contract as the files: a user's own command under one of
+    our names is never touched, while entries carrying our marker are refreshed
+    when the template changes. Returns {name: action} like install_commands.
     """
     import json
 
@@ -341,19 +341,31 @@ def install_opencode_commands(config_path: Path) -> list[str]:
         except Exception:
             cfg = {}
     commands = cfg.setdefault("command", {})
-    added: list[str] = []
+    actions: dict[str, str] = {}
+    changed = False
     for name, (desc, _hint, body) in _BODIES.items():
-        if name in commands:
-            continue
-        # The marker line makes ownership unambiguous: uninstall removes only
-        # templates carrying it, never a user command that merely mentions
-        # foldcrumbs.
-        commands[name] = {"description": desc,
-                          "template": _MARKER_LINE + "\n" + body.strip()}
-        added.append(name)
-    if added:
+        # The marker line makes ownership unambiguous: refresh/uninstall touch
+        # only templates carrying it, never a user command that merely
+        # mentions foldcrumbs.
+        entry = {"description": desc,
+                 "template": _MARKER_LINE + "\n" + body.strip()}
+        existing = commands.get(name)
+        if existing is None:
+            commands[name] = entry
+            actions[name] = "created"
+            changed = True
+        elif not (isinstance(existing, dict)
+                  and MARKER in existing.get("template", "")):
+            actions[name] = "skipped (user command)"
+        elif existing == entry:
+            actions[name] = "unchanged"
+        else:
+            commands[name] = entry
+            actions[name] = "refreshed"
+            changed = True
+    if changed:
         path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-    return added
+    return actions
 
 
 def uninstall_opencode_commands(config_path: Path) -> list[str]:

@@ -447,9 +447,18 @@ def install_claude_mcp(
             stale = True
             subprocess.run([exe, "mcp", "remove", "--scope", scope, "foldcrumbs"],
                            capture_output=True, text=True, timeout=30)
-        add = subprocess.run(
-            [exe, "mcp", "add", "--scope", scope, "foldcrumbs", "--", *cmd],
-            capture_output=True, text=True, timeout=30)
+        add_cmd = [exe, "mcp", "add", "--scope", scope, "foldcrumbs", "--", *cmd]
+        add = subprocess.run(add_cmd, capture_output=True, text=True, timeout=30)
+        if add.returncode != 0 and not stale:
+            # `mcp get` reports only the EFFECTIVE registration; the requested
+            # scope may hold a shadowed entry the probe never showed (e.g. a
+            # project entry hidden by a user one). Replace it in place so a
+            # reinstall can still repair the shadowed scope.
+            subprocess.run([exe, "mcp", "remove", "--scope", scope, "foldcrumbs"],
+                           capture_output=True, text=True, timeout=30)
+            add = subprocess.run(add_cmd, capture_output=True, text=True,
+                                 timeout=30)
+            stale = add.returncode == 0
     except (OSError, subprocess.TimeoutExpired) as exc:
         return (f"claude CLI failed ({exc}) — register manually:\n"
                 + claude_mcp_snippet(runtime_root))

@@ -292,10 +292,11 @@ def _cmd_install(args: argparse.Namespace) -> int:
         plugin = install.write_opencode_plugin(paths["plugins"])
         agents = install.append_agents_md(paths["agents"])
         cmds = surface.install_opencode_commands(paths["config"])
+        summary = ", ".join(f"/{n} {a}" for n, a in sorted(cmds.items()))
         print(f"opencode.json mcp: {mcp or '(already present)'} ({paths['config']})")
         print(f"plugin: {plugin}")
         print(f"AGENTS.md: {agents or '(block already present)'}")
-        print(f"commands: {cmds or '(already present)'}")
+        print(f"commands: {summary}")
         return 0
 
     path = Path(args.settings) if args.settings else install.default_settings_path(
