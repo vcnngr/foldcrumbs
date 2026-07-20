@@ -301,6 +301,13 @@ def _cmd_install(args: argparse.Namespace) -> int:
     changes = install.install_hooks(path, agent=agent)
     print(f"settings: {path}")
     print("added:", changes or "(nothing — already installed)")
+    if agent == "claude":
+        from . import surface
+        cmd_dir = surface.commands_dir(global_scope=not args.local)
+        actions = surface.install_commands(cmd_dir)
+        summary = ", ".join(f"/{Path(n).stem} {a}" for n, a in sorted(actions.items()))
+        print(f"commands: {cmd_dir} — {summary}")
+        print("(restart open sessions to pick up new commands)")
     if agent == "codex":
         print("codex MCP (config.toml):", install.install_codex_mcp_toml())
     _configure_backend_at_install(args)
@@ -350,6 +357,10 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
     )
     removed = install.uninstall_hooks(path)
     print(f"removed from {path}: {removed or '(nothing)'}")
+    if args.agent == "claude":
+        from . import surface
+        gone = surface.uninstall_commands(surface.commands_dir(global_scope=not args.local))
+        print(f"commands removed: {gone or '(nothing)'}")
     return 0
 
 
