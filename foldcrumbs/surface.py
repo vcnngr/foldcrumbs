@@ -121,6 +121,59 @@ Keep it short; propose concrete next actions only when doctor found something.
 }
 
 
+SKILL = (
+    """---
+name: foldcrumbs
+description: >-
+  Persistent project memory. Use when the user asks to remember something
+  ("remember that...", "ricorda che...", "don't forget..."), asks what was
+  decided or why ("what did we decide about...", "cosa avevamo deciso...",
+  "why did we choose..."), corrects a remembered fact ("that's no longer
+  true", "non è più così"), or at the start of a substantive task in a
+  project with a foldcrumbs store.
+---
+"""
+    + _MARKER_LINE
+    + f"""
+
+# foldcrumbs — project memory
+
+This project keeps durable memory in a foldcrumbs store. {_CLI_NOTE}
+
+## When to recall
+
+At the start of a substantive task, and whenever the user asks what was
+decided or why: run `foldcrumbs recall "<topic>"` (filters: `--type`,
+`--tag`). Honour what comes back — do not re-ask or contradict recorded
+decisions without flagging it. `MEMORY.md` in the memory dir (path shown by
+`foldcrumbs status`) is the index; grep the folder for detail.
+
+## When to remember
+
+When the user states a durable decision, rule, preference, or lesson —
+explicitly ("remember that we deploy on Fridays") or in passing ("we're
+switching to Postgres, by the way") — store it:
+
+    foldcrumbs remember "<one self-contained sentence>" --type <t> --title "<short>"
+
+Types: decision | instruction | preference | fact | error | goal | learning.
+For in-passing statements, confirm with the user before storing. Never store
+session-specific details, secrets, or notes about this memory tooling itself.
+
+## When to forget or supersede
+
+If the user corrects a stored fact ("that's outdated", "we reverted that"):
+
+- wrong/revoked → `foldcrumbs forget <filename> --apply` (dry-run first;
+  a query lists candidate filenames)
+- replaced by a new memory → store the new one, then
+  `foldcrumbs supersede <old-filename> --by <new-filename>`
+
+Soft-deleted and superseded files stay on disk until `foldcrumbs prune --apply`.
+"""
+)
+
+
 def commands_dir(global_scope: bool = True) -> Path:
     """Claude Code commands dir: <config-dir>/commands (CLAUDE_CONFIG_DIR-aware)
     or ./.claude/commands for project scope."""
@@ -159,6 +212,46 @@ def install_commands(target_dir: Path | None = None) -> dict[str, str]:
             path.write_text(content, encoding="utf-8")
             actions[name] = "refreshed"
     return actions
+
+
+def skill_dir(global_scope: bool = True) -> Path:
+    """Claude Code skill dir for foldcrumbs: <config-dir>/skills/foldcrumbs
+    (CLAUDE_CONFIG_DIR-aware) or ./.claude/skills/foldcrumbs for project scope."""
+    if global_scope:
+        return config.claude_config_dir() / "skills" / "foldcrumbs"
+    return Path.cwd() / ".claude" / "skills" / "foldcrumbs"
+
+
+def install_skill(target_dir: Path | None = None) -> str:
+    """Write SKILL.md under the foldcrumbs skill dir. Returns the action taken
+    (same contract as install_commands)."""
+    d = Path(target_dir) if target_dir else skill_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "SKILL.md"
+    if not path.exists():
+        path.write_text(SKILL, encoding="utf-8")
+        return "created"
+    if not is_managed(path):
+        return "skipped (user file)"
+    if path.read_text(encoding="utf-8") == SKILL:
+        return "unchanged"
+    path.write_text(SKILL, encoding="utf-8")
+    return "refreshed"
+
+
+def uninstall_skill(target_dir: Path | None = None) -> bool:
+    """Remove our managed SKILL.md (and the dir if it ends up empty)."""
+    d = Path(target_dir) if target_dir else skill_dir()
+    path = d / "SKILL.md"
+    if not (path.exists() and is_managed(path)):
+        return False
+    try:
+        path.unlink()
+        if not any(d.iterdir()):
+            d.rmdir()
+    except OSError:
+        return False
+    return True
 
 
 def uninstall_commands(target_dir: Path | None = None) -> list[str]:

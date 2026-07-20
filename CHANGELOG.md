@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Claude Code skill — `foldcrumbs install` writes a managed
+  `skills/foldcrumbs/SKILL.md` so the model activates memory on natural
+  triggers ("remember that…", "what did we decide about…", corrections of
+  stored facts) without an explicit slash command.
 - Slash commands for Claude Code — `foldcrumbs install` now also writes
   `/remember`, `/recall`, `/forget` and `/memory` to `<config-dir>/commands/`
   (managed files: user-edited copies are never touched; `uninstall` removes
