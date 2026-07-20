@@ -80,7 +80,7 @@ The installer is merge-safe and idempotent: it appends its own hook groups and l
 hooks (GSD, graphify, …) untouched. A `.foldcrumbs-bak` backup is written first.
 
 For Claude Code the installer also writes four slash commands — **`/remember`**,
-**`/recall`**, **`/forget`**, **`/memory`** — so memory becomes an in-session capability,
+**`/recall`**, **`/forget`**, **`/foldcrumbs`** (dashboard) — so memory becomes an in-session capability,
 not just a background layer. `/remember` with no arguments distills durable memories from
 the live conversation (with confirmation) using the session's own model — no LLM backend
 needed. The files are marked as managed: edit one and remove the marker line to take

@@ -2,7 +2,7 @@
 
 The hooks are foldcrumbs's passive layer (inject at start, distill in the
 background); this module writes the *active* layer — user-invocable commands
-(`/remember`, `/recall`, `/forget`, `/memory`) that teach the agent to use the
+(`/remember`, `/recall`, `/forget`, `/foldcrumbs`) that teach the agent to use the
 memory store deliberately. For Claude Code they are markdown files in
 ``<config-dir>/commands/``; the same bodies are portable to Codex prompt files.
 
@@ -108,7 +108,7 @@ explicitly asks to delete the file outright; otherwise the soft delete keeps it
 on disk for audit (a later `foldcrumbs prune --apply` clears it).
 """,
     ),
-    "memory": (
+    "foldcrumbs": (
         "Project memory dashboard: status, health, resume point",
         "",
         f"""
@@ -313,7 +313,7 @@ def codex_prompts_dir() -> Path:
 
 
 def install_codex_prompts(target_dir: Path | None = None) -> dict[str, str]:
-    """Write /remember, /recall, /forget, /memory as Codex custom prompts."""
+    """Write /remember, /recall, /forget, /foldcrumbs as Codex custom prompts."""
     d = Path(target_dir) if target_dir else codex_prompts_dir()
     return _write_managed(d, CODEX_PROMPTS)
 

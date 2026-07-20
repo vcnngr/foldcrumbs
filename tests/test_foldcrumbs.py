@@ -679,7 +679,7 @@ class TestSurface(unittest.TestCase):
         actions = self.surface.install_commands(self.dir)
         self.assertEqual(set(actions.values()), {"created"})
         self.assertEqual(set(actions), {"remember.md", "recall.md",
-                                        "forget.md", "memory.md"})
+                                        "forget.md", "foldcrumbs.md"})
         for name in actions:
             text = (self.dir / name).read_text(encoding="utf-8")
             self.assertIn(self.surface.MARKER, text)
@@ -687,7 +687,7 @@ class TestSurface(unittest.TestCase):
             self.assertIn("allowed-tools:", text)
         # Frontmatter must stay valid YAML even when the description contains
         # ": " — values are emitted as quoted scalars.
-        mem = (self.dir / "memory.md").read_text(encoding="utf-8")
+        mem = (self.dir / "foldcrumbs.md").read_text(encoding="utf-8")
         self.assertIn(
             'description: "Project memory dashboard: status, health, resume point"',
             mem)
@@ -719,7 +719,7 @@ class TestSurface(unittest.TestCase):
     def test_uninstall_removes_only_managed(self):
         self.surface.install_commands(self.dir)
         removed = self.surface.uninstall_commands(self.dir)
-        self.assertEqual(sorted(removed), ["forget.md", "memory.md",
+        self.assertEqual(sorted(removed), ["foldcrumbs.md", "forget.md",
                                            "recall.md", "remember.md"])
         self.assertEqual(list(self.dir.glob("*.md")), [])
 
@@ -771,7 +771,7 @@ class TestSurface(unittest.TestCase):
         added = self.surface.install_opencode_commands(cfg)
         self.assertEqual(
             {n for n, a in added.items() if a == "created"},
-            {"forget", "memory", "recall"})
+            {"foldcrumbs", "forget", "recall"})
         self.assertEqual(added["remember"], "skipped (user command)")
         out = _json.loads(cfg.read_text(encoding="utf-8"))
         self.assertEqual(out["command"]["remember"]["template"], "mine")  # user's
@@ -788,7 +788,7 @@ class TestSurface(unittest.TestCase):
         self.assertIn("foldcrumbs recall", final["command"]["recall"]["template"])
         # Uninstall removes ours, keeps the user's same-name command.
         removed = self.surface.uninstall_opencode_commands(cfg)
-        self.assertEqual(sorted(removed), ["forget", "memory", "recall"])
+        self.assertEqual(sorted(removed), ["foldcrumbs", "forget", "recall"])
         out = _json.loads(cfg.read_text(encoding="utf-8"))
         self.assertEqual(out["command"], {"remember": {"template": "mine"}})
 
