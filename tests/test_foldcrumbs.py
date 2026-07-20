@@ -782,6 +782,19 @@ class TestSurface(unittest.TestCase):
         out = _json.loads(cfg.read_text(encoding="utf-8"))
         self.assertEqual(out["command"], {"remember": {"template": "mine"}})
 
+    def test_opencode_uninstall_spares_user_command_mentioning_foldcrumbs(self):
+        # Ownership = our marker, NOT the word "foldcrumbs": a user command
+        # that happens to call foldcrumbs must survive uninstall.
+        import json as _json
+        d = Path(tempfile.mkdtemp(prefix="ccmem_ocode_"))
+        cfg = d / "opencode.json"
+        cfg.write_text(_json.dumps({"command": {
+            "recall": {"template": "run foldcrumbs recall and summarize"}}}),
+            encoding="utf-8")
+        self.assertEqual(self.surface.uninstall_opencode_commands(cfg), [])
+        out = _json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertIn("recall", out["command"])
+
     def test_codex_prompts_dir_honours_codex_home(self):
         os.environ["CODEX_HOME"] = "/tmp/fc-codex-home"
         try:
@@ -806,12 +819,13 @@ class TestSurface(unittest.TestCase):
 
 class TestClaudeMcp(unittest.TestCase):
     def _fake_claude(self, get_rc: int, add_rc: int,
-                     get_scope: str = "User") -> str:
+                     get_scope: str = "User", get_extra: str = "") -> str:
         d = Path(tempfile.mkdtemp(prefix="ccmem_mcp_"))
         script = d / "claude"
         script.write_text(
             "#!/bin/sh\n"
             f'if [ "$2" = "get" ]; then echo "Scope: {get_scope} config"; '
+            f'echo "Command: {get_extra}"; '
             f"exit {get_rc}; fi\n"
             f'if [ "$2" = "add" ]; then exit {add_rc}; fi\n'
             'if [ "$2" = "remove" ]; then exit 0; fi\n'
@@ -827,8 +841,22 @@ class TestClaudeMcp(unittest.TestCase):
         self.assertIn("foldcrumbs", out)
 
     def test_already_registered_is_idempotent(self):
-        out = install.install_claude_mcp(claude_bin=self._fake_claude(0, 0))
+        # "Already registered" requires scope AND command/args to match.
+        rt = Path(tempfile.mkdtemp(prefix="ccmem_rt_"))
+        cmd = install._mcp_command(rt)
+        out = install.install_claude_mcp(
+            runtime_root=rt,
+            claude_bin=self._fake_claude(0, 0, get_extra=" ".join(cmd)))
         self.assertEqual(out, "already registered")
+
+    def test_stale_registration_is_refreshed(self):
+        # Same scope but an old interpreter/runtime path -> remove + re-add.
+        rt = Path(tempfile.mkdtemp(prefix="ccmem_rt_"))
+        out = install.install_claude_mcp(
+            runtime_root=rt,
+            claude_bin=self._fake_claude(0, 0,
+                                         get_extra="/old/python /old/launcher.py"))
+        self.assertEqual(out, "refreshed (user scope)")
 
     def test_registers_at_requested_scope(self):
         out = install.install_claude_mcp(claude_bin=self._fake_claude(1, 0),

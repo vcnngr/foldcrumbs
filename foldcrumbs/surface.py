@@ -34,7 +34,8 @@ _CLI_NOTE = (
     "(use `python3 -m foldcrumbs` if `foldcrumbs` is not on PATH)."
 )
 
-_ALLOWED = "Bash(foldcrumbs:*), Bash(python3 -m foldcrumbs:*)"
+# Read is needed by the no-argument paths (e.g. /recall reads MEMORY.md).
+_ALLOWED = "Bash(foldcrumbs:*), Bash(python3 -m foldcrumbs:*), Read"
 
 
 def _cmd(description: str, argument_hint: str, body: str) -> str:
@@ -344,7 +345,11 @@ def install_opencode_commands(config_path: Path) -> list[str]:
     for name, (desc, _hint, body) in _BODIES.items():
         if name in commands:
             continue
-        commands[name] = {"description": desc, "template": body.strip()}
+        # The marker line makes ownership unambiguous: uninstall removes only
+        # templates carrying it, never a user command that merely mentions
+        # foldcrumbs.
+        commands[name] = {"description": desc,
+                          "template": _MARKER_LINE + "\n" + body.strip()}
         added.append(name)
     if added:
         path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
@@ -367,7 +372,7 @@ def uninstall_opencode_commands(config_path: Path) -> list[str]:
     removed = [
         name for name in _BODIES
         if isinstance(commands.get(name), dict)
-        and "foldcrumbs" in commands[name].get("template", "")
+        and MARKER in commands[name].get("template", "")
     ]
     for name in removed:
         del commands[name]
