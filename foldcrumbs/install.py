@@ -431,9 +431,13 @@ def install_claude_mcp(
                 ".mcp.json (project) or via `claude mcp add`:\n"
                 + claude_mcp_snippet(runtime_root))
     try:
+        # `mcp get` succeeds if the server exists in ANY visible scope, so the
+        # probe must also match the requested scope (its output names it, e.g.
+        # "Scope: User config") — otherwise `install --local` with an existing
+        # user-scoped entry would silently skip the project registration.
         probe = subprocess.run([exe, "mcp", "get", "foldcrumbs"],
                                capture_output=True, text=True, timeout=30)
-        if probe.returncode == 0:
+        if probe.returncode == 0 and f"{scope} config" in probe.stdout.lower():
             return "already registered"
         add = subprocess.run(
             [exe, "mcp", "add", "--scope", scope, "foldcrumbs", "--", *cmd],
@@ -449,13 +453,16 @@ def install_claude_mcp(
             + claude_mcp_snippet(runtime_root))
 
 
-def uninstall_claude_mcp(claude_bin: str | None = None) -> str:
-    """Best-effort `claude mcp remove foldcrumbs` (user scope)."""
+def uninstall_claude_mcp(
+    claude_bin: str | None = None, scope: str = "user"
+) -> str:
+    """Best-effort `claude mcp remove foldcrumbs` from the scope we installed
+    into (mirror install: user by default, project for --local)."""
     exe = shutil.which(claude_bin or config.claude_bin())
     if exe is None:
         return "claude CLI not found — remove manually with `claude mcp remove foldcrumbs`"
     try:
-        res = subprocess.run([exe, "mcp", "remove", "--scope", "user", "foldcrumbs"],
+        res = subprocess.run([exe, "mcp", "remove", "--scope", scope, "foldcrumbs"],
                              capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"claude CLI failed ({exc})"
