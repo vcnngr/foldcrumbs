@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`publish.yml`, `PYPI_API_TOKEN` repo secret).
 
 ### Fixed
+- Reinstall refreshes marked OpenCode command entries when templates change
+  (user commands still skipped), and repairs a Claude MCP registration
+  shadowed by another scope (failed `mcp add` → remove + retry in the
+  requested scope).
 - OpenCode uninstall identifies our command entries by an explicit ownership
   marker in the template — a user command that merely mentions foldcrumbs is
   never removed.

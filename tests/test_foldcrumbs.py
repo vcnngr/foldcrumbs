@@ -769,13 +769,23 @@ class TestSurface(unittest.TestCase):
             {"mcp": {"x": {}}, "command": {"remember": {"template": "mine"}}}),
             encoding="utf-8")
         added = self.surface.install_opencode_commands(cfg)
-        self.assertEqual(sorted(added), ["forget", "memory", "recall"])
+        self.assertEqual(
+            {n for n, a in added.items() if a == "created"},
+            {"forget", "memory", "recall"})
+        self.assertEqual(added["remember"], "skipped (user command)")
         out = _json.loads(cfg.read_text(encoding="utf-8"))
         self.assertEqual(out["command"]["remember"]["template"], "mine")  # user's
         self.assertIn("foldcrumbs recall", out["command"]["recall"]["template"])
         self.assertIn("x", out["mcp"])  # unrelated config untouched
-        # Idempotent.
-        self.assertEqual(self.surface.install_opencode_commands(cfg), [])
+        # Idempotent; a stale marked template is refreshed on reinstall.
+        again = self.surface.install_opencode_commands(cfg)
+        self.assertNotIn("created", again.values())
+        out["command"]["recall"]["template"] = f"old <!-- {self.surface.MARKER} -->"
+        cfg.write_text(_json.dumps(out), encoding="utf-8")
+        self.assertEqual(
+            self.surface.install_opencode_commands(cfg)["recall"], "refreshed")
+        final = _json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertIn("foldcrumbs recall", final["command"]["recall"]["template"])
         # Uninstall removes ours, keeps the user's same-name command.
         removed = self.surface.uninstall_opencode_commands(cfg)
         self.assertEqual(sorted(removed), ["forget", "memory", "recall"])
@@ -848,6 +858,25 @@ class TestClaudeMcp(unittest.TestCase):
             runtime_root=rt,
             claude_bin=self._fake_claude(0, 0, get_extra=" ".join(cmd)))
         self.assertEqual(out, "already registered")
+
+    def test_shadowed_scope_is_replaced_on_add_failure(self):
+        # get shows the OTHER scope (project shadowed by user); first add
+        # fails because the shadowed entry exists -> remove + retry.
+        d = Path(tempfile.mkdtemp(prefix="ccmem_mcp_"))
+        state = d / "state"
+        script = d / "claude"
+        script.write_text(
+            "#!/bin/sh\n"
+            'if [ "$2" = "get" ]; then echo "Scope: User config"; exit 0; fi\n'
+            f'if [ "$2" = "add" ]; then if [ -f "{state}" ]; then exit 0; '
+            f'else touch "{state}"; exit 1; fi; fi\n'
+            'if [ "$2" = "remove" ]; then exit 0; fi\n'
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        out = install.install_claude_mcp(claude_bin=str(script), scope="project")
+        self.assertEqual(out, "refreshed (project scope)")
 
     def test_stale_registration_is_refreshed(self):
         # Same scope but an old interpreter/runtime path -> remove + re-add.
