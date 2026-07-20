@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Claude Code MCP registration — `foldcrumbs install` registers the
+  `foldcrumbs-mcp` server via `claude mcp add` (user scope; project scope with
+  `--local`), so `remember`/`recall`/`answer`/`forget` become real tools in
+  Claude Code too. Falls back to printing a `.mcp.json` snippet when the CLI
+  is unavailable; `uninstall` removes the registration.
 - Claude Code skill — `foldcrumbs install` writes a managed
   `skills/foldcrumbs/SKILL.md` so the model activates memory on natural
   triggers ("remember that…", "what did we decide about…", corrections of

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -393,6 +394,72 @@ def opencode_paths(global_scope: bool = True) -> dict[str, Path]:
     base = Path.cwd()
     return {"config": base / "opencode.json", "plugins": base / ".opencode" / "plugins",
             "agents": base / "AGENTS.md"}
+
+
+# --------------------------------------------------------------------------- #
+# Claude Code MCP registration
+# --------------------------------------------------------------------------- #
+
+
+def claude_mcp_snippet(runtime_root: Path | None = None) -> str:
+    """A .mcp.json fragment for manual registration (fallback path)."""
+    cmd = _mcp_command(runtime_root)
+    return json.dumps(
+        {"mcpServers": {"foldcrumbs": {"command": cmd[0], "args": cmd[1:]}}},
+        indent=2,
+    )
+
+
+def install_claude_mcp(
+    runtime_root: Path | None = None,
+    claude_bin: str | None = None,
+    scope: str = "user",
+) -> str:
+    """Register the foldcrumbs MCP server with Claude Code (user scope).
+
+    Prefers the `claude mcp add` CLI — it owns the config file format, so we
+    never hand-edit ~/.claude.json. Idempotent via `claude mcp get`. When the
+    CLI is missing or the add fails, returns the .mcp.json snippet for manual
+    registration instead of guessing at file surgery. The staged-runtime
+    launcher keeps the registered command independent of the source checkout,
+    same as the hooks.
+    """
+    cmd = _mcp_command(runtime_root)
+    exe = shutil.which(claude_bin or config.claude_bin())
+    if exe is None:
+        return ("claude CLI not found — register manually by adding this to "
+                ".mcp.json (project) or via `claude mcp add`:\n"
+                + claude_mcp_snippet(runtime_root))
+    try:
+        probe = subprocess.run([exe, "mcp", "get", "foldcrumbs"],
+                               capture_output=True, text=True, timeout=30)
+        if probe.returncode == 0:
+            return "already registered"
+        add = subprocess.run(
+            [exe, "mcp", "add", "--scope", scope, "foldcrumbs", "--", *cmd],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return (f"claude CLI failed ({exc}) — register manually:\n"
+                + claude_mcp_snippet(runtime_root))
+    if add.returncode == 0:
+        return f"registered ({scope} scope)"
+    err = (add.stderr or add.stdout).strip().splitlines()
+    detail = err[-1] if err else "unknown error"
+    return (f"claude mcp add failed: {detail}\nRegister manually:\n"
+            + claude_mcp_snippet(runtime_root))
+
+
+def uninstall_claude_mcp(claude_bin: str | None = None) -> str:
+    """Best-effort `claude mcp remove foldcrumbs` (user scope)."""
+    exe = shutil.which(claude_bin or config.claude_bin())
+    if exe is None:
+        return "claude CLI not found — remove manually with `claude mcp remove foldcrumbs`"
+    try:
+        res = subprocess.run([exe, "mcp", "remove", "--scope", "user", "foldcrumbs"],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"claude CLI failed ({exc})"
+    return "removed" if res.returncode == 0 else "not registered"
 
 
 # --------------------------------------------------------------------------- #

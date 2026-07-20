@@ -751,6 +751,47 @@ class TestSurface(unittest.TestCase):
                          cfg.claude_config_dir() / "commands")
 
 
+class TestClaudeMcp(unittest.TestCase):
+    def _fake_claude(self, get_rc: int, add_rc: int) -> str:
+        d = Path(tempfile.mkdtemp(prefix="ccmem_mcp_"))
+        script = d / "claude"
+        script.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$2" = "get" ]; then exit {get_rc}; fi\n'
+            f'if [ "$2" = "add" ]; then exit {add_rc}; fi\n'
+            'if [ "$2" = "remove" ]; then exit 0; fi\n'
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return str(script)
+
+    def test_missing_cli_returns_manual_snippet(self):
+        out = install.install_claude_mcp(claude_bin="/definitely/not/a/claude")
+        self.assertIn("mcpServers", out)
+        self.assertIn("foldcrumbs", out)
+
+    def test_already_registered_is_idempotent(self):
+        out = install.install_claude_mcp(claude_bin=self._fake_claude(0, 0))
+        self.assertEqual(out, "already registered")
+
+    def test_registers_at_requested_scope(self):
+        out = install.install_claude_mcp(claude_bin=self._fake_claude(1, 0),
+                                         scope="project")
+        self.assertEqual(out, "registered (project scope)")
+
+    def test_add_failure_falls_back_to_snippet(self):
+        out = install.install_claude_mcp(claude_bin=self._fake_claude(1, 1))
+        self.assertIn("failed", out)
+        self.assertIn("mcpServers", out)
+
+    def test_uninstall_paths(self):
+        self.assertIn("remove manually",
+                      install.uninstall_claude_mcp(claude_bin="/not/a/claude"))
+        self.assertEqual(install.uninstall_claude_mcp(
+            claude_bin=self._fake_claude(0, 0)), "removed")
+
+
 class TestInstaller(unittest.TestCase):
     def test_merge_preserves_and_is_idempotent(self):
         with tempfile.TemporaryDirectory(prefix="ccmem_install_") as d:
