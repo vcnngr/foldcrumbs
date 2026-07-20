@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- The same `/remember`, `/recall`, `/forget`, `/memory` surface for the other
+- The same `/remember`, `/recall`, `/forget`, `/foldcrumbs` surface for the other
   agents: Codex gets managed custom prompts in `~/.codex/prompts/`, OpenCode
   gets `command` entries merged into `opencode.json` (user-defined commands
   with the same name are never overwritten).
@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   triggers ("remember that…", "what did we decide about…", corrections of
   stored facts) without an explicit slash command.
 - Slash commands for Claude Code — `foldcrumbs install` now also writes
-  `/remember`, `/recall`, `/forget` and `/memory` to `<config-dir>/commands/`
+  `/remember`, `/recall`, `/forget` and `/foldcrumbs` (dashboard) to `<config-dir>/commands/`
   (managed files: user-edited copies are never touched; `uninstall` removes
   only ours). `/remember` with no arguments distills durable memories from the
   live conversation with user confirmation — in-context distillation, no LLM
@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`publish.yml`, `PYPI_API_TOKEN` repo secret).
 
 ### Fixed
+- Dashboard command renamed `/memory` → `/foldcrumbs`: Claude Code reserves
+  `/memory` for its built-in editor, which shadowed ours entirely.
 - Reinstall refreshes marked OpenCode command entries when templates change
   (user commands still skipped), and repairs a Claude MCP registration
   shadowed by another scope (failed `mcp add` → remove + retry in the
@@ -46,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CODEX_HOME` is set (previously always `~/.codex/prompts`).
 - `uninstall --agent opencode` removes the foldcrumbs command entries from
   `opencode.json` (user commands with the same name are kept).
-- Command frontmatter emits quoted YAML scalars — `/memory`'s description
+- Command frontmatter emits quoted YAML scalars — the dashboard command's description
   contained `: ` and produced invalid frontmatter (found by Codex review).
 - Codex prompts are documented under their real invocation names
   (`/prompts:remember` etc. — Codex namespaces `~/.codex/prompts` files).
