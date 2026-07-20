@@ -16,6 +16,7 @@ hook installer.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from . import config
@@ -304,7 +305,10 @@ def _remove_managed(d: Path, files: dict[str, str]) -> list[str]:
 
 
 def codex_prompts_dir() -> Path:
-    return Path.home() / ".codex" / "prompts"
+    """Codex prompts dir, honouring a custom CODEX_HOME (default ~/.codex)."""
+    home = os.environ.get("CODEX_HOME")
+    base = Path(home).expanduser() if home else Path.home() / ".codex"
+    return base / "prompts"
 
 
 def install_codex_prompts(target_dir: Path | None = None) -> dict[str, str]:
@@ -345,3 +349,30 @@ def install_opencode_commands(config_path: Path) -> list[str]:
     if added:
         path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     return added
+
+
+def uninstall_opencode_commands(config_path: Path) -> list[str]:
+    """Remove our command entries from opencode.json.
+
+    Only entries whose template is recognisably ours (mentions foldcrumbs) are
+    removed — a user's own command under the same name is left alone."""
+    path = Path(config_path)
+    if not path.exists():
+        return []
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    commands = cfg.get("command", {})
+    removed = [
+        name for name in _BODIES
+        if isinstance(commands.get(name), dict)
+        and "foldcrumbs" in commands[name].get("template", "")
+    ]
+    for name in removed:
+        del commands[name]
+    if removed:
+        if not commands:
+            cfg.pop("command", None)
+        path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    return removed

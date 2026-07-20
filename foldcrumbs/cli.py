@@ -364,6 +364,15 @@ def _cmd_backend(args: argparse.Namespace) -> int:
 
 
 def _cmd_uninstall(args: argparse.Namespace) -> int:
+    if args.agent == "opencode":
+        # OpenCode has no hooks in a settings.json — its footprint is the
+        # opencode.json command/MCP entries (plus plugin/AGENTS.md, left for
+        # the user since they may have edited them).
+        from . import surface
+        paths = install.opencode_paths(global_scope=not args.local)
+        removed_cmds = surface.uninstall_opencode_commands(paths["config"])
+        print(f"opencode commands removed: {removed_cmds or '(nothing)'}")
+        return 0
     path = Path(args.settings) if args.settings else install.default_settings_path(
         agent=args.agent, global_scope=not args.local
     )

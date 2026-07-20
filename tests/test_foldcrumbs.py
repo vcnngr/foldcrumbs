@@ -776,6 +776,21 @@ class TestSurface(unittest.TestCase):
         self.assertIn("x", out["mcp"])  # unrelated config untouched
         # Idempotent.
         self.assertEqual(self.surface.install_opencode_commands(cfg), [])
+        # Uninstall removes ours, keeps the user's same-name command.
+        removed = self.surface.uninstall_opencode_commands(cfg)
+        self.assertEqual(sorted(removed), ["forget", "memory", "recall"])
+        out = _json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(out["command"], {"remember": {"template": "mine"}})
+
+    def test_codex_prompts_dir_honours_codex_home(self):
+        os.environ["CODEX_HOME"] = "/tmp/fc-codex-home"
+        try:
+            self.assertEqual(self.surface.codex_prompts_dir(),
+                             Path("/tmp/fc-codex-home/prompts"))
+        finally:
+            os.environ.pop("CODEX_HOME", None)
+        self.assertEqual(self.surface.codex_prompts_dir(),
+                         Path.home() / ".codex" / "prompts")
 
     def test_commands_dir_honours_claude_config_dir(self):
         from foldcrumbs import config as cfg
