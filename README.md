@@ -78,6 +78,13 @@ foldcrumbs install --agent opencode     # OpenCode: opencode.json MCP + plugin +
 ```
 The installer is merge-safe and idempotent: it appends its own hook groups and leaves existing
 hooks (GSD, graphify, …) untouched. A `.foldcrumbs-bak` backup is written first.
+
+For Claude Code the installer also writes four slash commands — **`/remember`**,
+**`/recall`**, **`/forget`**, **`/memory`** — so memory becomes an in-session capability,
+not just a background layer. `/remember` with no arguments distills durable memories from
+the live conversation (with confirmation) using the session's own model — no LLM backend
+needed. The files are marked as managed: edit one and remove the marker line to take
+ownership; `uninstall` removes only ours. Restart open sessions to pick them up.
 Hook and MCP commands use a self-contained runtime snapshot under `~/.foldcrumbs/runtime`, so
 editable checkouts can live in macOS-protected folders such as `~/Documents` without breaking
 agent subprocesses.

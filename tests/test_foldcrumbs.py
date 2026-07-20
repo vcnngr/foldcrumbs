@@ -669,6 +669,66 @@ class TestHandoff(TmpStore):
         self.assertNotIn("HANDOFF", idx)
 
 
+class TestSurface(unittest.TestCase):
+    def setUp(self):
+        from foldcrumbs import surface
+        self.surface = surface
+        self.dir = Path(tempfile.mkdtemp(prefix="ccmem_surface_")) / "commands"
+
+    def test_install_creates_all_commands_with_marker(self):
+        actions = self.surface.install_commands(self.dir)
+        self.assertEqual(set(actions.values()), {"created"})
+        self.assertEqual(set(actions), {"remember.md", "recall.md",
+                                        "forget.md", "memory.md"})
+        for name in actions:
+            text = (self.dir / name).read_text(encoding="utf-8")
+            self.assertIn(self.surface.MARKER, text)
+            self.assertTrue(text.startswith("---"), name)
+            self.assertIn("allowed-tools:", text)
+
+    def test_reinstall_is_idempotent_and_refreshes_stale(self):
+        self.surface.install_commands(self.dir)
+        actions = self.surface.install_commands(self.dir)
+        self.assertEqual(set(actions.values()), {"unchanged"})
+        # A stale managed file (older template) gets refreshed in place.
+        stale = self.dir / "recall.md"
+        stale.write_text(f"old body\n<!-- {self.surface.MARKER} -->\n",
+                         encoding="utf-8")
+        actions = self.surface.install_commands(self.dir)
+        self.assertEqual(actions["recall.md"], "refreshed")
+        self.assertIn("foldcrumbs recall", stale.read_text(encoding="utf-8"))
+
+    def test_user_owned_file_never_touched(self):
+        self.dir.mkdir(parents=True)
+        mine = self.dir / "remember.md"
+        mine.write_text("my own command\n", encoding="utf-8")
+        actions = self.surface.install_commands(self.dir)
+        self.assertEqual(actions["remember.md"], "skipped (user file)")
+        self.assertEqual(mine.read_text(encoding="utf-8"), "my own command\n")
+        # Uninstall must not remove it either.
+        removed = self.surface.uninstall_commands(self.dir)
+        self.assertNotIn("remember.md", removed)
+        self.assertTrue(mine.exists())
+
+    def test_uninstall_removes_only_managed(self):
+        self.surface.install_commands(self.dir)
+        removed = self.surface.uninstall_commands(self.dir)
+        self.assertEqual(sorted(removed), ["forget.md", "memory.md",
+                                           "recall.md", "remember.md"])
+        self.assertEqual(list(self.dir.glob("*.md")), [])
+
+    def test_commands_dir_honours_claude_config_dir(self):
+        from foldcrumbs import config as cfg
+        os.environ["CLAUDE_CONFIG_DIR"] = "/tmp/fc-test-instance"
+        try:
+            self.assertEqual(self.surface.commands_dir(),
+                             Path("/tmp/fc-test-instance/commands"))
+        finally:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        self.assertEqual(self.surface.commands_dir(),
+                         cfg.claude_config_dir() / "commands")
+
+
 class TestInstaller(unittest.TestCase):
     def test_merge_preserves_and_is_idempotent(self):
         with tempfile.TemporaryDirectory(prefix="ccmem_install_") as d:

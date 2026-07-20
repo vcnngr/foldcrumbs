@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Slash commands for Claude Code — `foldcrumbs install` now also writes
+  `/remember`, `/recall`, `/forget` and `/memory` to `<config-dir>/commands/`
+  (managed files: user-edited copies are never touched; `uninstall` removes
+  only ours). `/remember` with no arguments distills durable memories from the
+  live conversation with user confirmation — in-context distillation, no LLM
+  backend required.
 - CI publishes to PyPI automatically when a GitHub release is created
   (`publish.yml`, `PYPI_API_TOKEN` repo secret).
 
