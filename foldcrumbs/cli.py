@@ -286,13 +286,16 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
 def _cmd_install(args: argparse.Namespace) -> int:
     agent = args.agent
     if agent == "opencode":
+        from . import surface
         paths = install.opencode_paths(global_scope=not args.local)
         mcp = install.install_opencode_mcp(paths["config"])
         plugin = install.write_opencode_plugin(paths["plugins"])
         agents = install.append_agents_md(paths["agents"])
+        cmds = surface.install_opencode_commands(paths["config"])
         print(f"opencode.json mcp: {mcp or '(already present)'} ({paths['config']})")
         print(f"plugin: {plugin}")
         print(f"AGENTS.md: {agents or '(block already present)'}")
+        print(f"commands: {cmds or '(already present)'}")
         return 0
 
     path = Path(args.settings) if args.settings else install.default_settings_path(
@@ -313,7 +316,11 @@ def _cmd_install(args: argparse.Namespace) -> int:
         print(f"claude MCP: {install.install_claude_mcp(scope=scope)}")
         print("(restart open sessions to pick up new commands/skill/MCP)")
     if agent == "codex":
+        from . import surface
         print("codex MCP (config.toml):", install.install_codex_mcp_toml())
+        actions = surface.install_codex_prompts()
+        summary = ", ".join(f"/{Path(n).stem} {a}" for n, a in sorted(actions.items()))
+        print(f"codex prompts: {surface.codex_prompts_dir()} — {summary}")
     _configure_backend_at_install(args)
     return 0
 
@@ -368,6 +375,9 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
         sk = surface.uninstall_skill(surface.skill_dir(global_scope=not args.local))
         print(f"skill removed: {sk}")
         print(f"claude MCP: {install.uninstall_claude_mcp()}")
+    if args.agent == "codex":
+        from . import surface
+        print(f"codex prompts removed: {surface.uninstall_codex_prompts() or '(nothing)'}")
     return 0
 
 

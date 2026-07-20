@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The same `/remember`, `/recall`, `/forget`, `/memory` surface for the other
+  agents: Codex gets managed custom prompts in `~/.codex/prompts/`, OpenCode
+  gets `command` entries merged into `opencode.json` (user-defined commands
+  with the same name are never overwritten).
 - Claude Code MCP registration — `foldcrumbs install` registers the
   `foldcrumbs-mcp` server via `claude mcp add` (user scope; project scope with
   `--local`), so `remember`/`recall`/`answer`/`forget` become real tools in

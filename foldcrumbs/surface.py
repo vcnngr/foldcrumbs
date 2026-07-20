@@ -46,8 +46,11 @@ def _cmd(description: str, argument_hint: str, body: str) -> str:
     return "\n".join(fm) + "\n" + _MARKER_LINE + "\n\n" + body.strip() + "\n"
 
 
-COMMANDS: dict[str, str] = {
-    "remember.md": _cmd(
+# Shared bodies: (description, argument-hint, body). The same text serves
+# Claude Code commands (with frontmatter) and Codex prompt files (plain
+# markdown) — both substitute $ARGUMENTS.
+_BODIES: dict[str, tuple[str, str, str]] = {
+    "remember": (
         "Store a durable memory (no arguments: distill from this conversation)",
         "[text to remember]",
         f"""
@@ -67,7 +70,7 @@ each candidate with its proposed type and ask the user to confirm; store each
 confirmed item with `foldcrumbs remember`, then report what was saved.
 """,
     ),
-    "recall.md": _cmd(
+    "recall": (
         "Search project memory and apply it to the current task",
         "<query> [--type t] [--tag t]",
         f"""
@@ -84,7 +87,7 @@ by `foldcrumbs status`) and give the user a short overview of what the store
 knows, grouped by type.
 """,
     ),
-    "forget.md": _cmd(
+    "forget": (
         "Forget a memory that is wrong or revoked",
         "<memory filename or search words>",
         f"""
@@ -100,7 +103,7 @@ explicitly asks to delete the file outright; otherwise the soft delete keeps it
 on disk for audit (a later `foldcrumbs prune --apply` clears it).
 """,
     ),
-    "memory.md": _cmd(
+    "memory": (
         "Project memory dashboard: status, health, resume point",
         "",
         f"""
@@ -118,6 +121,19 @@ summarize for the user:
 Keep it short; propose concrete next actions only when doctor found something.
 """,
     ),
+}
+
+# Claude Code slash commands: frontmatter + marker + body.
+COMMANDS: dict[str, str] = {
+    f"{name}.md": _cmd(desc, hint, body)
+    for name, (desc, hint, body) in _BODIES.items()
+}
+
+# Codex custom prompts (~/.codex/prompts/<name>.md → /<name>): plain markdown,
+# no Claude-specific frontmatter. Codex substitutes $ARGUMENTS the same way.
+CODEX_PROMPTS: dict[str, str] = {
+    f"{name}.md": f"# /{name} — {desc}\n{_MARKER_LINE}\n\n{body.strip()}\n"
+    for name, (desc, _hint, body) in _BODIES.items()
 }
 
 
@@ -197,21 +213,7 @@ def install_commands(target_dir: Path | None = None) -> dict[str, str]:
     A file that exists without our marker belongs to the user — never touched.
     """
     d = Path(target_dir) if target_dir else commands_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    actions: dict[str, str] = {}
-    for name, content in COMMANDS.items():
-        path = d / name
-        if not path.exists():
-            path.write_text(content, encoding="utf-8")
-            actions[name] = "created"
-        elif not is_managed(path):
-            actions[name] = "skipped (user file)"
-        elif path.read_text(encoding="utf-8") == content:
-            actions[name] = "unchanged"
-        else:
-            path.write_text(content, encoding="utf-8")
-            actions[name] = "refreshed"
-    return actions
+    return _write_managed(d, COMMANDS)
 
 
 def skill_dir(global_scope: bool = True) -> Path:
@@ -257,8 +259,31 @@ def uninstall_skill(target_dir: Path | None = None) -> bool:
 def uninstall_commands(target_dir: Path | None = None) -> list[str]:
     """Remove our managed command files (user-owned files are left alone)."""
     d = Path(target_dir) if target_dir else commands_dir()
+    return _remove_managed(d, COMMANDS)
+
+
+def _write_managed(d: Path, files: dict[str, str]) -> dict[str, str]:
+    """Write a set of managed files with the standard contract."""
+    d.mkdir(parents=True, exist_ok=True)
+    actions: dict[str, str] = {}
+    for name, content in files.items():
+        path = d / name
+        if not path.exists():
+            path.write_text(content, encoding="utf-8")
+            actions[name] = "created"
+        elif not is_managed(path):
+            actions[name] = "skipped (user file)"
+        elif path.read_text(encoding="utf-8") == content:
+            actions[name] = "unchanged"
+        else:
+            path.write_text(content, encoding="utf-8")
+            actions[name] = "refreshed"
+    return actions
+
+
+def _remove_managed(d: Path, files: dict[str, str]) -> list[str]:
     removed: list[str] = []
-    for name in COMMANDS:
+    for name in files:
         path = d / name
         if path.exists() and is_managed(path):
             try:
@@ -267,3 +292,52 @@ def uninstall_commands(target_dir: Path | None = None) -> list[str]:
             except OSError:
                 pass
     return removed
+
+
+# --------------------------------------------------------------------------- #
+# Codex prompts + OpenCode commands (same bodies, other agents)
+# --------------------------------------------------------------------------- #
+
+
+def codex_prompts_dir() -> Path:
+    return Path.home() / ".codex" / "prompts"
+
+
+def install_codex_prompts(target_dir: Path | None = None) -> dict[str, str]:
+    """Write /remember, /recall, /forget, /memory as Codex custom prompts."""
+    d = Path(target_dir) if target_dir else codex_prompts_dir()
+    return _write_managed(d, CODEX_PROMPTS)
+
+
+def uninstall_codex_prompts(target_dir: Path | None = None) -> list[str]:
+    d = Path(target_dir) if target_dir else codex_prompts_dir()
+    return _remove_managed(d, CODEX_PROMPTS)
+
+
+def install_opencode_commands(config_path: Path) -> list[str]:
+    """Merge /remember etc. into opencode.json's ``command`` table.
+
+    Same merge policy as the MCP entry: existing keys (user's own commands)
+    are never overwritten; ours are recognisable by the foldcrumbs mention in
+    the template. Returns the commands added.
+    """
+    import json
+
+    path = Path(config_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cfg: dict = {}
+    if path.exists():
+        try:
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            cfg = {}
+    commands = cfg.setdefault("command", {})
+    added: list[str] = []
+    for name, (desc, _hint, body) in _BODIES.items():
+        if name in commands:
+            continue
+        commands[name] = {"description": desc, "template": body.strip()}
+        added.append(name)
+    if added:
+        path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    return added
