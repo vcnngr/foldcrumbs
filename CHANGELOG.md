@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`publish.yml`, `PYPI_API_TOKEN` repo secret).
 
 ### Fixed
+- OpenCode uninstall identifies our command entries by an explicit ownership
+  marker in the template — a user command that merely mentions foldcrumbs is
+  never removed.
+- Slash commands allow the `Read` tool, so `/recall` with no query can
+  actually read `MEMORY.md`.
+- Claude MCP registration verifies command/args as well as scope: a stale
+  registration (old interpreter or runtime path) is replaced on reinstall.
 - Codex prompts are written under `$CODEX_HOME/prompts` when a custom
   `CODEX_HOME` is set (previously always `~/.codex/prompts`).
 - `uninstall --agent opencode` removes the foldcrumbs command entries from

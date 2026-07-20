@@ -434,11 +434,19 @@ def install_claude_mcp(
         # `mcp get` succeeds if the server exists in ANY visible scope, so the
         # probe must also match the requested scope (its output names it, e.g.
         # "Scope: User config") — otherwise `install --local` with an existing
-        # user-scoped entry would silently skip the project registration.
+        # user-scoped entry would silently skip the project registration. And
+        # a scope match alone is not enough: a registration pointing at an old
+        # interpreter or runtime path must be replaced, or re-running install
+        # could never repair a moved Python environment.
         probe = subprocess.run([exe, "mcp", "get", "foldcrumbs"],
                                capture_output=True, text=True, timeout=30)
+        stale = False
         if probe.returncode == 0 and f"{scope} config" in probe.stdout.lower():
-            return "already registered"
+            if all(part in probe.stdout for part in cmd):
+                return "already registered"
+            stale = True
+            subprocess.run([exe, "mcp", "remove", "--scope", scope, "foldcrumbs"],
+                           capture_output=True, text=True, timeout=30)
         add = subprocess.run(
             [exe, "mcp", "add", "--scope", scope, "foldcrumbs", "--", *cmd],
             capture_output=True, text=True, timeout=30)
@@ -446,7 +454,7 @@ def install_claude_mcp(
         return (f"claude CLI failed ({exc}) — register manually:\n"
                 + claude_mcp_snippet(runtime_root))
     if add.returncode == 0:
-        return f"registered ({scope} scope)"
+        return f"{'refreshed' if stale else 'registered'} ({scope} scope)"
     err = (add.stderr or add.stdout).strip().splitlines()
     detail = err[-1] if err else "unknown error"
     return (f"claude mcp add failed: {detail}\nRegister manually:\n"
