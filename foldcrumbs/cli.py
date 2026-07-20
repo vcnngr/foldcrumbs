@@ -307,7 +307,9 @@ def _cmd_install(args: argparse.Namespace) -> int:
         actions = surface.install_commands(cmd_dir)
         summary = ", ".join(f"/{Path(n).stem} {a}" for n, a in sorted(actions.items()))
         print(f"commands: {cmd_dir} — {summary}")
-        print("(restart open sessions to pick up new commands)")
+        sk_dir = surface.skill_dir(global_scope=not args.local)
+        print(f"skill: {sk_dir} — {surface.install_skill(sk_dir)}")
+        print("(restart open sessions to pick up new commands/skill)")
     if agent == "codex":
         print("codex MCP (config.toml):", install.install_codex_mcp_toml())
     _configure_backend_at_install(args)
@@ -361,6 +363,8 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
         from . import surface
         gone = surface.uninstall_commands(surface.commands_dir(global_scope=not args.local))
         print(f"commands removed: {gone or '(nothing)'}")
+        sk = surface.uninstall_skill(surface.skill_dir(global_scope=not args.local))
+        print(f"skill removed: {sk}")
     return 0
 
 

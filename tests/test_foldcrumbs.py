@@ -717,6 +717,28 @@ class TestSurface(unittest.TestCase):
                                            "recall.md", "remember.md"])
         self.assertEqual(list(self.dir.glob("*.md")), [])
 
+    def test_skill_install_refresh_and_user_protection(self):
+        d = Path(tempfile.mkdtemp(prefix="ccmem_skill_")) / "skills" / "foldcrumbs"
+        self.assertEqual(self.surface.install_skill(d), "created")
+        text = (d / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn(self.surface.MARKER, text)
+        self.assertIn("name: foldcrumbs", text)
+        self.assertEqual(self.surface.install_skill(d), "unchanged")
+        # Stale managed copy refreshes; user copy is protected.
+        (d / "SKILL.md").write_text(f"old\n<!-- {self.surface.MARKER} -->\n",
+                                    encoding="utf-8")
+        self.assertEqual(self.surface.install_skill(d), "refreshed")
+        (d / "SKILL.md").write_text("mine\n", encoding="utf-8")
+        self.assertEqual(self.surface.install_skill(d), "skipped (user file)")
+        self.assertFalse(self.surface.uninstall_skill(d))
+        self.assertTrue((d / "SKILL.md").exists())
+
+    def test_skill_uninstall_removes_managed_and_empty_dir(self):
+        d = Path(tempfile.mkdtemp(prefix="ccmem_skill_")) / "skills" / "foldcrumbs"
+        self.surface.install_skill(d)
+        self.assertTrue(self.surface.uninstall_skill(d))
+        self.assertFalse(d.exists())
+
     def test_commands_dir_honours_claude_config_dir(self):
         from foldcrumbs import config as cfg
         os.environ["CLAUDE_CONFIG_DIR"] = "/tmp/fc-test-instance"
