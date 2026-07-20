@@ -739,6 +739,35 @@ class TestSurface(unittest.TestCase):
         self.assertTrue(self.surface.uninstall_skill(d))
         self.assertFalse(d.exists())
 
+    def test_codex_prompts_no_frontmatter_and_managed_cycle(self):
+        d = Path(tempfile.mkdtemp(prefix="ccmem_codexp_")) / "prompts"
+        actions = self.surface.install_codex_prompts(d)
+        self.assertEqual(set(actions.values()), {"created"})
+        text = (d / "remember.md").read_text(encoding="utf-8")
+        self.assertFalse(text.startswith("---"))  # no Claude frontmatter
+        self.assertIn(self.surface.MARKER, text)
+        self.assertIn("$ARGUMENTS", text)
+        self.assertEqual(set(self.surface.install_codex_prompts(d).values()),
+                         {"unchanged"})
+        removed = self.surface.uninstall_codex_prompts(d)
+        self.assertEqual(len(removed), 4)
+
+    def test_opencode_commands_merge_preserves_user_keys(self):
+        import json as _json
+        d = Path(tempfile.mkdtemp(prefix="ccmem_ocode_"))
+        cfg = d / "opencode.json"
+        cfg.write_text(_json.dumps(
+            {"mcp": {"x": {}}, "command": {"remember": {"template": "mine"}}}),
+            encoding="utf-8")
+        added = self.surface.install_opencode_commands(cfg)
+        self.assertEqual(sorted(added), ["forget", "memory", "recall"])
+        out = _json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(out["command"]["remember"]["template"], "mine")  # user's
+        self.assertIn("foldcrumbs recall", out["command"]["recall"]["template"])
+        self.assertIn("x", out["mcp"])  # unrelated config untouched
+        # Idempotent.
+        self.assertEqual(self.surface.install_opencode_commands(cfg), [])
+
     def test_commands_dir_honours_claude_config_dir(self):
         from foldcrumbs import config as cfg
         os.environ["CLAUDE_CONFIG_DIR"] = "/tmp/fc-test-instance"
