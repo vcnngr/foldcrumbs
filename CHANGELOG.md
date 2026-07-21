@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-21
+
+The "active surface" release: memory stops being only a background layer and
+becomes an in-session capability on every supported agent. Hardened by five
+rounds of Codex review (12 findings, all fixed).
+
 ### Added
 - The same `/remember`, `/recall`, `/forget`, `/foldcrumbs` surface for the other
   agents: Codex gets managed custom prompts in `~/.codex/prompts/`, OpenCode
@@ -141,6 +147,7 @@ can now be forgotten, superseded, and merged across stores.
 - Trust/decay model and typed-memory categories adapted from
   [memanto](https://github.com/moorcheh-ai/memanto) (MIT).
 
-[Unreleased]: https://github.com/vcnngr/foldcrumbs/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/vcnngr/foldcrumbs/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/vcnngr/foldcrumbs/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/vcnngr/foldcrumbs/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/vcnngr/foldcrumbs/releases/tag/v0.3.0
