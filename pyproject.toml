@@ -36,3 +36,13 @@ include = ["foldcrumbs*"]
 
 [tool.setuptools.package-data]
 foldcrumbs = ["hooks/*.py"]
+
+[tool.ruff.lint]
+# Ruff's historical default set, declared explicitly rather than inherited.
+# 0.16 widened the implicit default and turned CI red on code that had not
+# changed — including v0.5.0, which had shipped green. The wider set flags the
+# broad excepts in the hooks and the federation writers (BLE001, S110), but
+# those are the design: a hook must never break a session, and a store that
+# cannot publish must still work locally. Pinning the linter would freeze the
+# tooling; naming the contract keeps it reproducible across versions.
+select = ["E4", "E7", "E9", "F"]

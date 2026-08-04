@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- CI lint pinned to a declared rule set. `ruff check` was inheriting whatever
+  the newest release considered default, so 0.16 turned `main` red on code
+  that had not changed — v0.5.0 fails it too. The rules the project actually
+  enforces are now named in `pyproject.toml`.
+
 ## [0.6.0] — 2026-08-04
 
 The "federation" release: several CLI instances on the same project stop being
