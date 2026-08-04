@@ -158,6 +158,40 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
     return target
 
 
+def ensure_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
+    """Publish this root's shard if it is missing or behind the store.
+
+    Shards are normally written by ``rebuild_index``, which only runs when
+    something is remembered or distilled. An instance that federates an
+    *existing* store would therefore appear registered but empty until its
+    next write — its whole history invisible to everyone else. Called from the
+    hooks so joining the federation shows what is already there, immediately.
+    """
+    cur = federation.current_root_path()
+    marker = federation.read_marker_data(cur) if cur is not None else None
+    if not marker or federation.is_tombstoned(marker["id"]):
+        return None
+    target = shard_path(marker["id"], cwd)
+    if target is None:
+        return None
+
+    memory_dir = config.memory_dir(cwd)
+    try:
+        newest = max(
+            (p.stat().st_mtime for p in memory_dir.glob("*.md")), default=0.0
+        )
+    except OSError:
+        return None
+    if not newest:
+        return None
+    try:
+        if target.stat().st_mtime >= newest:
+            return target      # already current; nothing to republish
+    except OSError:
+        pass                   # missing or unreadable: publish it
+    return write_shard(cwd)
+
+
 def drop_shard(root_id: str, cwd: str | os.PathLike[str] | None = None) -> bool:
     """Remove one root's shard for this project (used when it unregisters)."""
     p = shard_path(root_id, cwd)
@@ -329,8 +363,14 @@ def render_block(
         if cost > budget:
             # First entry and already over: include it, but truncated. Letting
             # it through whole would make the ceiling advisory, and dropping it
-            # would render an empty view for a store that has content.
-            row = dict(row, description=str(row.get("description", ""))[:budget])
+            # would render an empty view for a store that has content. Title
+            # and path are not negotiable — the path is how the reader gets the
+            # rest — so the description absorbs the whole cut.
+            fixed = len(str(row.get("title", ""))) + len(str(row.get("path", "")))
+            row = dict(row,
+                       description=str(row.get("description", ""))[
+                           :max(0, budget - fixed)])
+            cost = min(cost, max(fixed, budget))
         budget -= cost
         shown.append(row)
     dropped = len(rows) - len(shown)

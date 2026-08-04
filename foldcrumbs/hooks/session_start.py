@@ -78,6 +78,10 @@ def main() -> int:
     # in the region the handoff invalidates anyway and costs no extra cache.
     try:
         from foldcrumbs import index_shard, store as _store
+        # Publish before reading: an instance that just federated an existing
+        # store has no shard yet, and would show up to the others as present
+        # but empty until its next write.
+        index_shard.ensure_shard(cwd)
         federated = index_shard.render_block(cwd, list(_store._TYPE_ORDER))
         if federated:
             parts.append(federated)

@@ -25,8 +25,14 @@ class TmpStore(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="ccmem_test_")
         self._state = tempfile.mkdtemp(prefix="ccmem_test_state_")
+        # FOLDCRUMBS_* take precedence over the legacy ENGRAM_* names, so
+        # setting only the latter leaves a developer who exported either one
+        # pointed at their real store.
         self._saved = {k: os.environ.get(k) for k in
-                       ("ENGRAM_DIR", "ENGRAM_STATE_DIR", "CLAUDE_CONFIG_DIR")}
+                       ("ENGRAM_DIR", "ENGRAM_STATE_DIR", "CLAUDE_CONFIG_DIR",
+                        "FOLDCRUMBS_DIR", "FOLDCRUMBS_STATE_DIR")}
+        for k in ("FOLDCRUMBS_DIR", "FOLDCRUMBS_STATE_DIR"):
+            os.environ.pop(k, None)
         os.environ["ENGRAM_DIR"] = self.dir
         # Isolate the federation registry too. Without this, search() —
         # federated by default — would consult the developer's real
@@ -36,6 +42,9 @@ class TmpStore(unittest.TestCase):
         import importlib
         from foldcrumbs import config as _c
         importlib.reload(_c)
+        # Fail loudly rather than quietly touching real data.
+        assert str(Path.home()) not in str(_c.STATE_DIR), "test escaped its sandbox"
+        assert str(Path.home()) not in str(_c.memory_dir()), "test escaped its sandbox"
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -2008,6 +2017,63 @@ class TestIndexShards(_FederationEnv):
         block = self.index_shard.render_block(self.proj, ["fact"])
         self.assertLess(len(block), 20000)
         self.assertIn("further entries not shown", block)
+
+    def test_shard_is_published_on_first_federated_read(self):
+        # Federating an existing store must not look empty to everyone else
+        # until its owner happens to write something.
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "Pre-existing", "Recorded before federating.",
+                     "2026-01-01T00:00:00+00:00")
+        shard = self.index_shard.shard_path(ref.id, self.proj)
+        self.assertFalse(shard.exists())        # nothing rebuilt yet
+        self.index_shard.ensure_shard(self.proj)
+        self.assertTrue(shard.is_file())
+        self.assertEqual(len(json.loads(shard.read_text())["entries"]), 1)
+
+    def test_ensure_shard_does_not_republish_a_current_one(self):
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
+        first = self.index_shard.ensure_shard(self.proj)
+        stamp = first.stat().st_mtime
+        # Returns the existing shard without rewriting it: republishing on
+        # every session would churn the file for no reader benefit.
+        self.assertEqual(self.index_shard.ensure_shard(self.proj), first)
+        self.assertEqual(first.stat().st_mtime, stamp)
+
+    def test_federated_scan_reads_a_bounded_number_of_files(self):
+        from foldcrumbs import store
+        other = self.federation.register(self._root(".claude-work"))
+        d = other.memory_dir(self.proj)
+        d.mkdir(parents=True, exist_ok=True)
+        cap = store._MAX_FEDERATED_SCAN
+        reads = []
+        real_read = Path.read_text
+
+        def counting_read(self_path, *a, **kw):
+            if self_path.suffix == ".md":
+                reads.append(self_path.name)
+            return real_read(self_path, *a, **kw)
+
+        for i in range(cap + 25):
+            # Unparseable on purpose: a file that fails to become a record
+            # still cost a read, which is what the cap has to bound.
+            (d / f"m{i:04d}.md").write_text("not frontmatter", encoding="utf-8")
+        Path.read_text = counting_read
+        try:
+            list(store.iter_federated(self.proj))
+        finally:
+            Path.read_text = real_read
+        self.assertLessEqual(len(reads), cap)
+
+    def test_a_single_huge_entry_cannot_blow_the_size_cap(self):
+        other = self.federation.register(self._root(".claude-work"))
+        self._publish(other, [{"filename": "big.md", "type": "fact",
+                               "title": "T" * 200, "description": "x" * 500000,
+                               "path": "/abs/big.md",
+                               "created_at": "2026-01-01T00:00:00+00:00"}])
+        block = self.index_shard.render_block(self.proj, ["fact"])
+        self.assertLess(len(block), self.index_shard._MAX_FEDERATED_CHARS + 2000)
+        self.assertIn("/abs/big.md", block)   # the path survives the cut
 
     def test_unfederated_root_publishes_nothing(self):
         self._root(".claude").mkdir(parents=True)   # marker never created

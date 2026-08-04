@@ -131,12 +131,23 @@ def iter_memories(cwd: str | os.PathLike[str] | None = None) -> Iterator[MemoryR
     yield from iter_memories_in(config.memory_dir(cwd))
 
 
-def iter_memories_in(directory: Path) -> Iterator[MemoryRecord]:
-    """Yield every memory in an arbitrary store directory."""
+def iter_memories_in(
+    directory: Path, max_files: int | None = None
+) -> Iterator[MemoryRecord]:
+    """Yield every memory in an arbitrary store directory.
+
+    ``max_files`` bounds how many files are *read*, not how many records come
+    out: unreadable and malformed ones cost a read too, so counting only what
+    survives parsing bounds nothing. Names are listed up front (cheap); the
+    reads are what this limits.
+    """
     d = Path(directory)
     if not d.exists():
         return
-    for path in sorted(d.glob("*.md")):
+    names = sorted(d.glob("*.md"))
+    if max_files is not None:
+        names = names[:max_files]
+    for path in names:
         if path.name in (config.INDEX_NAME, config.HANDOFF_NAME):
             continue
         try:
@@ -169,19 +180,14 @@ def iter_federated(cwd: str | os.PathLike[str] | None = None) -> Iterator[Memory
         if ref.available_within(index_shard._AVAILABILITY_TIMEOUT) is not True:
             continue
         d = ref.memory_dir(cwd)
-        seen = 0
         try:
-            for rec in iter_memories_in(d):
-                # Count every file read, not just the ones kept: a store full
-                # of superseded records would otherwise be scanned without
-                # limit, which is exactly the cost this bounds.
-                seen += 1
-                if seen > _MAX_FEDERATED_SCAN:
-                    config.log_event(
-                        f"federation: stopped scanning {ref.label} after "
-                        f"{_MAX_FEDERATED_SCAN} files"
-                    )
-                    break
+            total = sum(1 for _ in d.glob("*.md")) if d.is_dir() else 0
+            if total > _MAX_FEDERATED_SCAN:
+                config.log_event(
+                    f"federation: reading only {_MAX_FEDERATED_SCAN} of "
+                    f"{total} files in {ref.label}"
+                )
+            for rec in iter_memories_in(d, max_files=_MAX_FEDERATED_SCAN):
                 if rec.status != "active":
                     continue
                 rec.origin_root = ref.label
