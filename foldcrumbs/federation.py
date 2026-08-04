@@ -28,6 +28,7 @@ detectable (``state_dir_conflict``) rather than merely invisible.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -72,6 +73,13 @@ def _now_iso() -> str:
 
 _LOCK_POLL_SECONDS = 0.02
 _LOCK_WAIT_SECONDS = 5.0
+
+# Errors that mean "someone else holds it, try again". Anything else is a
+# filesystem that will not lock this file, where waiting changes nothing.
+_CONTENDED_ERRNOS = frozenset(
+    e for e in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES, errno.EINTR)
+    if e is not None
+)
 
 
 @contextlib.contextmanager
@@ -197,7 +205,20 @@ def file_lock(lock_path: Path):
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
-            except OSError:
+            except OSError as exc:
+                # Only contention is worth waiting out. ENOLCK, EINVAL and the
+                # like mean this file will never be lockable — some network and
+                # FUSE mounts simply do not support it — and retrying spends the
+                # whole deadline on the session-start path for a result that
+                # cannot change.
+                if exc.errno not in _CONTENDED_ERRNOS:
+                    fh.close()
+                    config.log_event(
+                        f"federation: {lock_path} cannot be locked "
+                        f"({exc.strerror}); not mutating"
+                    )
+                    yield False
+                    return
                 if time.monotonic() > deadline:
                     fh.close()
                     config.log_event(

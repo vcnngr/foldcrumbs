@@ -2113,6 +2113,52 @@ class TestIndexShards(_FederationEnv):
         finally:
             self.federation._LOCK_WAIT_SECONDS = wait
 
+    def test_a_filesystem_that_cannot_lock_fails_fast(self):
+        # ENOLCK will never become success, so retrying it spends the whole
+        # deadline on the session-start path for nothing.
+        import errno as _e
+        if self.federation.fcntl is None:
+            self.skipTest("no fcntl on this platform")
+        lock = self.index_shard.shards_dir(self.proj) / ".lock-probe"
+        real = self.federation.fcntl.flock
+
+        def unsupported(*a, **kw):
+            raise OSError(_e.ENOLCK, "no locks available")
+
+        self.federation.fcntl.flock = unsupported
+        try:
+            start = time.monotonic()
+            with self.federation.file_lock(lock) as held:
+                self.assertFalse(held)
+            elapsed = time.monotonic() - start
+        finally:
+            self.federation.fcntl.flock = real
+        self.assertLess(elapsed, self.federation._LOCK_WAIT_SECONDS / 2)
+
+    def test_contention_is_still_waited_out(self):
+        # The counterpart: a lock merely held by someone else must be retried,
+        # not abandoned on the first refusal.
+        import errno as _e
+        if self.federation.fcntl is None:
+            self.skipTest("no fcntl on this platform")
+        lock = self.index_shard.shards_dir(self.proj) / ".lock-probe2"
+        real = self.federation.fcntl.flock
+        calls = []
+
+        def busy_then_free(fd, op):
+            calls.append(op)
+            if len(calls) < 3:
+                raise OSError(_e.EWOULDBLOCK, "would block")
+            return real(fd, op)
+
+        self.federation.fcntl.flock = busy_then_free
+        try:
+            with self.federation.file_lock(lock) as held:
+                self.assertTrue(held)
+        finally:
+            self.federation.fcntl.flock = real
+        self.assertGreaterEqual(len(calls), 3)
+
     def test_a_shard_already_matching_the_store_is_left_alone(self):
         ref = self.federation.register(self._root(".claude"))
         self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
