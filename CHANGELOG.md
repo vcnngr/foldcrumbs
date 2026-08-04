@@ -27,7 +27,11 @@ instance only ever writes its own.
   entries are one file per root under `<state-dir>/roots/` — never a shared
   manifest, which would put every instance on the same write path.
 - **Per-root index shards** under `<state-dir>/projects/<project>/roots/`,
-  published on every index rebuild. Merged at read time with a total ordering
+  published on every index rebuild, and on the first federated read so an
+  instance that federates an existing store is not advertised as empty.
+  Writes are serialised and carry the store version they were taken from, so
+  a slower scan cannot replace a newer snapshot — sharding removes that race
+  between instances, but one instance runs several processes. Merged at read time with a total ordering
   key (type, `created_at` descending, root id, filename), so every instance
   derives the same order without a shared file to agree through.
 - **Federated block** injected after the local index at SessionStart *and*

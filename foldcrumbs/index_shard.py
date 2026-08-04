@@ -9,8 +9,13 @@ Readers merge the shards; nothing is ever written to a single shared index.
 That is the whole design in one line, and the reason for it is a lost update:
 with one file, two instances scanning and rewriting concurrently would publish
 a snapshot that silently drops whatever the other just added. ``os.replace``
-prevents a torn file, not a stale one. One writer per file removes the race
-instead of narrowing it.
+prevents a torn file, not a stale one.
+
+Sharding removes that race *between* roots — but a root is an instance, not a
+process, and one instance runs several at once (a hook worker, a CLI call, the
+MCP server). So the same lost update is possible within a single shard, and
+writes take the registry lock and refuse to replace a snapshot taken later
+than their own (``source_mtime``).
 
 The local ``MEMORY.md`` is untouched. It stays byte-identical while only other
 instances write, so the SessionStart-injected prefix keeps riding the agent's
@@ -72,6 +77,15 @@ def shard_path(root_id: str, cwd: str | os.PathLike[str] | None = None) -> Path 
     return shards_dir(cwd) / f"{root_id}.json"
 
 
+def _source_mtime(memory_dir: Path) -> float:
+    """Newest mtime in a store: a cheap version number for its contents."""
+    try:
+        return max((p.stat().st_mtime for p in memory_dir.glob("*.md")),
+                   default=0.0)
+    except OSError:
+        return 0.0
+
+
 def _stable_created_at(rec, path: Path) -> str:
     """A timestamp that means the same thing on every read.
 
@@ -124,6 +138,9 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
         return None
 
     memory_dir = config.memory_dir(cwd)
+    # Read the store's version *before* scanning it, so a memory written while
+    # we scan makes our snapshot look older than it is rather than newer.
+    source_mtime = _source_mtime(memory_dir)
     entries = [
         _entry(m, memory_dir)
         for m in store.iter_memories(cwd)
@@ -136,19 +153,40 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
         "label": federation._label_for(cur),
         "memory_dir": str(memory_dir),
         "written_at": datetime.now(timezone.utc).isoformat(),
+        "source_mtime": source_mtime,
         "entries": entries,
     }
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, indent=2, sort_keys=True)
-                fh.write("\n")
-            os.replace(tmp, target)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        # One shard has one owning *root*, but a root has several processes —
+        # a hook worker, a CLI call, the MCP server. Two of them scanning and
+        # replacing concurrently is the same lost update sharding removes
+        # between roots: the slower scan wins the replace and the shard
+        # advertises a stale store until something rebuilds again. Serialise,
+        # then refuse to overwrite a snapshot taken later than ours.
+        with federation._registry_lock() as locked:
+            if not locked:
+                config.log_event(
+                    "federation: shard not published (registry lock unavailable)"
+                )
+                return None
+            existing = _read_shard_file(target)
+            if existing is not None:
+                prior = existing.get("source_mtime")
+                if isinstance(prior, (int, float)) and prior > source_mtime:
+                    config.log_event(
+                        f"federation: kept a newer shard for {marker['id']}"
+                    )
+                    return target
+            fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, indent=2, sort_keys=True)
+                    fh.write("\n")
+                os.replace(tmp, target)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
     except OSError:
         # A store that cannot publish is still a working store: the local
         # index and recall are unaffected, this instance is just invisible to
@@ -175,21 +213,23 @@ def ensure_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
     if target is None:
         return None
 
-    memory_dir = config.memory_dir(cwd)
-    try:
-        newest = max(
-            (p.stat().st_mtime for p in memory_dir.glob("*.md")), default=0.0
-        )
-    except OSError:
-        return None
+    newest = _source_mtime(config.memory_dir(cwd))
     if not newest:
         return None
-    try:
-        if target.stat().st_mtime >= newest:
-            return target      # already current; nothing to republish
-    except OSError:
-        pass                   # missing or unreadable: publish it
+    existing = _read_shard_file(target)
+    if existing is not None:
+        prior = existing.get("source_mtime")
+        if isinstance(prior, (int, float)) and prior >= newest:
+            return target      # already covers the current store
     return write_shard(cwd)
+
+
+def _read_shard_file(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def drop_shard(root_id: str, cwd: str | os.PathLike[str] | None = None) -> bool:

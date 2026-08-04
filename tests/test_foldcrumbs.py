@@ -2040,6 +2040,46 @@ class TestIndexShards(_FederationEnv):
         self.assertEqual(self.index_shard.ensure_shard(self.proj), first)
         self.assertEqual(first.stat().st_mtime, stamp)
 
+    def test_a_slower_scan_cannot_overwrite_a_newer_shard(self):
+        # One shard has one owning root, but a root has several processes.
+        # The slow one must not win the replace and publish a stale store.
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "First", "Body one.", "2026-01-01T00:00:00+00:00")
+        self.index_shard.write_shard(self.proj)
+        self._memory(ref, "Second", "Body two.", "2026-01-02T00:00:00+00:00")
+        self.index_shard.write_shard(self.proj)
+        shard = self.index_shard.shard_path(ref.id, self.proj)
+        fresh = json.loads(shard.read_text())
+        self.assertEqual(len(fresh["entries"]), 2)
+
+        # Now replay a scan that started before the second memory existed.
+        stale = dict(fresh, entries=fresh["entries"][:1],
+                     source_mtime=fresh["source_mtime"] - 100)
+        real = self.index_shard._source_mtime
+        self.index_shard._source_mtime = lambda d: stale["source_mtime"]
+        try:
+            self.index_shard.write_shard(self.proj)
+        finally:
+            self.index_shard._source_mtime = real
+        self.assertEqual(len(json.loads(shard.read_text())["entries"]), 2)
+
+    def test_shard_is_not_published_without_the_lock(self):
+        import contextlib as _c
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
+        real = self.federation._registry_lock
+
+        @_c.contextmanager
+        def unlockable():
+            yield False
+
+        self.federation._registry_lock = unlockable
+        try:
+            self.assertIsNone(self.index_shard.write_shard(self.proj))
+        finally:
+            self.federation._registry_lock = real
+        self.assertFalse(self.index_shard.shard_path(ref.id, self.proj).exists())
+
     def test_federated_scan_reads_a_bounded_number_of_files(self):
         from foldcrumbs import store
         other = self.federation.register(self._root(".claude-work"))
