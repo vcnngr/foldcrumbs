@@ -66,13 +66,46 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _parse_dt(value: str | None) -> datetime:
+def _parse_dt_opt(value: str | None) -> datetime | None:
+    """Parse a stored timestamp to aware UTC, or None if it isn't one.
+
+    A hand-written or imported record can carry a naive timestamp. Mixing
+    naive and aware datetimes raises ``TypeError`` the moment two of them are
+    compared — which is what the index sort does — so a naive value is read as
+    UTC rather than left to blow up a rebuild later.
+
+    None is kept distinct from "now" so callers can tell a timestamp that was
+    *read* from one that was *invented*: an invented one differs on every
+    parse, and anything ordering across machines must not depend on it.
+    """
     if not value:
-        return _now()
+        return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
-        return _now()
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_dt(value: str | None) -> datetime:
+    return _parse_dt_opt(value) or _now()
+
+
+_CLAIM_RE = re.compile(r"^[0-9a-f]{16}:[^/\\]+\.md$")
+
+
+def _clean_claim(raw: str) -> str | None:
+    """Validate one "<root id>:<filename>" supersession claim.
+
+    Both halves are used as lookup keys against the federated view, and the
+    filename half is displayed. Anything that is not a real root id plus a
+    plain filename is dropped rather than carried around as a claim that can
+    never match — or, worse, one containing a path.
+    """
+    claim = (raw or "").strip()
+    return claim if _CLAIM_RE.match(claim) else None
 
 
 def slugify(text: str, max_len: int = 50) -> str:
@@ -120,6 +153,32 @@ class MemoryRecord:
     # load so the index can link to the real file on disk rather than a name
     # re-derived from the (mutable) title. Never serialized.
     source_path: str | None = field(default=None, compare=False)
+    # True when the file carried no created_at and one was invented at parse
+    # time. Callers that need a reproducible order must not trust it. Never
+    # serialized.
+    created_at_missing: bool = field(default=False, compare=False)
+    # Set when the record was read from *another instance's* store. Marks it
+    # read-only for every write path, and lets recall say whose it is. Never
+    # serialized: it describes where a record was found, not what it says.
+    origin_root: str | None = field(default=None, compare=False)
+    origin_root_id: str | None = field(default=None, compare=False)
+    origin_path: str | None = field(default=None, compare=False)
+    # Claims of the form "<root id>:<file>", each naming a memory in another
+    # instance's store that this one obsoletes. Recorded here because that
+    # store is read-only from this side: the assertion is ours to make, the
+    # edit is not ours to write. Resolved only in the federated view, where
+    # both sides are visible at once.
+    #
+    # A list, because one memory can obsolete several — a single field would
+    # silently drop every claim after the first. Keyed on the root *id*, not
+    # its label: labels come from directory names, and two instances can
+    # easily share one ("~/a/.claude" and "~/b/.claude" are both "claude"),
+    # which would attribute the claim to whichever was rendered.
+    supersedes_external: list[str] = field(default_factory=list)
+
+    @property
+    def is_foreign(self) -> bool:
+        return self.origin_root is not None
 
     def __post_init__(self) -> None:
         t = (self.type or "fact").lower()
@@ -200,6 +259,9 @@ class MemoryRecord:
         ]
         if self.superseded_by:
             fm.append(f"superseded_by: {self.superseded_by}")
+        if self.supersedes_external:
+            fm.append("supersedes_external: "
+                      + ", ".join(self.supersedes_external))
         fm.append("---")
         return "\n".join(fm) + "\n\n" + self.content.strip() + "\n"
 
@@ -220,10 +282,22 @@ class MemoryRecord:
             tags=tags,
             source=meta.get("source", "imported").strip() or "imported",
             superseded_by=(meta.get("superseded_by") or "").strip() or None,
+            supersedes_external=[
+                c for c in (
+                    _clean_claim(raw)
+                    for raw in (meta.get("supersedes_external") or "").split(",")
+                ) if c
+            ],
             validation_count=int(_safe_float(meta.get("validation_count"), 0)),
             created_at=_parse_dt(meta.get("created_at")),
             updated_at=_parse_dt(meta.get("updated_at")),
         )
+        # Remember that the timestamp was invented rather than read — which
+        # covers a field that is absent *and* one that is present but
+        # unparseable, since both end up as a fresh "now" on every parse.
+        # Anything needing a stable order (the federated index, fed by several
+        # machines) has to substitute something deterministic instead.
+        rec.created_at_missing = _parse_dt_opt(meta.get("created_at")) is None
         return rec
 
 

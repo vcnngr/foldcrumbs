@@ -220,7 +220,7 @@ def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
     happens. Superseded files stay on disk — recoverable, cleared by prune."""
     count = 0
     for rec in fresh:
-        for old in store.find_conflict_candidates(rec, cwd):
+        for old in store.find_conflict_candidates(rec, cwd, federated=True):
             answer = llm.chat(
                 messages=[
                     {"role": "system", "content": _SUPERSEDE_PROMPT},
@@ -232,11 +232,27 @@ def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
                 max_tokens=32,
             )
             if answer and _SUPERSEDE_TRUE_RE.search(answer):
-                store.mark_superseded_on_disk(old, rec.id, cwd)
+                name = old.source_path or old.filename()
+                if old.is_foreign:
+                    # Someone else's store is read-only from here, so the
+                    # contradiction is *recorded*, not applied: the assertion
+                    # lives on our own new memory and is resolved in the
+                    # federated view, where both sides are visible. Their
+                    # instance stays the only one that can retire their file.
+                    claim = f"{old.origin_root_id}:{name}"
+                    if claim not in rec.supersedes_external:
+                        # Append: one new memory can obsolete several foreign
+                        # ones, and assignment would keep only the last.
+                        rec.supersedes_external.append(claim)
+                    store.write_memory(rec, cwd)
+                    config.log_event(
+                        f"auto-supersede (external): {old.origin_root}:{name} "
+                        f"asserted obsolete by {rec.filename()}")
+                else:
+                    store.mark_superseded_on_disk(old, rec.id, cwd)
+                    config.log_event(
+                        f"auto-supersede: {name} obsoleted by {rec.filename()}")
                 count += 1
-                config.log_event(
-                    f"auto-supersede: {old.source_path or old.filename()} "
-                    f"obsoleted by {rec.filename()}")
     return count
 
 

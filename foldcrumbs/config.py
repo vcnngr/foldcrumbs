@@ -45,7 +45,10 @@ def _resolve_state_dir() -> Path:
     """
     env = _env("STATE_DIR")
     if env:
-        return Path(env).expanduser()
+        # abspath: a relative FOLDCRUMBS_STATE_DIR would make the state dir —
+        # and with it the federation registry — mean something different from
+        # every cwd, so hooks and CLI would disagree about which roots exist.
+        return Path(os.path.abspath(os.path.expanduser(env)))
     new = Path.home() / ".foldcrumbs"
     old = Path.home() / ".engram"
     if not new.exists() and old.exists():
@@ -197,9 +200,12 @@ def claude_config_dir() -> Path:
     to the default ~/.claude. This keeps each instance's memory namespaced under
     its own config dir instead of bleeding into the personal store.
     """
-    return Path(
+    # abspath: a relative CLAUDE_CONFIG_DIR would make the store mean something
+    # different from every cwd, and the federated index publishes these paths
+    # for other instances to read — they must not depend on the reader's cwd.
+    return Path(os.path.abspath(os.path.expanduser(
         os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    ).expanduser()
+    )))
 
 
 def encode_cwd(cwd: str | os.PathLike[str]) -> str:
@@ -216,7 +222,7 @@ def memory_dir(cwd: str | os.PathLike[str] | None = None) -> Path:
     """
     override = _env("DIR")
     if override:
-        return Path(override).expanduser()
+        return Path(os.path.abspath(os.path.expanduser(override)))
     cwd = cwd or os.getcwd()
     return (
         claude_config_dir()

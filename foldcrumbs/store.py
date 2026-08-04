@@ -7,6 +7,7 @@ loading, dedup and index regeneration. Pure stdlib (difflib for fuzzy match).
 
 from __future__ import annotations
 
+import itertools
 import os
 import tempfile
 from collections.abc import Iterator
@@ -63,7 +64,54 @@ _TYPE_LABEL = {
     "incident": "Incidents",
 }
 
+# Ceiling on how much of one foreign store a single recall will read. Recall
+# must stay responsive: an unbounded scan across four roots is a hang waiting
+# for a large store or a slow mount.
+_MAX_FEDERATED_SCAN = 500
+
 _DEDUP_THRESHOLD = 0.85  # title+content similarity above which two memories match
+
+
+class ForeignMemoryError(PermissionError):
+    """Refused: the record belongs to another instance's store.
+
+    Federation is read-only across roots by design. The rendered blocks tell
+    the model so, but a prompt is guidance, not a guarantee — this is the
+    guarantee. Every write path checks it, because a federated recall now
+    hands callers records they did not author and nothing else would stop one
+    from being written back under this root.
+    """
+
+
+def _resolve_in_store(
+    name: str, cwd: str | os.PathLike[str] | None = None
+) -> Path | None:
+    """Resolve a memory filename *inside* the store, or None if it escapes.
+
+    ``memory_dir / name`` is not containment: an absolute name replaces the
+    directory outright, and "../x" walks out of it. Since ``forget --hard``
+    unlinks whatever it resolves and ``from_markdown`` parses any text into an
+    "Untitled" record, an unchecked name is arbitrary file deletion. Every
+    filename-addressed operation goes through here.
+    """
+    if not name or os.path.isabs(name) or os.sep in name or "/" in name:
+        return None
+    d = config.memory_dir(cwd)
+    target = (d / name).resolve()
+    try:
+        if target.parent != d.resolve():
+            return None
+    except OSError:
+        return None
+    return d / name
+
+
+def _refuse_if_foreign(rec: MemoryRecord, action: str) -> None:
+    if rec.is_foreign:
+        raise ForeignMemoryError(
+            f"cannot {action} '{rec.title}': it belongs to {rec.origin_root} "
+            f"({rec.origin_path}). Record your own memory instead."
+        )
 
 
 def _ensure_dir(cwd: str | os.PathLike[str] | None) -> Path:
@@ -73,11 +121,33 @@ def _ensure_dir(cwd: str | os.PathLike[str] | None) -> Path:
 
 
 def iter_memories(cwd: str | os.PathLike[str] | None = None) -> Iterator[MemoryRecord]:
-    """Yield every memory in the store (skips the index file)."""
-    d = config.memory_dir(cwd)
+    """Yield every memory in **this instance's** store (skips the index file).
+
+    Deliberately local, and it must stay that way: every write path in this
+    module is built on it, so federating it here would let a foreign record be
+    validated, superseded or republished under the current root. Federated
+    reading has its own entry point, ``iter_federated``.
+    """
+    yield from iter_memories_in(config.memory_dir(cwd))
+
+
+def iter_memories_in(
+    directory: Path, max_files: int | None = None
+) -> Iterator[MemoryRecord]:
+    """Yield every memory in an arbitrary store directory.
+
+    ``max_files`` bounds how many files are *read*, not how many records come
+    out: unreadable and malformed ones cost a read too, so counting only what
+    survives parsing bounds nothing. Names are listed up front (cheap); the
+    reads are what this limits.
+    """
+    d = Path(directory)
     if not d.exists():
         return
-    for path in sorted(d.glob("*.md")):
+    names = sorted(d.glob("*.md"))
+    if max_files is not None:
+        names = names[:max_files]
+    for path in names:
         if path.name in (config.INDEX_NAME, config.HANDOFF_NAME):
             continue
         try:
@@ -89,6 +159,44 @@ def iter_memories(cwd: str | os.PathLike[str] | None = None) -> Iterator[MemoryR
         # or after a title edit).
         rec.source_path = path.name
         yield rec
+
+
+def iter_federated(cwd: str | os.PathLike[str] | None = None) -> Iterator[MemoryRecord]:
+    """Yield active memories from every *other* registered instance.
+
+    Reads the foreign stores themselves rather than their index shards: the
+    shards carry titles and descriptions, and recall scores on content. Each
+    record comes back tagged with its origin, which marks it read-only and
+    lets callers say whose memory it is.
+
+    Unreachable roots are skipped rather than waited on — this runs inside
+    ``recall``, and one unplugged drive must not hang it.
+    """
+    from foldcrumbs import federation, index_shard
+
+    for ref in federation.iter_roots():
+        if ref.is_current():
+            continue
+        if ref.available_within(index_shard._AVAILABILITY_TIMEOUT) is not True:
+            continue
+        d = ref.memory_dir(cwd)
+        try:
+            total = sum(1 for _ in d.glob("*.md")) if d.is_dir() else 0
+            if total > _MAX_FEDERATED_SCAN:
+                config.log_event(
+                    f"federation: reading only {_MAX_FEDERATED_SCAN} of "
+                    f"{total} files in {ref.label}"
+                )
+            for rec in iter_memories_in(d, max_files=_MAX_FEDERATED_SCAN):
+                if rec.status != "active":
+                    continue
+                rec.origin_root = ref.label
+                rec.origin_root_id = ref.id
+                rec.origin_path = str(d / (rec.source_path or rec.filename()))
+                yield rec
+        except OSError:
+            config.log_event(f"federation: recall skipped {ref.label} (unreadable)")
+            continue
 
 
 def load_all(cwd: str | os.PathLike[str] | None = None) -> list[MemoryRecord]:
@@ -103,6 +211,7 @@ def write_memory(
     rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None
 ) -> Path:
     """Write a memory atomically (tmp + os.replace). Returns the file path."""
+    _refuse_if_foreign(rec, "write")
     d = _ensure_dir(cwd)
     target = d / rec.filename()
     fd, tmp = tempfile.mkstemp(dir=str(d), suffix=".tmp")
@@ -159,6 +268,7 @@ def find_conflict_candidates(
     cwd: str | os.PathLike[str] | None = None,
     limit: int = 3,
     min_overlap: float = 0.4,
+    federated: bool = False,
 ) -> list[MemoryRecord]:
     """Existing active memories that plausibly describe the same subject as
     ``rec`` without being near-duplicates (those are handled by dedup).
@@ -171,7 +281,13 @@ def find_conflict_candidates(
     if not wa:
         return []
     out: list[tuple[float, MemoryRecord]] = []
-    for m in iter_memories(cwd):
+    # Reading the union is the point: a decision reversed in another instance
+    # is exactly the contradiction worth catching. Acting on it is a different
+    # matter — the caller records an assertion rather than writing their file.
+    pool = iter_memories(cwd)
+    if federated:
+        pool = itertools.chain(pool, iter_federated(cwd))
+    for m in pool:
         if m.status != "active" or m.id == rec.id:
             continue
         if _similarity(rec, m) >= _DEDUP_THRESHOLD:
@@ -182,7 +298,8 @@ def find_conflict_candidates(
         overlap = len(wa & wb) / min(len(wa), len(wb))
         if overlap >= min_overlap:
             out.append((overlap, m))
-    out.sort(key=lambda t: (t[0], t[1].filename()), reverse=True)
+    out.sort(key=lambda t: (t[0], t[1].origin_root or "", t[1].filename()),
+             reverse=True)
     return [m for _, m in out[:limit]]
 
 
@@ -194,6 +311,7 @@ def upsert(
     action ∈ {"created", "validated"}. If a near-duplicate exists, we bump its
     validation count (trust) instead of adding a second copy.
     """
+    _refuse_if_foreign(rec, "store")
     dup = find_duplicate(rec, cwd)
     if dup is not None:
         dup.validate()
@@ -253,8 +371,9 @@ def get(
     name: str, cwd: str | os.PathLike[str] | None = None
 ) -> MemoryRecord | None:
     """Load a single memory by its on-disk filename (as linked in MEMORY.md)."""
-    p = config.memory_dir(cwd) / name
-    if not p.is_file() or p.name in (config.INDEX_NAME, config.HANDOFF_NAME):
+    p = _resolve_in_store(name, cwd)
+    if p is None or not p.is_file() or p.name in (config.INDEX_NAME,
+                                                  config.HANDOFF_NAME):
         return None
     try:
         rec = MemoryRecord.from_markdown(p.read_text(encoding="utf-8"))
@@ -277,10 +396,12 @@ def forget(
     rec = get(name, cwd)
     if rec is None:
         return None
-    d = config.memory_dir(cwd)
+    target = _resolve_in_store(name, cwd)
+    if target is None:
+        return None
     if hard:
         try:
-            (d / name).unlink()
+            target.unlink()
         except OSError:
             return None
         action = "removed"
@@ -289,7 +410,7 @@ def forget(
         rec.updated_at = datetime.now(timezone.utc)
         # Write back to the file it was read from, not a name re-derived from
         # the title (imported files can live under non-canonical names).
-        _write_text(d / name, rec.to_markdown())
+        _write_text(target, rec.to_markdown())
         action = "deleted"
     rebuild_index(cwd)
     return action
@@ -336,8 +457,17 @@ def mark_superseded_on_disk(
     out of the index and recall. Unlike ``supersede`` (which resolves both sides
     by filename), this takes an already-loaded record — the distill contradiction
     pass calls it with candidates it just scored."""
+    # The contradiction pass now scores foreign candidates too, so this is
+    # reachable with someone else's record. Writing it would edit another
+    # instance's store *and* land the edit at the wrong path, since the target
+    # is built from this root's memory dir.
+    _refuse_if_foreign(old, "supersede")
+    name = old.source_path or old.filename()
+    target = _resolve_in_store(name, cwd)
+    if target is None:
+        raise ForeignMemoryError(f"refusing to write outside the store: {name}")
+    _ensure_dir(cwd)
     old.mark_superseded(new_id)
-    target = _ensure_dir(cwd) / (old.source_path or old.filename())
     _write_text(target, old.to_markdown())
     return target
 
@@ -374,6 +504,7 @@ def search(
     cwd: str | os.PathLike[str] | None = None,
     types: list[str] | None = None,
     tags: list[str] | None = None,
+    federated: bool = True,
 ) -> list[MemoryRecord]:
     """Grep-like search over active memories: substring + word-overlap + fuzzy.
 
@@ -381,6 +512,13 @@ def search(
     consistent. In-agent recall is still native grep; this is the programmatic
     equivalent for tooling. ``types``/``tags`` narrow the candidates before
     scoring (a memory matches ``tags`` if it carries at least one of them).
+
+    ``federated`` also scores the other instances' stores, ranked together so
+    the best answer wins regardless of whose store holds it. It matters most
+    where there is no grep to fall back on: OpenCode recalls purely through
+    this function over MCP, so without it federation would be invisible there.
+    Callers that act on a result — forgetting, superseding — must pass False,
+    since only the owning instance may write its own store.
     """
     import re
 
@@ -391,7 +529,10 @@ def search(
     want_types = {t.lower() for t in types} if types else None
     want_tags = {t.lower() for t in tags} if tags else None
     scored: list[tuple[float, MemoryRecord]] = []
-    for m in iter_memories(cwd):
+    candidates = iter_memories(cwd)
+    if federated:
+        candidates = itertools.chain(candidates, iter_federated(cwd))
+    for m in candidates:
         if m.status != "active":
             continue
         if want_types and m.type not in want_types:
@@ -408,7 +549,11 @@ def search(
             score = SequenceMatcher(None, q, hay).ratio()
         if score >= 0.22:
             scored.append((score, m))
-    scored.sort(key=lambda t: t[0], reverse=True)
+    # Ties broken by locality then filename: a local memory outranks an
+    # identical foreign one (it is the one this instance can act on), and the
+    # rest is deterministic rather than dependent on directory order.
+    scored.sort(key=lambda t: (-t[0], t[1].is_foreign,
+                               t[1].source_path or t[1].filename()))
     return [m for _, m in scored[:limit]]
 
 
@@ -463,4 +608,15 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+    # Publish the same set to this root's federated shard. MEMORY.md above is
+    # deliberately unchanged by federation — keeping it byte-stable is what
+    # lets the injected prefix stay cached — so the shared view lives entirely
+    # in the shard. Best-effort: an unpublishable shard costs visibility to
+    # other instances, never the local index.
+    try:
+        from foldcrumbs import index_shard
+        index_shard.write_shard(cwd)
+    except Exception:  # noqa: BLE001 - never fail a rebuild over federation
+        config.log_event("federation: index shard not published")
     return target

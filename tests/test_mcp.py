@@ -14,18 +14,34 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Before foldcrumbs: this module is routinely run on its own, and MCP recall
+# is federated, so without it the registry would resolve to the developer's
+# real ~/.foldcrumbs and read their actual stores.
+from _sandbox import SANDBOX, is_inside  # noqa: E402
 
 import foldcrumbs  # noqa: E402
 from foldcrumbs import install, mcp_server  # noqa: E402
 
 
+class TestMcpSandbox(unittest.TestCase):
+    """This module is routinely run on its own; the sandbox must hold then."""
+
+    def test_never_resolves_to_a_real_store(self):
+        from foldcrumbs import config
+        for path in (config.STATE_DIR, config.claude_config_dir()):
+            self.assertTrue(is_inside(path),
+                            f"{path} is outside the sandbox {SANDBOX}")
+
+
 class TestHandler(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="foldcrumbs_mcp_")
-        os.environ["ENGRAM_DIR"] = self.dir
+        os.environ["FOLDCRUMBS_DIR"] = self.dir
 
     def tearDown(self):
-        os.environ.pop("ENGRAM_DIR", None)
+        os.environ.pop("FOLDCRUMBS_DIR", None)
 
     def test_initialize_echoes_protocol(self):
         r = mcp_server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -99,7 +115,7 @@ class TestHandler(unittest.TestCase):
 class TestSubprocessRoundTrip(unittest.TestCase):
     def test_full_stdio_session(self):
         d = tempfile.mkdtemp(prefix="foldcrumbs_mcp_sp_")
-        env = {**os.environ, "ENGRAM_DIR": d}
+        env = {**os.environ, "FOLDCRUMBS_DIR": d}
         proc = subprocess.Popen(
             [sys.executable, "-m", "foldcrumbs.mcp_server"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -140,7 +156,7 @@ class TestSubprocessRoundTrip(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 cwd="/",
-                env={**os.environ, "ENGRAM_DIR": str(memory)},
+                env={**os.environ, "FOLDCRUMBS_DIR": str(memory)},
                 timeout=30,
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
