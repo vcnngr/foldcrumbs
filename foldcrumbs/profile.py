@@ -70,6 +70,11 @@ def format_context_block(
             text = m.content.strip()
             if m.compute_confidence() < 0.6:
                 text += " (tentative)"
+            if m.is_foreign:
+                # Say whose it is, and that it is read-only from here: a recall
+                # result that looks local invites an edit that would silently
+                # write into another instance's store.
+                text += f" [from {m.origin_root} — read-only: {m.origin_path}]"
             lines.append(f"  - {text}")
     lines.append("</foldcrumbs-recall>")
     return "\n".join(lines)

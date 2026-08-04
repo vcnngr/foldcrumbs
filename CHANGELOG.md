@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-04
+
+The "federation" release: several CLI instances on the same project stop being
+blind to each other, **without** merging their stores.
+
+Running `claude`, `claude-work`, `claude-peo`, … means one `CLAUDE_CONFIG_DIR`
+each, so one store each — a decision recorded in one was invisible to the
+others, and `import` could only close the gap by copying. Federation gives
+every instance a read-only view of what the others learned about the same
+project, live, with nothing duplicated. Each store stays separately owned: an
+instance only ever writes its own.
+
+### Added
+
+- **Root registry.** `foldcrumbs roots list|add|remove`; instances self-register
+  on `install`. Each root carries a stable id in a `.foldcrumbs-root` marker
+  *inside* the root, so it survives moving or renaming the config dir. Registry
+  entries are one file per root under `<state-dir>/roots/` — never a shared
+  manifest, which would put every instance on the same write path.
+- **Per-root index shards** under `<state-dir>/projects/<project>/roots/`,
+  published on every index rebuild. Merged at read time with a total ordering
+  key (type, `created_at` descending, root id, filename), so every instance
+  derives the same order without a shared file to agree through.
+- **Federated block** injected after the local index at SessionStart *and*
+  PostCompact, listing each instance's memory dir and every entry's absolute
+  path — the agent's grep is the recall engine, so it has to be able to reach
+  them. Capped by count and by size, and it says what it left out.
+- **Federated recall.** `search()` scores the other instances' stores too, so
+  `recall`/`answer` and the MCP tools see the whole project. This is what makes
+  federation visible to OpenCode, which recalls only through MCP. Results are
+  labelled with their origin and marked read-only.
+- **External supersession claims.** When distillation finds a new memory that
+  obsoletes one in *another* instance's store, it records the claim on its own
+  record (`supersedes_external`) instead of editing a file it does not own; the
+  federated view then marks that entry as contested.
+- `foldcrumbs status` reports federated roots and warns about a split
+  `FOLDCRUMBS_STATE_DIR` or a `FOLDCRUMBS_DIR` that disagrees with how the root
+  is registered.
+
+### Changed
+
+- Cross-root writes are refused in code (`ForeignMemoryError`), not merely
+  discouraged in the prompt: `write_memory`, `upsert` and
+  `mark_superseded_on_disk` reject a record belonging to another instance.
+- `MEMORY.md` is deliberately untouched by federation. It stays byte-identical
+  while only other instances write, so the SessionStart-injected prefix keeps
+  riding the agent's prompt cache; the federated view is a separate block.
+- `claude_config_dir()`, `memory_dir()` and the state dir are now normalised to
+  absolute paths. Shard entries are read by other instances from *their* cwd, so
+  a relative override would have resolved somewhere else entirely.
+
+### Fixed
+
+- A timestamp without a timezone raised `TypeError` in the index sort the
+  moment two records were compared — reachable before this release by importing
+  a hand-written file. Naive timestamps are now read as UTC.
+- A record whose `created_at` is missing *or* unparseable had one invented on
+  every parse, so any ordering built on it was irreproducible. Such records are
+  now flagged and pinned to their file's mtime in the federated view.
+- **Path escape in filename-addressed operations.** `get`, `forget` and
+  `supersede` joined the given name onto the memory dir without checking
+  containment, so an absolute path or one containing `..` resolved outside the
+  store — and since any text parses into an "Untitled" record, `forget --hard`
+  would then unlink that file. Predates federation. Names are now resolved
+  through a containment check.
+- Test isolation: the suite now isolates the state and config dirs, not just the
+  memory dir — including the `FOLDCRUMBS_*` names, which take precedence over
+  the legacy `ENGRAM_*` ones. With federated recall it would otherwise have read
+  and written the developer's real registry and stores.
+
+### Known limits
+
+- Federation is per machine: roots register into `FOLDCRUMBS_STATE_DIR`
+  (default `~/.foldcrumbs`), and instances pointed at different ones form
+  disjoint groups. `status` says so when it can detect it.
+- Upgrading the package does not re-register anything, and hooks run from the
+  runtime snapshot staged at install time — **run `foldcrumbs install` again
+  after upgrading**.
+- A process killed while holding the registry lock leaves it behind on
+  platforms without `fcntl`; the log names the directory to remove. Stale locks
+  are never broken automatically, because age cannot distinguish a dead holder
+  from a slow one and stealing loses data.
+- `created_at` is not backfilled into files that lack it; the mtime fallback
+  moves if the file is touched.
+- Root ids are 64 random bits with no collision retry — ample for a handful of
+  local roots, not a global namespace.
+
 ## [0.5.0] — 2026-07-21
 
 The "active surface" release: memory stops being only a background layer and

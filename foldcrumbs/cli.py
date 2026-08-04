@@ -6,6 +6,7 @@ Commands:
   index      rebuild MEMORY.md
   distill    distill a transcript/text file into memories (uses the LLM)
   status     show config + store stats
+  roots      list/add/remove the memory roots federated into the shared view
   install    merge hooks into Claude Code settings.json
   migrate    move a legacy engram install to foldcrumbs
   uninstall  remove foldcrumbs hooks
@@ -17,7 +18,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config, distill, install, llm, store
+from . import config, distill, federation, install, llm, store
 from .profile import format_context_block
 from .schema import VALID_TYPES, MemoryRecord
 
@@ -51,7 +52,13 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     if not mems:
         print("(no relevant memories found)")
         return 0
-    context = "\n".join(f"- [{m.type}] {m.content}" for m in mems)
+    # Attribute foreign memories: without this the model can answer as if
+    # another instance's conclusion were this store's own.
+    context = "\n".join(
+        f"- [{m.type}] {m.content}"
+        + (f" (from {m.origin_root}, read-only)" if m.is_foreign else "")
+        for m in mems
+    )
     out = llm.chat(
         messages=[
             {"role": "system", "content": "Answer the question using ONLY the "
@@ -173,7 +180,10 @@ def _cmd_forget(args: argparse.Namespace) -> int:
     """
     target = args.target
     if store.get(target) is None:
-        hits = store.search(target, limit=5)
+        # Local only: a foreign memory can be read but never forgotten from
+        # here, so offering one as a candidate would suggest an action that
+        # cannot succeed.
+        hits = store.search(target, limit=5, federated=False)
         if not hits:
             print(f"no memory named or matching '{target}'")
             return 1
@@ -228,6 +238,78 @@ def _cmd_status(_: argparse.Namespace) -> int:
     print(f"LLM reachable: {llm.available()}")
     print(f"distill here : {'on' if config.distill_enabled() else 'off (read-only consumer)'}")
     print(f"context budget: {config.CONTEXT_BUDGET} @ {int(config.CONTEXT_PCT*100)}%")
+    roots = federation.iter_roots()
+    print(f"federated roots: {len(roots)} ({federation.roots_dir()})")
+    if not any(r.is_current() for r in roots):
+        # Upgrading the package does not re-register: hooks run from the
+        # runtime snapshot staged at install time, so an upgrade needs
+        # `foldcrumbs install` anyway.
+        print("           : this instance is not federated — run `foldcrumbs install`")
+    for conflict in (federation.mode_conflict(), federation.state_dir_conflict()):
+        if conflict:
+            print(f"warning    : {conflict}")
+    return 0
+
+
+def _cmd_roots(args: argparse.Namespace) -> int:
+    action = getattr(args, "action", None) or "list"
+    if action == "add":
+        try:
+            ref = federation.register(
+                Path(args.path) if args.path else None,
+                mode=args.mode,
+                label=args.label,
+            )
+        except federation.FederationConflict as exc:
+            print(f"refused: {exc}")
+            return 1
+        if ref is None:
+            print("could not register that root (unwritable, or no root to derive)")
+            return 1
+        print(f"registered {ref.label} ({ref.id}) → {ref.path}")
+        return 0
+
+    if action == "remove":
+        # Look through iter_roots, not just the shards: the running instance
+        # can appear without one (synthesised from its marker) and must still
+        # be removable.
+        known = {r.id: r for r in federation.iter_roots()}
+        ref = known.get(args.root_id)
+        if ref is None:
+            print(f"no registered root with id {args.root_id!r}")
+            return 1
+        if not federation.unregister(args.root_id):
+            print(f"could not remove {args.root_id}")
+            return 1
+        # The store is untouched on purpose: unregistering hides a root from the
+        # shared view, it does not delete anyone's memory.
+        print(f"unregistered {ref.label} ({ref.id}) — its store is untouched")
+        return 0
+
+    roots = federation.iter_roots()
+    if not roots:
+        print("no federated roots registered (run `foldcrumbs install`)")
+        return 0
+    for r in roots:
+        marks = []
+        if r.is_current():
+            marks.append("current")
+        if not r.available():
+            marks.append("unavailable")
+        if r.mode == "explicit":
+            marks.append("explicit-dir")
+        suffix = f"  [{', '.join(marks)}]" if marks else ""
+        mem = r.memory_dir()
+        skip = {config.INDEX_NAME, config.HANDOFF_NAME}
+        count = (
+            sum(1 for p in mem.glob("*.md") if p.name not in skip)
+            if mem.is_dir() else 0
+        )
+        print(f"{r.label:<16} {r.id}  {r.path}{suffix}")
+        print(f"{'':<16} this project: {mem} ({count} memories)")
+    for conflict in (federation.mode_conflict(), federation.state_dir_conflict()):
+        if conflict:
+            print(f"\nwarning: {conflict}")
     return 0
 
 
@@ -283,8 +365,26 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _register_root_at_install() -> None:
+    """Self-register this instance's root so other instances can see its memory.
+
+    Runs for every agent: the store is keyed on the Claude config dir even when
+    the agent is Codex or OpenCode, so there is one root per *instance*, not one
+    per agent. Silent no-op when the root can't be represented or written —
+    federation is additive, and install must not fail over it.
+    """
+    ref = federation.register_current()
+    if ref is None:
+        return
+    print(f"federated root: {ref.label} ({ref.id}) → {federation.roots_dir()}")
+    for conflict in (federation.mode_conflict(), federation.state_dir_conflict()):
+        if conflict:
+            print(f"warning: {conflict}")
+
+
 def _cmd_install(args: argparse.Namespace) -> int:
     agent = args.agent
+    _register_root_at_install()
     if agent == "opencode":
         from . import surface
         paths = install.opencode_paths(global_scope=not args.local)
@@ -434,6 +534,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="show config + stats").set_defaults(func=_cmd_status)
 
+    rt = sub.add_parser("roots", help="list/add/remove federated memory roots")
+    rt_sub = rt.add_subparsers(dest="action")
+    rt_sub.add_parser("list", help="show every registered root (default)")
+    rt_add = rt_sub.add_parser("add", help="register a root (default: this instance)")
+    rt_add.add_argument("path", nargs="?", help="config dir to register")
+    rt_add.add_argument("--label", help="display name (default: the dir's name)")
+    rt_add.add_argument("--mode", choices=list(federation.VALID_MODES),
+                        help="'config' (default for a named path) derives "
+                             "projects/<cwd>/memory; 'explicit' pins one store")
+    rt_rm = rt_sub.add_parser("remove", help="hide a root; its store is untouched")
+    rt_rm.add_argument("root_id", help="root id as shown by `foldcrumbs roots`")
+    rt.set_defaults(func=_cmd_roots)
+
     mg = sub.add_parser("migrate", help="migrate a legacy engram install to foldcrumbs")
     mg.add_argument("--from", dest="from_dir", metavar="OLD_PROJECT_DIR",
                     help="also copy this project's memory store into the current one")
@@ -501,6 +614,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Cheap self-repair for an already-registered root whose shard went missing
+    # (wiped state dir, restored backup). Never opts a root in on its own —
+    # that stays an explicit act, so `roots remove` is not undone by the next
+    # command. Best-effort: a broken registry must not break the CLI.
+    try:
+        federation.ensure_registered()
+    except Exception:  # noqa: BLE001 - registry repair is never worth failing on
+        pass
     return args.func(args)
 
 

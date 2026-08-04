@@ -136,7 +136,13 @@ def tool_answer(args: dict[str, Any]) -> str:
     mems = _search(str(args["question"]), int(args.get("limit", 8)))
     if not mems:
         return "(no relevant memories found)"
-    context = "\n".join(f"- [{m.type}] {m.content}" for m in mems)
+    # Attribute foreign memories: without this the model can answer as if
+    # another instance's conclusion were this store's own.
+    context = "\n".join(
+        f"- [{m.type}] {m.content}"
+        + (f" (from {m.origin_root}, read-only)" if m.is_foreign else "")
+        for m in mems
+    )
     answer = llm.chat(
         messages=[
             {"role": "system", "content": "Answer the question using ONLY the "
@@ -151,7 +157,9 @@ def tool_answer(args: dict[str, Any]) -> str:
 def tool_forget(args: dict[str, Any]) -> str:
     name = str(args["name"])
     if store.get(name) is None:
-        hits = store.search(name, limit=5)
+        # Local only: another instance's memory is readable from here but not
+        # forgettable, so it must not be offered as a candidate.
+        hits = store.search(name, limit=5, federated=False)
         if hits:
             options = "\n".join(f"  {m.source_path or m.filename()} — {m.title}"
                                 for m in hits)

@@ -11,6 +11,10 @@ folder of typed memory files so the agent reopens already knowing your decisions
 and codebase facts. It also fights context rot: around 45% context it checkpoints memory in the
 background and nudges you to `/compact` or `/clear` — nothing is lost.
 
+Several CLI instances on one project (`claude`, `claude-work`, …) keep their own
+stores but see each other's memory, read-only — see
+[Federation](#several-instances-one-project-federation).
+
 ## How it works
 
 ```
@@ -24,6 +28,8 @@ ANTI-ROT  PostToolUse monitor → checkpoint + reminder (no forced compaction)
           PostCompact → re-inject index after compaction
 HANDOFF   each checkpoint also writes a live working-state snapshot, re-injected
           at SessionStart → resume the exact task after a /clear
+FEDERATE  every registered instance publishes an index shard; each session also
+          sees the others' memory, read-only, paths announced for grep
 ```
 
 The retrieval engine is the agent itself: it greps the folder when relevant. The LLM is used
@@ -175,13 +181,81 @@ new fact "published to PyPI" is distilled. Fail-soft (no LLM → nothing changes
 disable with `FOLDCRUMBS_NO_AUTO_SUPERSEDE=1`. Superseded events are logged to
 `~/.foldcrumbs/foldcrumbs.log`.
 
+## Several instances, one project: federation
+
+Running `claude`, `claude-work`, `claude-peo`, … means one `CLAUDE_CONFIG_DIR`
+each, so **one store each** — a decision recorded in one is invisible to the
+others. Federation gives every instance a read-only view of what the others
+learned about the same project, live and without duplicating anything. The
+stores stay separate and separately owned: an instance only ever writes its own.
+
+```bash
+foldcrumbs install          # each instance self-registers
+foldcrumbs roots            # who is federated, and where their memory lives
+```
+
+What each instance then sees at SessionStart: its own `MEMORY.md` exactly as
+before, followed by a separate block listing the other instances' memory dirs
+and their entries, each with an absolute path. `recall`, `answer` and the MCP
+tools search across all of them, labelling results with their origin.
+
+```
+<foldcrumbs-federated>
+Memory from this project's other agent instances. … READ-ONLY from here …
+
+- claude-work: /Users/you/.claude-work/projects/<project>/memory
+- claude-peo:  /Users/you/.claude-peo/projects/<project>/memory
+
+- [claude-work] Recall is grep, no vector DB — the retrieval engine is the agent
+  /Users/you/.claude-work/projects/<project>/memory/decision_recall_is_grep.md
+</foldcrumbs-federated>
+```
+
+Three properties are deliberate, and each cost something to get right:
+
+**Nothing is shared-written.** Each instance publishes an index shard of its
+own under `~/.foldcrumbs/projects/<project>/roots/<root-id>.json`; readers merge
+them. One shared index would have meant two instances scanning and rewriting
+concurrently, and an atomic replace prevents a torn file, not a stale one.
+Ordering is a total key (type, date, root id, filename) so every instance
+derives the same order without a shared file to agree through.
+
+**`MEMORY.md` is untouched.** Federation never edits it, so it stays
+byte-identical while only other instances write — which is what keeps the
+injected prefix riding the agent's prompt cache. The federated view is appended
+after it, in the region the handoff already invalidates each session.
+
+**Read-only is enforced, not requested.** The block tells the model those files
+belong to someone else, but `write_memory`, `upsert` and `mark_superseded_on_disk`
+also refuse a foreign record outright. When distillation finds a new memory that
+contradicts one in another instance's store, it records the claim on its own
+record and the federated view marks that entry as contested — their instance
+stays the only one that can retire their file.
+
+Leave the shared view with `foldcrumbs roots remove <id>`; the store itself is
+untouched, and only an explicit `install` / `roots add` brings it back.
+
+Limits worth knowing: federation is per machine (roots register into
+`FOLDCRUMBS_STATE_DIR`, so instances pointed at different ones can't see each
+other — `status` says so when it can tell); an unreachable root keeps its last
+published entries, flagged, rather than appearing to have been emptied; and
+**after upgrading the package, run `foldcrumbs install` again** — hooks run from
+a runtime snapshot staged at install time, so an upgrade alone does not reach
+them.
+
 ## Sharing memory between stores: `import`
 
 Stores are namespaced **per instance × per project**: memory lives in
 `<config-dir>/projects/<encoded-cwd>/memory/`, where `<config-dir>` honours
 `CLAUDE_CONFIG_DIR`. Run several instances (e.g. `~/.claude`, `~/.claude-work`) and
 it is *structural* that one store ends up rich while another starts empty for the
-same project. `import` closes that gap.
+same project.
+
+Two ways to close that gap, and they answer different questions. **Federation**
+(above) lets an instance *see* the others' memory, live, without copying — that
+is what you want most of the time. `import` **adopts** it: a decision that
+matured in `claude-work` becomes genuinely yours, with a trust bump on merge,
+and survives that instance going away. Federation shows; import takes ownership.
 
 The two sides of the command:
 
@@ -278,6 +352,8 @@ MCP-speaking tool by registering the command above.
 
 - **Phase 1 ✓** — Claude Code: file store, grep recall, distillation, anti-rot.
 - **Phase 2 ✓** — Codex + OpenCode on the same store via a stdlib MCP server + installers.
+- **Phase 2.5 ✓** — federation: several CLI instances share a read-only view of one
+  project without merging their stores.
 - **Phase 3** — embeddings + open vector DB only if scale outgrows grep; document ingest via OCR.
 
 Release history: [CHANGELOG.md](CHANGELOG.md).
