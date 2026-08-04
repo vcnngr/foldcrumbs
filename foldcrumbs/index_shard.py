@@ -13,9 +13,13 @@ prevents a torn file, not a stale one.
 
 Sharding removes that race *between* roots — but a root is an instance, not a
 process, and one instance runs several at once (a hook worker, a CLI call, the
-MCP server). So the same lost update is possible within a single shard, and
-writes take the registry lock and refuse to replace a snapshot taken later
-than their own (``source_mtime``).
+MCP server). So the same lost update is possible within a single shard. Writes
+take the registry lock and are arbitrated by **content**: a shard already
+matching the store is left alone, and a scan whose data no longer matches the
+store is dropped rather than published. No timestamps take part — comparing
+them needs a tolerance for clock skew, and any tolerance is a window in which
+a slow scan overwrites a fresher shard. Divergence self-heals at the next
+``ensure_shard``, which every session start performs.
 
 The local ``MEMORY.md`` is untouched. It stays byte-identical while only other
 instances write, so the SessionStart-injected prefix keeps riding the agent's
@@ -39,7 +43,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -57,10 +60,6 @@ _STALE_AFTER_DAYS = 30
 
 # Probing a root that lives on a hung network mount must not stall a hook.
 _AVAILABILITY_TIMEOUT = 0.25
-
-# A shard timestamped further ahead than this is a wrong clock, not a fresher
-# scan; without the bound one backwards step would freeze the shard for good.
-_CLOCK_SKEW_GRACE = 300.0
 
 # The entry cap bounds the count, not the size: one root with very long
 # descriptions could still dominate the window.
@@ -155,12 +154,6 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
         return None
 
     memory_dir = config.memory_dir(cwd)
-    # Two different questions, two different values. "Has the store changed
-    # since the shard was published?" is answered by a content fingerprint.
-    # "Which of two concurrent scans is fresher?" is answered by when each
-    # started — a wall clock, monotonic in the sense that matters here, where
-    # every writer of this shard is a process on this machine.
-    scanned_at = time.time()
     fingerprint = _fingerprint(memory_dir)
     entries = [
         _entry(m, memory_dir)
@@ -174,7 +167,6 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
         "label": federation._label_for(cur),
         "memory_dir": str(memory_dir),
         "written_at": datetime.now(timezone.utc).isoformat(),
-        "scanned_at": scanned_at,
         "fingerprint": fingerprint,
         "entries": entries,
     }
@@ -192,18 +184,23 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
                     "federation: shard not published (registry lock unavailable)"
                 )
                 return None
+            # Decide by content, never by clock. Comparing timestamps needed
+            # a tolerance for skew, and any tolerance is a window in which a
+            # slow scan overwrites a fresher shard — the very thing it was
+            # added to prevent. The store itself is the arbiter instead.
+            current = _fingerprint(memory_dir)
             existing = _read_shard_file(target)
-            if existing is not None:
-                prior = existing.get("scanned_at")
-                # A clock stepped backwards would otherwise freeze this shard
-                # permanently, so a timestamp implausibly far ahead is treated
-                # as wrong rather than authoritative.
-                if (isinstance(prior, (int, float)) and prior > scanned_at
-                        and prior < scanned_at + _CLOCK_SKEW_GRACE):
-                    config.log_event(
-                        f"federation: kept a newer shard for {marker['id']}"
-                    )
-                    return target
+            if existing is not None and existing.get("fingerprint") == current:
+                return target      # already describes the store exactly
+            if fingerprint != current:
+                # The store moved while we scanned, so these entries are
+                # already history. Publishing them would replace a possibly
+                # accurate shard with a definitely stale one; the next
+                # ensure_shard republishes from the current state.
+                config.log_event(
+                    f"federation: skipped a stale shard write for {marker['id']}"
+                )
+                return None
             fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:

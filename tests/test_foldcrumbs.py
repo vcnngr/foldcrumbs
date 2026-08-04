@@ -2052,18 +2052,36 @@ class TestIndexShards(_FederationEnv):
         fresh = json.loads(shard.read_text())
         self.assertEqual(len(fresh["entries"]), 2)
 
-        # Replay a scan that started earlier than the published one: it must
-        # not win the replace just by finishing last.
-        import time as _t
-        real = _t.time
-        _t.time = lambda: real() - 100
+        # Move the store on, so the published shard is genuinely behind, then
+        # replay a scan whose data matches neither: it must not win the replace
+        # just by finishing last. Decided by content — no clock is involved, so
+        # no skew tolerance exists to be exploited.
+        self._memory(ref, "Third", "Body three.", "2026-01-03T00:00:00+00:00")
+        real = self.index_shard._fingerprint
+        calls = []
+
+        def stale_scan(d):
+            calls.append(1)
+            return "staleprint000000" if len(calls) == 1 else real(d)
+
+        self.index_shard._fingerprint = stale_scan
         try:
-            self.index_shard.write_shard(self.proj)
+            self.assertIsNone(self.index_shard.write_shard(self.proj))
         finally:
-            _t.time = real
+            self.index_shard._fingerprint = real
+        # The older-but-consistent shard survives; the next ensure_shard will
+        # republish from the current state.
         self.assertEqual(len(json.loads(shard.read_text())["entries"]), 2)
-        self.assertEqual(json.loads(shard.read_text())["scanned_at"],
-                         fresh["scanned_at"])
+        self.assertIsNotNone(self.index_shard.ensure_shard(self.proj))
+        self.assertEqual(len(json.loads(shard.read_text())["entries"]), 3)
+
+    def test_a_shard_already_matching_the_store_is_left_alone(self):
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
+        first = self.index_shard.write_shard(self.proj)
+        stamp = first.stat().st_mtime
+        self.assertEqual(self.index_shard.write_shard(self.proj), first)
+        self.assertEqual(first.stat().st_mtime, stamp)   # no churn
 
     def test_deleting_a_memory_reaches_the_shard(self):
         # The version has to change when a store *shrinks*: a newest-mtime
@@ -2079,18 +2097,6 @@ class TestIndexShards(_FederationEnv):
         self.index_shard.ensure_shard(self.proj)
         titles = [e["title"] for e in json.loads(shard.read_text())["entries"]]
         self.assertEqual(titles, ["Keep"])
-
-    def test_a_clock_far_ahead_does_not_freeze_the_shard(self):
-        ref = self.federation.register(self._root(".claude"))
-        self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
-        self.index_shard.write_shard(self.proj)
-        shard = self.index_shard.shard_path(ref.id, self.proj)
-        data = json.loads(shard.read_text())
-        data["scanned_at"] = data["scanned_at"] + 86400   # a year-off clock
-        data["entries"] = []
-        shard.write_text(json.dumps(data), encoding="utf-8")
-        self.index_shard.write_shard(self.proj)
-        self.assertEqual(len(json.loads(shard.read_text())["entries"]), 1)
 
     def test_shard_is_not_published_without_the_lock(self):
         import contextlib as _c
