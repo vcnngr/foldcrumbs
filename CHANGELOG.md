@@ -29,10 +29,12 @@ instance only ever writes its own.
 - **Per-root index shards** under `<state-dir>/projects/<project>/roots/`,
   published on every index rebuild, and on the first federated read so an
   instance that federates an existing store is not advertised as empty.
-  Writes hold the registry lock across the scan, so there is no window between
-  reading the store and publishing it in which another process could publish
-  something fresher. Sharding removes that race between instances; one
-  instance still runs several processes. Merged at read time with a total ordering
+  Writes hold a lock scoped to that shard across the scan, so there is no
+  window between reading the store and publishing it in which another process
+  could publish something fresher — and no instance waits on another's scan.
+  Sharding removes that race between instances; one instance still runs
+  several processes. Every lock wait is bounded: a hook declines to publish
+  rather than delay a session start. Merged at read time with a total ordering
   key (type, `created_at` descending, root id, filename), so every instance
   derives the same order without a shared file to agree through.
 - **Federated block** injected after the local index at SessionStart *and*

@@ -167,6 +167,62 @@ def _mkdir_lock(lockdir: Path):
 
 
 @contextlib.contextmanager
+def file_lock(lock_path: Path):
+    """Exclusive lock on one path, bounded in time. Yields True while held.
+
+    Scoped deliberately: callers pass the narrowest path that covers what
+    actually races. A single machine-wide lock would make one slow holder
+    block every instance, and this is taken on the SessionStart path.
+
+    The wait is bounded — ``flock`` is taken non-blocking and retried until a
+    deadline — because an editor that will not start is a worse outcome than a
+    publish that waits for the next session.
+    """
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        yield False
+        return
+
+    if fcntl is not None:
+        fh = None
+        try:
+            fh = lock_path.open("a+")
+        except OSError:
+            config.log_event(f"federation: cannot open lock {lock_path}")
+            yield False
+            return
+        deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    fh.close()
+                    config.log_event(
+                        f"federation: gave up waiting for {lock_path}; not mutating"
+                    )
+                    yield False
+                    return
+                time.sleep(_LOCK_POLL_SECONDS)
+        try:
+            yield True
+        finally:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            fh.close()
+        return
+
+    with _mkdir_lock(Path(str(lock_path) + ".d")) as held:
+        if not held:
+            config.log_event(f"federation: could not lock {lock_path}; not mutating")
+        yield held
+
+
+@contextlib.contextmanager
 def _registry_lock():
     """Serialize registry mutations across processes.
 
@@ -181,40 +237,12 @@ def _registry_lock():
     the kernel releases it when a process dies; the mkdir fallback covers
     platforms without ``fcntl``.
     """
-    try:
-        roots_dir().mkdir(parents=True, exist_ok=True)
-    except OSError:
-        yield False
-        return
-
     # Pick the mechanism from the platform, never from whether this attempt
     # happened to succeed. Falling back after a failed flock would let one
     # process hold .lock while another holds .lock.d — two lock domains that
-    # exclude nobody, which is worse than not locking at all.
-    if fcntl is not None:
-        fh = None
-        try:
-            fh = (roots_dir() / ".lock").open("a+")
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            if fh is not None:
-                fh.close()
-            config.log_event("federation: could not lock the registry; not mutating")
-            yield False
-            return
-        try:
-            yield True
-        finally:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
-            fh.close()
-        return
-
-    with _mkdir_lock(roots_dir() / ".lock.d") as held:
-        if not held:
-            config.log_event("federation: could not lock the registry; not mutating")
+    # exclude nobody, which is worse than not locking at all. That choice
+    # lives in file_lock; this only names the path.
+    with file_lock(roots_dir() / ".lock") as held:
         yield held
 
 

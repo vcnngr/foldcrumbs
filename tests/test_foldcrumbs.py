@@ -2048,12 +2048,12 @@ class TestIndexShards(_FederationEnv):
         import contextlib as _c
         ref = self.federation.register(self._root(".claude"))
         self._memory(ref, "First", "Body one.", "2026-01-01T00:00:00+00:00")
-        real_lock = self.federation._registry_lock
+        real_lock = self.federation.file_lock
         added = []
 
         @_c.contextmanager
-        def lock_then_mutate():
-            with real_lock() as held:
+        def lock_then_mutate(path):
+            with real_lock(path) as held:
                 if held and not added:
                     # A write landing exactly here is invisible to any scan
                     # taken before the lock; it must be visible to this one.
@@ -2061,14 +2061,57 @@ class TestIndexShards(_FederationEnv):
                                               "2026-01-02T00:00:00+00:00"))
                 yield held
 
-        self.federation._registry_lock = lock_then_mutate
+        self.federation.file_lock = lock_then_mutate
         try:
             self.index_shard.write_shard(self.proj)
         finally:
-            self.federation._registry_lock = real_lock
+            self.federation.file_lock = real_lock
         shard = self.index_shard.shard_path(ref.id, self.proj)
         titles = {e["title"] for e in json.loads(shard.read_text())["entries"]}
         self.assertEqual(titles, {"First", "Second"})
+
+    def test_publishing_does_not_hold_the_machine_wide_registry_lock(self):
+        # The scan runs inside the lock, so a large store held the registry
+        # long enough to stall every other instance's SessionStart. Only this
+        # instance's own processes race for this shard.
+        import contextlib as _c
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
+        taken = []
+        real = self.federation.file_lock
+
+        @_c.contextmanager
+        def record(path):
+            taken.append(Path(path))
+            with real(path) as held:
+                yield held
+
+        self.federation.file_lock = record
+        try:
+            self.index_shard.write_shard(self.proj)
+        finally:
+            self.federation.file_lock = real
+        self.assertEqual(len(taken), 1)
+        self.assertEqual(taken[0].parent, self.index_shard.shards_dir(self.proj))
+        self.assertNotEqual(taken[0].parent, self.federation.roots_dir())
+        self.assertIn(ref.id, taken[0].name)
+
+    def test_a_lock_held_elsewhere_does_not_hang_the_hook(self):
+        # A bounded wait: an editor that will not start is worse than a
+        # publish that waits for the next session.
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
+        lock = self.index_shard.shards_dir(self.proj) / f".lock-{ref.id}"
+        wait = self.federation._LOCK_WAIT_SECONDS
+        self.federation._LOCK_WAIT_SECONDS = 0.05
+        try:
+            with self.federation.file_lock(lock) as held:
+                self.assertTrue(held)
+                start = time.monotonic()
+                self.assertIsNone(self.index_shard.write_shard(self.proj))
+                self.assertLess(time.monotonic() - start, 3)
+        finally:
+            self.federation._LOCK_WAIT_SECONDS = wait
 
     def test_a_shard_already_matching_the_store_is_left_alone(self):
         ref = self.federation.register(self._root(".claude"))
@@ -2121,17 +2164,17 @@ class TestIndexShards(_FederationEnv):
         import contextlib as _c
         ref = self.federation.register(self._root(".claude"))
         self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
-        real = self.federation._registry_lock
+        real = self.federation.file_lock
 
         @_c.contextmanager
-        def unlockable():
+        def unlockable(path):
             yield False
 
-        self.federation._registry_lock = unlockable
+        self.federation.file_lock = unlockable
         try:
             self.assertIsNone(self.index_shard.write_shard(self.proj))
         finally:
-            self.federation._registry_lock = real
+            self.federation.file_lock = real
         self.assertFalse(self.index_shard.shard_path(ref.id, self.proj).exists())
 
     def test_federated_scan_reads_a_bounded_number_of_files(self):

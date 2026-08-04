@@ -14,7 +14,7 @@ prevents a torn file, not a stale one.
 Sharding removes that race *between* roots — but a root is an instance, not a
 process, and one instance runs several at once (a hook worker, a CLI call, the
 MCP server). So the same lost update is possible within a single shard. Writes
-hold the registry lock **across the scan**, so there is no window between
+hold a lock **scoped to that shard** across the scan, so there is no window between
 reading the store and publishing it, and a shard already saying exactly what
 was read is left alone rather than rewritten. Detecting the movement after the
 fact was tried three ways — newest mtime, scan timestamps, a stat signature —
@@ -148,10 +148,16 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
         # stat signature (blind to an edit that keeps size and mtime). Each
         # detector had its own blind spot because the window was real. Holding
         # the lock across the scan removes the window instead of watching it.
-        with federation._registry_lock() as locked:
+        # Scoped to *this* shard, not to the registry: the scan happens inside
+        # the critical section, and a large store held the machine-wide lock
+        # long enough to stall every other instance's SessionStart. The only
+        # processes that race for this file are this instance's own, on this
+        # project, so that is exactly what the lock covers.
+        lock = shards_dir(cwd) / f".lock-{marker['id']}"
+        with federation.file_lock(lock) as locked:
             if not locked:
                 config.log_event(
-                    "federation: shard not published (registry lock unavailable)"
+                    "federation: shard not published (lock unavailable)"
                 )
                 return None
             entries = [
