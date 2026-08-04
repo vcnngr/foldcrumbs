@@ -2040,40 +2040,35 @@ class TestIndexShards(_FederationEnv):
         self.assertEqual(self.index_shard.ensure_shard(self.proj), first)
         self.assertEqual(first.stat().st_mtime, stamp)
 
-    def test_a_slower_scan_cannot_overwrite_a_newer_shard(self):
-        # One shard has one owning root, but a root has several processes.
-        # The slow one must not win the replace and publish a stale store.
+    def test_the_store_is_read_while_the_lock_is_held(self):
+        # The invariant that makes a stale overwrite impossible: entries are
+        # scanned inside the critical section, so no other process can publish
+        # between reading the store and writing the shard. Every version that
+        # scanned first and checked afterwards had a blind spot.
+        import contextlib as _c
         ref = self.federation.register(self._root(".claude"))
         self._memory(ref, "First", "Body one.", "2026-01-01T00:00:00+00:00")
-        self.index_shard.write_shard(self.proj)
-        self._memory(ref, "Second", "Body two.", "2026-01-02T00:00:00+00:00")
-        self.index_shard.write_shard(self.proj)
-        shard = self.index_shard.shard_path(ref.id, self.proj)
-        fresh = json.loads(shard.read_text())
-        self.assertEqual(len(fresh["entries"]), 2)
+        real_lock = self.federation._registry_lock
+        added = []
 
-        # Move the store on, so the published shard is genuinely behind, then
-        # replay a scan whose data matches neither: it must not win the replace
-        # just by finishing last. Decided by content — no clock is involved, so
-        # no skew tolerance exists to be exploited.
-        self._memory(ref, "Third", "Body three.", "2026-01-03T00:00:00+00:00")
-        real = self.index_shard._fingerprint
-        calls = []
+        @_c.contextmanager
+        def lock_then_mutate():
+            with real_lock() as held:
+                if held and not added:
+                    # A write landing exactly here is invisible to any scan
+                    # taken before the lock; it must be visible to this one.
+                    added.append(self._memory(ref, "Second", "Body two.",
+                                              "2026-01-02T00:00:00+00:00"))
+                yield held
 
-        def stale_scan(d):
-            calls.append(1)
-            return "staleprint000000" if len(calls) == 1 else real(d)
-
-        self.index_shard._fingerprint = stale_scan
+        self.federation._registry_lock = lock_then_mutate
         try:
-            self.assertIsNone(self.index_shard.write_shard(self.proj))
+            self.index_shard.write_shard(self.proj)
         finally:
-            self.index_shard._fingerprint = real
-        # The older-but-consistent shard survives; the next ensure_shard will
-        # republish from the current state.
-        self.assertEqual(len(json.loads(shard.read_text())["entries"]), 2)
-        self.assertIsNotNone(self.index_shard.ensure_shard(self.proj))
-        self.assertEqual(len(json.loads(shard.read_text())["entries"]), 3)
+            self.federation._registry_lock = real_lock
+        shard = self.index_shard.shard_path(ref.id, self.proj)
+        titles = {e["title"] for e in json.loads(shard.read_text())["entries"]}
+        self.assertEqual(titles, {"First", "Second"})
 
     def test_a_shard_already_matching_the_store_is_left_alone(self):
         ref = self.federation.register(self._root(".claude"))

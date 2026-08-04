@@ -14,13 +14,12 @@ prevents a torn file, not a stale one.
 Sharding removes that race *between* roots — but a root is an instance, not a
 process, and one instance runs several at once (a hook worker, a CLI call, the
 MCP server). So the same lost update is possible within a single shard. Writes
-take the registry lock and are arbitrated by the **entries themselves**: a
-shard already saying exactly this is left alone, and a scan whose data no
-longer matches the store is dropped rather than published. Neither timestamps
-nor file metadata take part — comparing timestamps needs a tolerance for clock
-skew, and any tolerance is a window in which a slow scan overwrites a fresher
-shard; stat metadata can be identical either side of a real edit. Divergence
-self-heals at the next ``ensure_shard``, which every session start performs.
+hold the registry lock **across the scan**, so there is no window between
+reading the store and publishing it, and a shard already saying exactly what
+was read is left alone rather than rewritten. Detecting the movement after the
+fact was tried three ways — newest mtime, scan timestamps, a stat signature —
+and each had its own blind spot, because the window was real. Removing it is
+the only version without a detector to get wrong.
 
 The local ``MEMORY.md`` is untouched. It stays byte-identical while only other
 instances write, so the SessionStart-injected prefix keeps riding the agent's
@@ -82,28 +81,6 @@ def shard_path(root_id: str, cwd: str | os.PathLike[str] | None = None) -> Path 
     return shards_dir(cwd) / f"{root_id}.json"
 
 
-def _fingerprint(memory_dir: Path) -> str:
-    """Cheap stat-only signature, used *only* to detect concurrent movement.
-
-    Deliberately **not** the test for "is the shard current": an edit that
-    keeps a file's size and mtime — a one-character change, a restore or a
-    sync that preserves timestamps — leaves this unchanged while the published
-    title is now wrong. That question is answered by comparing the entries
-    themselves. This one answers "did the store move while I was scanning it",
-    where a missed change costs only a redundant write.
-    """
-    import hashlib
-
-    h = hashlib.sha256()
-    try:
-        for path in sorted(memory_dir.glob("*.md")):
-            st = path.stat()
-            h.update(f"{path.name}:{st.st_mtime_ns}:{st.st_size}\n".encode())
-    except OSError:
-        return ""
-    return h.hexdigest()[:16]
-
-
 def _stable_created_at(rec, path: Path) -> str:
     """A timestamp that means the same thing on every read.
 
@@ -156,53 +133,44 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
         return None
 
     memory_dir = config.memory_dir(cwd)
-    fingerprint = _fingerprint(memory_dir)
-    entries = [
-        _entry(m, memory_dir)
-        for m in store.iter_memories(cwd)
-        if m.status == "active"
-    ]
-    entries.sort(key=lambda e: (e["created_at"], e["filename"]))
-    payload = {
-        "version": SHARD_VERSION,
-        "root_id": marker["id"],
-        "label": federation._label_for(cur),
-        "memory_dir": str(memory_dir),
-        "written_at": datetime.now(timezone.utc).isoformat(),
-        "entries": entries,
-    }
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        # One shard has one owning *root*, but a root has several processes —
-        # a hook worker, a CLI call, the MCP server. Two of them scanning and
-        # replacing concurrently is the same lost update sharding removes
-        # between roots: the slower scan wins the replace and the shard
-        # advertises a stale store until something rebuilds again. Serialise,
-        # then refuse to overwrite a snapshot taken later than ours.
+        # One shard has one owning *root*, but a root is an instance, not a
+        # process: a hook worker, a CLI call and the MCP server all publish it.
+        # Two of them scanning and replacing concurrently is the same lost
+        # update sharding removes between roots — the slower scan wins the
+        # replace and the shard advertises a store that has moved on.
+        #
+        # So the scan happens *inside* the lock. Every earlier attempt kept it
+        # outside and tried to detect afterwards whether the store had moved:
+        # by newest mtime (which drops on delete), by timestamps (which need a
+        # skew tolerance, and any tolerance is the same window again), by a
+        # stat signature (blind to an edit that keeps size and mtime). Each
+        # detector had its own blind spot because the window was real. Holding
+        # the lock across the scan removes the window instead of watching it.
         with federation._registry_lock() as locked:
             if not locked:
                 config.log_event(
                     "federation: shard not published (registry lock unavailable)"
                 )
                 return None
-            # Decide by the entries themselves — never by a clock, never by
-            # file metadata. Timestamps needed a tolerance for skew, and any
-            # tolerance is a window in which a slow scan overwrites a fresher
-            # shard; stat metadata can be identical either side of a real edit
-            # (a one-character change, an mtime restored by a backup or a
-            # sync), which would leave a wrong title published for good.
+            entries = [
+                _entry(m, memory_dir)
+                for m in store.iter_memories(cwd)
+                if m.status == "active"
+            ]
+            entries.sort(key=lambda e: (e["created_at"], e["filename"]))
             existing = _read_shard_file(target)
             if existing is not None and existing.get("entries") == entries:
                 return target      # already says exactly this; don't churn it
-            if fingerprint != _fingerprint(memory_dir):
-                # The store moved while we scanned, so these entries are
-                # already history. Publishing them would replace a possibly
-                # accurate shard with a definitely stale one; the next
-                # ensure_shard republishes from the current state.
-                config.log_event(
-                    f"federation: skipped a stale shard write for {marker['id']}"
-                )
-                return None
+            payload = {
+                "version": SHARD_VERSION,
+                "root_id": marker["id"],
+                "label": federation._label_for(cur),
+                "memory_dir": str(memory_dir),
+                "written_at": datetime.now(timezone.utc).isoformat(),
+                "entries": entries,
+            }
             fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
