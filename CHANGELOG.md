@@ -79,10 +79,15 @@ instance only ever writes its own.
   store — and since any text parses into an "Untitled" record, `forget --hard`
   would then unlink that file. Predates federation. Names are now resolved
   through a containment check.
-- Test isolation: the suite now isolates the state and config dirs, not just the
-  memory dir — including the `FOLDCRUMBS_*` names, which take precedence over
-  the legacy `ENGRAM_*` ones. With federated recall it would otherwise have read
-  and written the developer's real registry and stores.
+- **Test isolation.** The suite pointed only some of the store-locating
+  variables at temp dirs, and only the legacy `ENGRAM_*` spellings in places —
+  which the `FOLDCRUMBS_*` ones outrank. A developer with either exported had
+  their real backend choice overwritten and a runtime snapshot staged beside
+  it by `TestBackendConfig`, and, once recall became federated, their actual
+  memories read. Every such name is now redirected to a throwaway sandbox
+  before the package is imported (clearing them is not enough: with nothing
+  set, the state dir falls back to the real `~/.foldcrumbs`), and two tests
+  assert the suite cannot resolve to a real store.
 
 ### Known limits
 

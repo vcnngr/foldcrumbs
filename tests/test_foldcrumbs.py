@@ -17,8 +17,49 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+# Point every store-locating name at a throwaway directory before the package
+# is imported (config resolves STATE_DIR at import time).
+#
+# Clearing them is not enough, and that is the whole trap: with nothing set,
+# STATE_DIR falls back to the real ~/.foldcrumbs. Per-class isolation is not
+# enough either — a class that sets only the legacy ENGRAM_* names is silently
+# overridden by a FOLDCRUMBS_* one exported in the developer's shell, and the
+# suite then writes their actual backend config, runtime snapshot and
+# memories. This covers every class, including ones written later that forget
+# to isolate themselves.
+_SUITE_SANDBOX = tempfile.mkdtemp(prefix="foldcrumbs_suite_")
+for _var in ("FOLDCRUMBS_DIR", "ENGRAM_DIR"):
+    os.environ.pop(_var, None)
+os.environ["FOLDCRUMBS_STATE_DIR"] = str(Path(_SUITE_SANDBOX) / "state")
+os.environ.pop("ENGRAM_STATE_DIR", None)
+os.environ["CLAUDE_CONFIG_DIR"] = str(Path(_SUITE_SANDBOX) / "config")
+
 from foldcrumbs import distill, install, redact, store  # noqa: E402
 from foldcrumbs.schema import MemoryRecord  # noqa: E402
+
+
+class TestSuiteIsolation(unittest.TestCase):
+    """The suite must not be able to touch a real store, however it is run."""
+
+    def test_the_suite_never_resolves_to_a_real_store(self):
+        import importlib
+        from foldcrumbs import config
+        importlib.reload(config)
+        for path in (config.STATE_DIR, config.memory_dir(), config.claude_config_dir()):
+            self.assertTrue(
+                str(path).startswith(_SUITE_SANDBOX),
+                f"{path} is outside the suite sandbox {_SUITE_SANDBOX}",
+            )
+
+    def test_the_real_state_dir_is_never_written(self):
+        # The concrete failure this guards: a class isolating only the legacy
+        # names let install.configure_backend() overwrite the developer's real
+        # llm-backend choice and stage a runtime snapshot beside it.
+        real = Path.home() / ".foldcrumbs"
+        before = sorted(p.name for p in real.iterdir()) if real.is_dir() else None
+        install.configure_backend("codex", bin_path="/nowhere/codex")
+        after = sorted(p.name for p in real.iterdir()) if real.is_dir() else None
+        self.assertEqual(before, after)
 
 
 class TmpStore(unittest.TestCase):
@@ -241,17 +282,24 @@ class TestBackendConfig(unittest.TestCase):
         self.config = config
         self._dir = Path(tempfile.mkdtemp(prefix="ccmem_backend_"))
         # Drive STATE_DIR via env so an importlib.reload (below) keeps the temp
-        # dir instead of snapping back to ~/.foldcrumbs.
-        self._saved_env = os.environ.get("ENGRAM_STATE_DIR")
-        os.environ["ENGRAM_STATE_DIR"] = str(self._dir)
+        # dir instead of snapping back to ~/.foldcrumbs. It must be the
+        # FOLDCRUMBS_* name: setting only the legacy ENGRAM_* one is exactly
+        # how this class used to write the developer's real state dir whenever
+        # a FOLDCRUMBS_STATE_DIR existed to outrank it.
+        self._saved_env = {k: os.environ.get(k) for k in
+                           ("FOLDCRUMBS_STATE_DIR", "ENGRAM_STATE_DIR")}
+        os.environ["FOLDCRUMBS_STATE_DIR"] = str(self._dir)
+        os.environ.pop("ENGRAM_STATE_DIR", None)
         importlib.reload(config)
+        assert config.STATE_DIR == self._dir, "backend test escaped its temp dir"
 
     def tearDown(self):
         import importlib
-        if self._saved_env is None:
-            os.environ.pop("ENGRAM_STATE_DIR", None)
-        else:
-            os.environ["ENGRAM_STATE_DIR"] = self._saved_env
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         importlib.reload(self.config)
 
     def _read(self, name):
