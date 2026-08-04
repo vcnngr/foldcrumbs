@@ -702,6 +702,30 @@ class TestStoreContainment(TmpStore):
         self.assertEqual(store.forget(rec.filename()), "deleted")
 
 
+class TestStoreArtifacts(TmpStore):
+    """Files that live in the store without being memories."""
+
+    def test_legacy_and_sync_conflict_handoffs_are_not_memories(self):
+        # Both were found in a real store: an older dated handoff, and a
+        # Syncthing conflict copy. Each parses as an "Untitled" record whose
+        # body is the whole file, and federation would show it to every other
+        # instance.
+        d = Path(self.dir)
+        d.mkdir(parents=True, exist_ok=True)
+        for name in ("HANDOFF.md", "HANDOFF.engram-2026-07-06.md",
+                     "HANDOFF.sync-conflict-20260713-095412-SH53F7C.md",
+                     "MEMORY.md"):
+            (d / name).write_text("some text\n", encoding="utf-8")
+        rec = MemoryRecord(title="Real one", content="An actual memory.")
+        store.upsert(rec)
+        self.assertEqual([m.title for m in store.iter_memories()], ["Real one"])
+        for name in ("HANDOFF.engram-2026-07-06.md",
+                     "HANDOFF.sync-conflict-20260713-095412-SH53F7C.md"):
+            self.assertIsNone(store.get(name), name)
+            self.assertTrue(store.is_store_artifact(name))
+        self.assertFalse(store.is_store_artifact(rec.filename()))
+
+
 class TestSearch(TmpStore):
     def test_search_ranks_relevant(self):
         store.upsert(MemoryRecord(title="Recall via grep",

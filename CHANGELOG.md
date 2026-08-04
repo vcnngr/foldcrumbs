@@ -90,6 +90,12 @@ instance only ever writes its own.
   shared by every test module, so running one on its own is covered too, and
   each module asserts it cannot resolve to a real store.
 
+- Dated handoffs from older versions, and the `sync-conflict` copies Syncthing
+  leaves in a shared store, were read as memories: each parses as an
+  "Untitled" record holding the whole file. They were skipped on `import` but
+  not by recall or the index, so federation would have shown them to every
+  other instance. Found in a real store during rollout.
+
 ### Known limits
 
 - Federation is per machine: roots register into `FOLDCRUMBS_STATE_DIR`

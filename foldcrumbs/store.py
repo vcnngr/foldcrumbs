@@ -114,6 +114,18 @@ def _refuse_if_foreign(rec: MemoryRecord, action: str) -> None:
         )
 
 
+def is_store_artifact(name: str) -> bool:
+    """True for files that live in the store without being memories.
+
+    The index, and any handoff — including the dated ones written by older
+    versions and the ``sync-conflict`` copies Syncthing leaves behind. They
+    parse as an "Untitled" record with the whole file as its body, so without
+    this they surface in recall and, since federation, in what other
+    instances are shown.
+    """
+    return name == config.INDEX_NAME or name.startswith("HANDOFF")
+
+
 def _ensure_dir(cwd: str | os.PathLike[str] | None) -> Path:
     d = config.memory_dir(cwd)
     d.mkdir(parents=True, exist_ok=True)
@@ -148,7 +160,7 @@ def iter_memories_in(
     if max_files is not None:
         names = names[:max_files]
     for path in names:
-        if path.name in (config.INDEX_NAME, config.HANDOFF_NAME):
+        if is_store_artifact(path.name):
             continue
         try:
             rec = MemoryRecord.from_markdown(path.read_text(encoding="utf-8"))
@@ -338,7 +350,7 @@ def import_store(
     src = Path(src_dir).expanduser()
     plan: dict[str, list[str]] = {"created": [], "validated": [], "skipped": []}
     for path in sorted(src.glob("*.md")):
-        if path.name == config.INDEX_NAME or path.name.startswith("HANDOFF"):
+        if is_store_artifact(path.name):
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -372,8 +384,7 @@ def get(
 ) -> MemoryRecord | None:
     """Load a single memory by its on-disk filename (as linked in MEMORY.md)."""
     p = _resolve_in_store(name, cwd)
-    if p is None or not p.is_file() or p.name in (config.INDEX_NAME,
-                                                  config.HANDOFF_NAME):
+    if p is None or not p.is_file() or is_store_artifact(p.name):
         return None
     try:
         rec = MemoryRecord.from_markdown(p.read_text(encoding="utf-8"))
