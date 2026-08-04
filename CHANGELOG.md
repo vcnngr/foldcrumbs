@@ -86,8 +86,9 @@ instance only ever writes its own.
   it by `TestBackendConfig`, and, once recall became federated, their actual
   memories read. Every such name is now redirected to a throwaway sandbox
   before the package is imported (clearing them is not enough: with nothing
-  set, the state dir falls back to the real `~/.foldcrumbs`), and two tests
-  assert the suite cannot resolve to a real store.
+  set, the state dir falls back to the real `~/.foldcrumbs`). The sandbox is
+  shared by every test module, so running one on its own is covered too, and
+  each module asserts it cannot resolve to a real store.
 
 ### Known limits
 

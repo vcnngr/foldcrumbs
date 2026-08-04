@@ -17,22 +17,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-# Point every store-locating name at a throwaway directory before the package
-# is imported (config resolves STATE_DIR at import time).
-#
-# Clearing them is not enough, and that is the whole trap: with nothing set,
-# STATE_DIR falls back to the real ~/.foldcrumbs. Per-class isolation is not
-# enough either — a class that sets only the legacy ENGRAM_* names is silently
-# overridden by a FOLDCRUMBS_* one exported in the developer's shell, and the
-# suite then writes their actual backend config, runtime snapshot and
-# memories. This covers every class, including ones written later that forget
-# to isolate themselves.
-_SUITE_SANDBOX = tempfile.mkdtemp(prefix="foldcrumbs_suite_")
-for _var in ("FOLDCRUMBS_DIR", "ENGRAM_DIR"):
-    os.environ.pop(_var, None)
-os.environ["FOLDCRUMBS_STATE_DIR"] = str(Path(_SUITE_SANDBOX) / "state")
-os.environ.pop("ENGRAM_STATE_DIR", None)
-os.environ["CLAUDE_CONFIG_DIR"] = str(Path(_SUITE_SANDBOX) / "config")
+# Sandbox every store-locating variable before foldcrumbs is imported. Shared
+# with the other test modules so a standalone run of any of them is covered
+# too — see tests/_sandbox.py for why clearing them would not be enough.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _sandbox import SANDBOX, is_inside  # noqa: E402
 
 from foldcrumbs import distill, install, redact, store  # noqa: E402
 from foldcrumbs.schema import MemoryRecord  # noqa: E402
@@ -46,10 +35,8 @@ class TestSuiteIsolation(unittest.TestCase):
         from foldcrumbs import config
         importlib.reload(config)
         for path in (config.STATE_DIR, config.memory_dir(), config.claude_config_dir()):
-            self.assertTrue(
-                str(path).startswith(_SUITE_SANDBOX),
-                f"{path} is outside the suite sandbox {_SUITE_SANDBOX}",
-            )
+            self.assertTrue(is_inside(path),
+                            f"{path} is outside the suite sandbox {SANDBOX}")
 
     def test_the_real_state_dir_is_never_written(self):
         # The concrete failure this guards: a class isolating only the legacy
@@ -918,12 +905,18 @@ class TestSurface(unittest.TestCase):
 
     def test_commands_dir_honours_claude_config_dir(self):
         from foldcrumbs import config as cfg
+        # Restore rather than unset: popping it leaves the *default* in force
+        # for every later test, and the default is the real ~/.claude.
+        saved = os.environ.get("CLAUDE_CONFIG_DIR")
         os.environ["CLAUDE_CONFIG_DIR"] = "/tmp/fc-test-instance"
         try:
             self.assertEqual(self.surface.commands_dir(),
                              Path("/tmp/fc-test-instance/commands"))
         finally:
-            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            if saved is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = saved
         self.assertEqual(self.surface.commands_dir(),
                          cfg.claude_config_dir() / "commands")
 
