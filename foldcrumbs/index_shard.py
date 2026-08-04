@@ -14,12 +14,13 @@ prevents a torn file, not a stale one.
 Sharding removes that race *between* roots — but a root is an instance, not a
 process, and one instance runs several at once (a hook worker, a CLI call, the
 MCP server). So the same lost update is possible within a single shard. Writes
-take the registry lock and are arbitrated by **content**: a shard already
-matching the store is left alone, and a scan whose data no longer matches the
-store is dropped rather than published. No timestamps take part — comparing
-them needs a tolerance for clock skew, and any tolerance is a window in which
-a slow scan overwrites a fresher shard. Divergence self-heals at the next
-``ensure_shard``, which every session start performs.
+take the registry lock and are arbitrated by the **entries themselves**: a
+shard already saying exactly this is left alone, and a scan whose data no
+longer matches the store is dropped rather than published. Neither timestamps
+nor file metadata take part — comparing timestamps needs a tolerance for clock
+skew, and any tolerance is a window in which a slow scan overwrites a fresher
+shard; stat metadata can be identical either side of a real edit. Divergence
+self-heals at the next ``ensure_shard``, which every session start performs.
 
 The local ``MEMORY.md`` is untouched. It stays byte-identical while only other
 instances write, so the SessionStart-injected prefix keeps riding the agent's
@@ -82,13 +83,14 @@ def shard_path(root_id: str, cwd: str | os.PathLike[str] | None = None) -> Path 
 
 
 def _fingerprint(memory_dir: Path) -> str:
-    """Cheap signature of a store's contents (names, sizes, mtimes).
+    """Cheap stat-only signature, used *only* to detect concurrent movement.
 
-    Not the newest mtime, which was the obvious choice and the wrong one: it
-    goes *down* when a memory is deleted, so a scan taken after a deletion
-    looked older than the shard it should replace and the deleted memory
-    stayed published forever. A fingerprint changes on add, edit and delete
-    alike. Stats only — no file is read to compute it.
+    Deliberately **not** the test for "is the shard current": an edit that
+    keeps a file's size and mtime — a one-character change, a restore or a
+    sync that preserves timestamps — leaves this unchanged while the published
+    title is now wrong. That question is answered by comparing the entries
+    themselves. This one answers "did the store move while I was scanning it",
+    where a missed change costs only a redundant write.
     """
     import hashlib
 
@@ -167,7 +169,6 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
         "label": federation._label_for(cur),
         "memory_dir": str(memory_dir),
         "written_at": datetime.now(timezone.utc).isoformat(),
-        "fingerprint": fingerprint,
         "entries": entries,
     }
     try:
@@ -184,15 +185,16 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
                     "federation: shard not published (registry lock unavailable)"
                 )
                 return None
-            # Decide by content, never by clock. Comparing timestamps needed
-            # a tolerance for skew, and any tolerance is a window in which a
-            # slow scan overwrites a fresher shard — the very thing it was
-            # added to prevent. The store itself is the arbiter instead.
-            current = _fingerprint(memory_dir)
+            # Decide by the entries themselves — never by a clock, never by
+            # file metadata. Timestamps needed a tolerance for skew, and any
+            # tolerance is a window in which a slow scan overwrites a fresher
+            # shard; stat metadata can be identical either side of a real edit
+            # (a one-character change, an mtime restored by a backup or a
+            # sync), which would leave a wrong title published for good.
             existing = _read_shard_file(target)
-            if existing is not None and existing.get("fingerprint") == current:
-                return target      # already describes the store exactly
-            if fingerprint != current:
+            if existing is not None and existing.get("entries") == entries:
+                return target      # already says exactly this; don't churn it
+            if fingerprint != _fingerprint(memory_dir):
                 # The store moved while we scanned, so these entries are
                 # already history. Publishing them would replace a possibly
                 # accurate shard with a definitely stale one; the next
@@ -227,21 +229,13 @@ def ensure_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
     *existing* store would therefore appear registered but empty until its
     next write — its whole history invisible to everyone else. Called from the
     hooks so joining the federation shows what is already there, immediately.
-    """
-    cur = federation.current_root_path()
-    marker = federation.read_marker_data(cur) if cur is not None else None
-    if not marker or federation.is_tombstoned(marker["id"]):
-        return None
-    target = shard_path(marker["id"], cwd)
-    if target is None:
-        return None
 
-    current = _fingerprint(config.memory_dir(cwd))
-    if not current:
-        return None
-    existing = _read_shard_file(target)
-    if existing is not None and existing.get("fingerprint") == current:
-        return target          # already describes exactly this store
+    There is no cheap pre-check before delegating: a stat-based one would skip
+    the republish for an edit that kept a file's size and mtime, leaving a
+    wrong title published indefinitely. ``write_shard`` reads the store — the
+    same work the index rebuild already does — and rewrites nothing when the
+    entries it derives match what is published.
+    """
     return write_shard(cwd)
 
 

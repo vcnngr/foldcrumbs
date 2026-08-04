@@ -2083,6 +2083,30 @@ class TestIndexShards(_FederationEnv):
         self.assertEqual(self.index_shard.write_shard(self.proj), first)
         self.assertEqual(first.stat().st_mtime, stamp)   # no churn
 
+    def test_an_edit_that_preserves_size_and_mtime_still_republishes(self):
+        # A one-character change keeps the size; a restore or a sync can keep
+        # the mtime. Deciding by stat alone would leave the old title
+        # published for good, so the entries themselves are compared.
+        ref = self.federation.register(self._root(".claude"))
+        name = self._memory(ref, "Deploys run on Mondays", "Body.",
+                            "2026-01-01T00:00:00+00:00")
+        self.index_shard.write_shard(self.proj)
+        shard = self.index_shard.shard_path(ref.id, self.proj)
+        path = ref.memory_dir(self.proj) / name
+        before = path.stat()
+        path.write_text(path.read_text(encoding="utf-8")
+                        .replace("Mondays", "Fridays"), encoding="utf-8")
+        # ns, not float seconds: restoring with float leaves st_mtime_ns
+        # different, which would move the stat signature and let this test
+        # pass without the fix it exists to prove.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        self.assertEqual(after.st_size, before.st_size)
+        self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+        self.index_shard.ensure_shard(self.proj)
+        titles = [e["title"] for e in json.loads(shard.read_text())["entries"]]
+        self.assertEqual(titles, ["Deploys run on Fridays"])
+
     def test_deleting_a_memory_reaches_the_shard(self):
         # The version has to change when a store *shrinks*: a newest-mtime
         # counter goes down on delete, so the removed memory would stay

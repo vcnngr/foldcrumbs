@@ -29,10 +29,11 @@ instance only ever writes its own.
 - **Per-root index shards** under `<state-dir>/projects/<project>/roots/`,
   published on every index rebuild, and on the first federated read so an
   instance that federates an existing store is not advertised as empty.
-  Writes are serialised and arbitrated by a content fingerprint — never by
-  timestamps — so a slow scan cannot replace a fresher shard and a *deletion*
-  still propagates. Sharding removes that race between instances; one instance
-  still runs several processes. Merged at read time with a total ordering
+  Writes are serialised and arbitrated by the published entries themselves —
+  never by timestamps or file metadata — so a slow scan cannot replace a
+  fresher shard, a *deletion* propagates, and an edit that happens to preserve
+  a file's size and mtime is still picked up. Sharding removes that race
+  between instances; one instance still runs several processes. Merged at read time with a total ordering
   key (type, `created_at` descending, root id, filename), so every instance
   derives the same order without a shared file to agree through.
 - **Federated block** injected after the local index at SessionStart *and*
