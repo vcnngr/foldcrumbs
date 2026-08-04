@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,6 +57,10 @@ _STALE_AFTER_DAYS = 30
 
 # Probing a root that lives on a hung network mount must not stall a hook.
 _AVAILABILITY_TIMEOUT = 0.25
+
+# A shard timestamped further ahead than this is a wrong clock, not a fresher
+# scan; without the bound one backwards step would freeze the shard for good.
+_CLOCK_SKEW_GRACE = 300.0
 
 # The entry cap bounds the count, not the size: one root with very long
 # descriptions could still dominate the window.
@@ -77,13 +82,25 @@ def shard_path(root_id: str, cwd: str | os.PathLike[str] | None = None) -> Path 
     return shards_dir(cwd) / f"{root_id}.json"
 
 
-def _source_mtime(memory_dir: Path) -> float:
-    """Newest mtime in a store: a cheap version number for its contents."""
+def _fingerprint(memory_dir: Path) -> str:
+    """Cheap signature of a store's contents (names, sizes, mtimes).
+
+    Not the newest mtime, which was the obvious choice and the wrong one: it
+    goes *down* when a memory is deleted, so a scan taken after a deletion
+    looked older than the shard it should replace and the deleted memory
+    stayed published forever. A fingerprint changes on add, edit and delete
+    alike. Stats only — no file is read to compute it.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
     try:
-        return max((p.stat().st_mtime for p in memory_dir.glob("*.md")),
-                   default=0.0)
+        for path in sorted(memory_dir.glob("*.md")):
+            st = path.stat()
+            h.update(f"{path.name}:{st.st_mtime_ns}:{st.st_size}\n".encode())
     except OSError:
-        return 0.0
+        return ""
+    return h.hexdigest()[:16]
 
 
 def _stable_created_at(rec, path: Path) -> str:
@@ -138,9 +155,13 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
         return None
 
     memory_dir = config.memory_dir(cwd)
-    # Read the store's version *before* scanning it, so a memory written while
-    # we scan makes our snapshot look older than it is rather than newer.
-    source_mtime = _source_mtime(memory_dir)
+    # Two different questions, two different values. "Has the store changed
+    # since the shard was published?" is answered by a content fingerprint.
+    # "Which of two concurrent scans is fresher?" is answered by when each
+    # started — a wall clock, monotonic in the sense that matters here, where
+    # every writer of this shard is a process on this machine.
+    scanned_at = time.time()
+    fingerprint = _fingerprint(memory_dir)
     entries = [
         _entry(m, memory_dir)
         for m in store.iter_memories(cwd)
@@ -153,7 +174,8 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
         "label": federation._label_for(cur),
         "memory_dir": str(memory_dir),
         "written_at": datetime.now(timezone.utc).isoformat(),
-        "source_mtime": source_mtime,
+        "scanned_at": scanned_at,
+        "fingerprint": fingerprint,
         "entries": entries,
     }
     try:
@@ -172,8 +194,12 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
                 return None
             existing = _read_shard_file(target)
             if existing is not None:
-                prior = existing.get("source_mtime")
-                if isinstance(prior, (int, float)) and prior > source_mtime:
+                prior = existing.get("scanned_at")
+                # A clock stepped backwards would otherwise freeze this shard
+                # permanently, so a timestamp implausibly far ahead is treated
+                # as wrong rather than authoritative.
+                if (isinstance(prior, (int, float)) and prior > scanned_at
+                        and prior < scanned_at + _CLOCK_SKEW_GRACE):
                     config.log_event(
                         f"federation: kept a newer shard for {marker['id']}"
                     )
@@ -213,14 +239,12 @@ def ensure_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
     if target is None:
         return None
 
-    newest = _source_mtime(config.memory_dir(cwd))
-    if not newest:
+    current = _fingerprint(config.memory_dir(cwd))
+    if not current:
         return None
     existing = _read_shard_file(target)
-    if existing is not None:
-        prior = existing.get("source_mtime")
-        if isinstance(prior, (int, float)) and prior >= newest:
-            return target      # already covers the current store
+    if existing is not None and existing.get("fingerprint") == current:
+        return target          # already describes exactly this store
     return write_shard(cwd)
 
 

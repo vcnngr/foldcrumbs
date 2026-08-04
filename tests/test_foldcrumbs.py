@@ -2052,16 +2052,45 @@ class TestIndexShards(_FederationEnv):
         fresh = json.loads(shard.read_text())
         self.assertEqual(len(fresh["entries"]), 2)
 
-        # Now replay a scan that started before the second memory existed.
-        stale = dict(fresh, entries=fresh["entries"][:1],
-                     source_mtime=fresh["source_mtime"] - 100)
-        real = self.index_shard._source_mtime
-        self.index_shard._source_mtime = lambda d: stale["source_mtime"]
+        # Replay a scan that started earlier than the published one: it must
+        # not win the replace just by finishing last.
+        import time as _t
+        real = _t.time
+        _t.time = lambda: real() - 100
         try:
             self.index_shard.write_shard(self.proj)
         finally:
-            self.index_shard._source_mtime = real
+            _t.time = real
         self.assertEqual(len(json.loads(shard.read_text())["entries"]), 2)
+        self.assertEqual(json.loads(shard.read_text())["scanned_at"],
+                         fresh["scanned_at"])
+
+    def test_deleting_a_memory_reaches_the_shard(self):
+        # The version has to change when a store *shrinks*: a newest-mtime
+        # counter goes down on delete, so the removed memory would stay
+        # published forever.
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "Keep", "Body one.", "2026-01-01T00:00:00+00:00")
+        name = self._memory(ref, "Drop", "Body two.", "2026-01-02T00:00:00+00:00")
+        self.index_shard.write_shard(self.proj)
+        shard = self.index_shard.shard_path(ref.id, self.proj)
+        self.assertEqual(len(json.loads(shard.read_text())["entries"]), 2)
+        (ref.memory_dir(self.proj) / name).unlink()
+        self.index_shard.ensure_shard(self.proj)
+        titles = [e["title"] for e in json.loads(shard.read_text())["entries"]]
+        self.assertEqual(titles, ["Keep"])
+
+    def test_a_clock_far_ahead_does_not_freeze_the_shard(self):
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
+        self.index_shard.write_shard(self.proj)
+        shard = self.index_shard.shard_path(ref.id, self.proj)
+        data = json.loads(shard.read_text())
+        data["scanned_at"] = data["scanned_at"] + 86400   # a year-off clock
+        data["entries"] = []
+        shard.write_text(json.dumps(data), encoding="utf-8")
+        self.index_shard.write_shard(self.proj)
+        self.assertEqual(len(json.loads(shard.read_text())["entries"]), 1)
 
     def test_shard_is_not_published_without_the_lock(self):
         import contextlib as _c
