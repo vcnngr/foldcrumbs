@@ -4761,6 +4761,63 @@ class TestProfiles(_FederationEnv):
                          [f"{var}={awkward}"],
                          f"a shell would not read this back whole: {line}")
 
+    def _fake_agent(self, *names):
+        home = self._home / "agent-home" / "profiles"
+        for n in names:
+            (home / n).mkdir(parents=True, exist_ok=True)
+        (home / ".hidden").mkdir(parents=True, exist_ok=True)
+        (home / "not-a-dir.txt").write_text("x", encoding="utf-8")
+        return home
+
+    def test_import_reads_the_other_runtime_and_writes_nothing_to_it(self):
+        # Those directories belong to that runtime. foldcrumbs takes names
+        # from them; anything else would make two tools own one tree.
+        home = self._fake_agent("cz-claude", "devlog")
+        before = sorted(p.name for p in home.rglob("*"))
+        res = self.profiles.import_agent(home=home, apply=True)
+        self.assertEqual(res["found"], ["cz-claude", "devlog"],
+                         "hidden and non-directory entries were picked up")
+        self.assertEqual(sorted(res["added"]), ["cz-claude", "devlog"])
+        self.assertEqual(sorted(p.name for p in home.rglob("*")), before,
+                         "importing wrote into the other runtime's tree")
+
+    def test_each_imported_profile_gets_its_own_dedicated_store(self):
+        home = self._fake_agent("cz-claude", "devlog")
+        self.profiles.import_agent(home=home, apply=True)
+        listed = {p["name"]: p for p in self.profiles.listing()}
+        dirs = set()
+        for name in ("cz-claude", "devlog"):
+            self.assertEqual(listed[name]["kind"], self.profiles.DEDICATED,
+                             f"{name} was not given a memory of its own")
+            dirs.add(listed[name]["path"])
+        self.assertEqual(len(dirs), 2, "two agents were pointed at one store")
+        for d in dirs:
+            self.assertTrue(str(d).startswith(str(self._state)),
+                            "an agent's memory was put inside the other "
+                            "runtime's tree")
+
+    def test_a_dry_run_imports_nothing(self):
+        home = self._fake_agent("cz-claude")
+        res = self.profiles.import_agent(home=home)
+        self.assertEqual(res["added"], [])
+        self.assertEqual([p["name"] for p in self.profiles.listing()], [])
+        self.assertIn("cz-claude", res["found"])
+
+    def test_importing_twice_does_not_duplicate_a_profile(self):
+        home = self._fake_agent("cz-claude")
+        self.profiles.import_agent(home=home, apply=True)
+        again = self.profiles.import_agent(home=home, apply=True)
+        self.assertEqual(again["added"], [])
+        self.assertEqual(again["skipped"], ["cz-claude"])
+        self.assertEqual(
+            len([p for p in self.profiles.listing() if p["name"] == "cz-claude"]),
+            1, "a second registration was made for the same agent")
+
+    def test_a_runtime_that_is_not_installed_is_not_an_error(self):
+        res = self.profiles.import_agent(home=self._home / "nothing-here")
+        self.assertEqual(res["found"], [])
+        self.assertEqual(res["added"], [])
+
     def test_removing_a_profile_leaves_its_memories_alone(self):
         ref = self.profiles.add("councillor")
         (ref.path / "fact_kept.md").write_text(

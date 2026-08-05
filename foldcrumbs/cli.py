@@ -139,6 +139,25 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             print(f"to use it: {line}")
         return 0
 
+    if action == "import":
+        res = profiles.import_agent(args.agent, apply=args.apply,
+                                    prefix=args.prefix)
+        if not res["found"]:
+            print(f"no {args.agent} profiles found on this machine.")
+            return 0
+        for name in res["found"]:
+            mark = "  (already registered)" if res["plan"][name] in res["skipped"] else ""
+            print(f"  {res['plan'][name]}{mark}")
+        if res["applied"]:
+            print(f"registered {len(res['added'])} profile(s); "
+                  f"{len(res['skipped'])} already there. "
+                  "`foldcrumbs profile env <name>` prints what to set.")
+        else:
+            new = [n for n in res["plan"].values() if n not in res["skipped"]]
+            print(f"{len(new)} profile(s) would be registered, each with a "
+                  "memory of its own. Run with --apply to do it.")
+        return 0
+
     if action == "env":
         try:
             line = profiles.env_line(args.name)
@@ -696,6 +715,17 @@ def build_parser() -> argparse.ArgumentParser:
                              "under a config dir")
     pf_add.add_argument("--path", help="where its memory lives (required for "
                                        "a shared profile)")
+    pf_imp = pf_sub.add_parser("import", help="give each profile of a "
+                                              "multi-agent runtime a memory "
+                                              "of its own (dry-run by default)")
+    pf_imp.add_argument("--agent", default="hermes",
+                        choices=sorted(profiles.AGENT_HOMES),
+                        help="which runtime's profiles to read")
+    pf_imp.add_argument("--prefix", help="prepend this to every name")
+    pf_imp.add_argument("--apply", action="store_true",
+                        help="actually register (default: dry-run)")
+    pf_imp.set_defaults(func=_cmd_profile)
+
     pf_env = pf_sub.add_parser("env", help="print the environment line that "
                                           "makes a process use it")
     pf_env.add_argument("name")

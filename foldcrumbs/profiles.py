@@ -103,6 +103,64 @@ def add(name: str, kind: str = DEDICATED, path: str | os.PathLike[str] | None = 
                                unique_label=True)
 
 
+# Where a multi-agent runtime keeps its own profiles on this machine. Read
+# only ever: these directories belong to that runtime, and foldcrumbs takes
+# names from them, never writes into them.
+AGENT_HOMES = {
+    "hermes": Path.home() / ".hermes" / "profiles",
+}
+
+
+def discover(agent: str = "hermes", home: str | os.PathLike[str] | None = None
+             ) -> list[str]:
+    """The agent profiles configured on this machine, by name.
+
+    A runtime that already runs one agent per profile has done the hard part —
+    it knows who its agents are. This reads that list so each can be given a
+    memory of its own, and returns empty when the runtime is not installed
+    rather than treating its absence as an error.
+    """
+    base = Path(home) if home is not None else AGENT_HOMES.get(agent)
+    if base is None:
+        raise ValueError(f"no known profile layout for {agent!r}")
+    try:
+        return sorted(d.name for d in base.iterdir()
+                      if d.is_dir() and not d.name.startswith("."))
+    except OSError:
+        return []
+
+
+def import_agent(agent: str = "hermes", home=None, apply: bool = False,
+                 prefix: str | None = None) -> dict:
+    """Give each of that agent's profiles a dedicated memory of its own.
+
+    Dedicated, not shared: an agent on a chat bus carries its memory with it
+    rather than per repository. Each store lives under foldcrumbs' own state
+    directory — putting them inside the other runtime's tree would make two
+    tools own one directory, and the first to tidy up would take the other's
+    data with it.
+
+    Dry-run unless ``apply``, and already-registered names are reported as
+    skipped rather than re-registered under a second id.
+    """
+    label = (lambda n: f"{prefix}{n}") if prefix else (lambda n: n)
+    found = discover(agent, home)
+    taken = {p["name"] for p in listing()}
+    plan = {n: label(n) for n in found}
+    added, skipped = [], sorted(n for n in found if label(n) in taken)
+    if apply:
+        for name in found:
+            if label(name) in taken:
+                continue
+            try:
+                if add(label(name)) is not None:
+                    added.append(label(name))
+            except (ValueError, federation.FederationConflict):
+                skipped.append(label(name))
+    return {"found": found, "plan": plan, "added": added,
+            "skipped": sorted(set(skipped)), "applied": apply}
+
+
 def listing() -> list[dict]:
     """Every registered root, described as a profile.
 
