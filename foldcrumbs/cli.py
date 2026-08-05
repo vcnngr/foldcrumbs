@@ -18,7 +18,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config, distill, federation, install, llm, profiles, store
+from . import config, distill, embeddings, federation, install, llm, profiles, store
 from .profile import format_context_block
 from .schema import VALID_TYPES, MemoryRecord
 
@@ -343,6 +343,12 @@ def _cmd_status(_: argparse.Namespace) -> int:
     else:
         print(f"LLM backend: openai — {config.LLM_ENDPOINT} (model {config.LLM_MODEL})")
     print(f"LLM reachable: {llm.available()}")
+    if config.SEMANTIC:
+        print(f"semantic recall: on — {config.EMBEDDING_ENDPOINT} "
+              f"(model {config.EMBEDDING_MODEL or config.LLM_MODEL}, "
+              f"cache {embeddings.cache_size()})")
+    else:
+        print("semantic recall: off (lexical only; opt in with FOLDCRUMBS_SEMANTIC=1)")
     print(f"distill here : {'on' if config.distill_enabled() else 'off (read-only consumer)'}")
     print(f"context budget: {config.CONTEXT_BUDGET} @ {int(config.CONTEXT_PCT*100)}%")
     roots = federation.iter_roots()

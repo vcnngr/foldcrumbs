@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Optional semantic recall** (`FOLDCRUMBS_SEMANTIC=1`, off by default). With
+  the switch on, `recall`/`answer` and the MCP tools also score candidates by
+  embedding similarity against an OpenAI-compatible `/v1/embeddings` endpoint
+  (`FOLDCRUMBS_EMBEDDING_ENDPOINT`, default: the distillation endpoint) and
+  keep the better of the two relevance signals. The semantic signal is capped
+  below a perfect word match, so it rescues paraphrases the lexical pass
+  misses but can never outrank what the words already matched exactly.
+- Two gates, both the user's, neither blocking: without `FOLDCRUMBS_SEMANTIC`
+  nothing is ever attempted (zero requests, zero latency, behaviour identical
+  to before); with it on, an endpoint that is missing, slow or erroring is a
+  silent fallback to lexical recall (`FOLDCRUMBS_EMBEDDING_TIMEOUT`, default
+  10 s). No new dependencies — the request is stdlib `urllib`; vectors are
+  cached machine-locally in the state dir (never in the store, which may sync
+  across machines with different endpoints) and survive endpoint/model
+  changes by cache key.
+- `foldcrumbs status` reports the semantic channel (on/off, endpoint, model,
+  cache size).
+
 ## [0.6.1] — 2026-08-05
 
 Hardening of the federation released in 0.6.0. No new features: every change

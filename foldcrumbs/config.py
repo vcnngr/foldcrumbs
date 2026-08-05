@@ -96,6 +96,22 @@ DISABLED = bool(_env("DISABLE"))
 # Best-effort: servers that ignore it still work (tolerant parser). Default on.
 LLM_JSON_SCHEMA = _env("LLM_JSON_SCHEMA", "1") not in ("0", "false", "")
 
+# --- Semantic recall (opt-in; recall stays lexical until the user asks) ------
+# Two gates, both the user's: the switch below, and an embedding endpoint that
+# actually answers. Without the switch nothing is ever attempted, so a machine
+# that never asked for this behaves exactly as before — no extra calls, no new
+# failure modes. EMBEDDING_ENDPOINT defaults to the distillation endpoint
+# because OpenAI-compatible servers (MLX, Ollama, llama.cpp, LM Studio) serve
+# /v1/embeddings beside /v1/chat/completions; EMBEDDING_MODEL falls back to
+# LLM_MODEL at request time. Timeout is deliberately short: recall must not
+# block on a slow model, it falls back to lexical instead.
+SEMANTIC = _env("SEMANTIC", "") not in ("", "0", "false", "no", "off")
+EMBEDDING_ENDPOINT = (_env("EMBEDDING_ENDPOINT")
+                      or _local_override("embedding-endpoint") or LLM_ENDPOINT)
+EMBEDDING_MODEL = (_env("EMBEDDING_MODEL")
+                   or _local_override("embedding-model") or "")
+EMBEDDING_TIMEOUT = float(_env("EMBEDDING_TIMEOUT", "10"))
+
 # --- Anti-rot monitor -------------------------------------------------------
 CONTEXT_BUDGET = int(_env("CONTEXT_BUDGET", "200000"))
 CONTEXT_PCT = float(_env("CONTEXT_PCT", "0.45"))
