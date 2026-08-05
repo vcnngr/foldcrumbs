@@ -48,6 +48,13 @@ def audit(cwd=None) -> dict:
     active_names = {_name(m) for m in active}
     return {
         "dead_links": sorted(t for t in linked if t not in on_disk),
+        # Linked, and the file is right there — but the memory behind it has
+        # been retired. Archived, superseded and deleted records keep their
+        # files, so this is invisible to the dead-link check, and an index
+        # left in that state stays wrong for good: the operation that retired
+        # them has already run, and nothing later notices.
+        "retired_links": sorted(t for t in linked
+                                if t in on_disk and t not in active_names),
         "orphans": sorted(n for n in active_names if n not in linked),
         "pollution": sorted(_name(m) for m in active
                             if _is_hard_artifact(m.title) or _is_hard_artifact(m.content)),
@@ -65,7 +72,7 @@ def heal_index(cwd=None) -> bool:
     across machines should gate this on ``config.distill_enabled()`` so only a
     writing machine repairs (avoids sync churn)."""
     a = audit(cwd)
-    if a["dead_links"] or a["orphans"]:
+    if a["dead_links"] or a["orphans"] or a["retired_links"]:
         store.rebuild_index(cwd)
         return True
     return False
@@ -160,10 +167,18 @@ def decay(cwd=None, apply: bool = False) -> dict:
     }
     archived: list[str] = []
     if apply:
-        archived = [n for n in candidates
-                    if store.set_status(n, "archived", cwd, rebuild=False)]
-        if archived:
-            store.rebuild_index(cwd)
+        try:
+            for n in candidates:
+                if store.set_status(n, "archived", cwd, rebuild=False):
+                    archived.append(n)
+        finally:
+            # Whatever happened above, the index must describe what the store
+            # now holds. Skipping it on the way out through an exception would
+            # leave archived memories advertised — and heal_index would not
+            # notice, since their files are still there. It does now, which is
+            # the real backstop for a sweep interrupted outright.
+            if archived:
+                store.rebuild_index(cwd)
     return {"candidates": candidates, "archived": archived, "applied": apply}
 
 

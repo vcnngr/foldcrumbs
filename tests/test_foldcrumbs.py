@@ -913,6 +913,58 @@ class TestDecay(TmpStore):
                          f"the index was rebuilt {len(builds)} times for "
                          f"{len(res['archived'])} memories")
 
+    def test_an_interrupted_sweep_still_leaves_the_index_truthful(self):
+        # If the rebuild is skipped on the way out, the index keeps
+        # advertising memories that are no longer there to answer.
+        from foldcrumbs import audit
+        stale = [self._stale(f"Old rule {i}", "Nobody follows this any more.")
+                 for i in range(3)]
+        real = store.set_status
+        calls = []
+
+        def fails_partway(name, status, cwd=None, rebuild=True):
+            calls.append(name)
+            if len(calls) == 2:
+                raise OSError(errno.EIO, "the disk gave up")
+            return real(name, status, cwd, rebuild)
+
+        store.set_status = fails_partway
+        try:
+            with self.assertRaises(OSError):
+                audit.decay(apply=True)
+        finally:
+            store.set_status = real
+        idx = (Path(self.dir) / "MEMORY.md").read_text()
+        archived = [m for m in store.load_all() if m.status == "archived"]
+        self.assertTrue(archived, "the sweep archived nothing at all")
+        for m in archived:
+            self.assertNotIn(m.filename(), idx,
+                             "an interrupted sweep left an archived memory "
+                             "advertised in the index")
+        self.assertEqual(len(stale), 3)
+
+    def test_a_retired_memory_left_in_the_index_is_healed(self):
+        # Archived, superseded and deleted records keep their files, so a
+        # stale entry for one is not a dead link — and without noticing it,
+        # the index stays wrong for good: whatever retired them has already
+        # run, and nothing later looks again.
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        audit.decay(apply=True)
+        # Put the index back the way an interrupted sweep would have left it.
+        index = Path(self.dir) / "MEMORY.md"
+        index.write_text(
+            index.read_text() + f"\n- [Old rule]({stale.filename()}) — hook\n",
+            encoding="utf-8")
+        report = audit.audit()
+        self.assertIn(stale.filename(), report["retired_links"],
+                      "a retired memory in the index went unnoticed")
+        self.assertEqual(report["dead_links"], [],
+                         "its file is on disk, so it is not a dead link")
+        self.assertTrue(audit.heal_index(), "the index was not healed")
+        self.assertNotIn(stale.filename(),
+                         index.read_text(), "healing left it advertised")
+
     def test_a_trusted_memory_is_never_archived(self):
         from foldcrumbs import audit
         keep = MemoryRecord(title="Live rule", content="Still true today.",
