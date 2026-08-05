@@ -93,6 +93,34 @@ def prune_artifacts(cwd=None) -> list[str]:
     return removed
 
 
+def decay(cwd=None, apply: bool = False) -> dict:
+    """Archive active memories whose trust has decayed below the threshold.
+
+    The decay itself is not new — ``compute_confidence`` has always applied
+    provenance, contradiction and age. What was missing is a step that acts on
+    it: a store where nothing ever leaves ends up competing with itself, every
+    stale entry taking up the retrieval space of something current.
+
+    Archived, never deleted. A memory that decayed out of relevance is not a
+    memory that was wrong, and ``foldcrumbs restore`` brings it back whole.
+    ``prune --apply`` is still the way to remove files for good, and it is
+    still a separate, explicit act.
+
+    Explicit and scheduled, never a side effect of recall: reading must not
+    silently change what the store contains. Dry-run unless ``apply``.
+    """
+    candidates = {
+        _name(m): round(m.compute_confidence(), 2)
+        for m in store.iter_memories(cwd)
+        if m.status == "active" and m.compute_confidence() < STALE_CONF
+    }
+    archived: list[str] = []
+    if apply:
+        archived = [n for n in candidates
+                    if store.set_status(n, "archived", cwd)]
+    return {"candidates": candidates, "archived": archived, "applied": apply}
+
+
 def prune(cwd=None, apply: bool = False, include_stale: bool = False) -> dict:
     """Find (and with ``apply``, delete) prune candidates.
 
@@ -102,8 +130,8 @@ def prune(cwd=None, apply: bool = False, include_stale: bool = False) -> dict:
     candidates: dict[str, str] = {}
     for m in store.iter_memories(cwd):
         name = _name(m)
-        if m.status in ("deleted", "superseded"):
-            candidates[name] = "superseded/deleted"
+        if m.status in ("deleted", "superseded", "archived"):
+            candidates[name] = f"{m.status} (file kept until pruned)"
         elif m.status == "active" and (_is_hard_artifact(m.title) or _is_hard_artifact(m.content)):
             candidates[name] = "artifact"
         elif (include_stale and m.status == "active"

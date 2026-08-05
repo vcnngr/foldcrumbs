@@ -117,6 +117,33 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_decay(args: argparse.Namespace) -> int:
+    from foldcrumbs import audit
+    res = audit.decay(apply=args.apply)
+    if not res["candidates"]:
+        print("nothing has decayed below the trust threshold.")
+        return 0
+    for name, conf in sorted(res["candidates"].items()):
+        print(f"  {name}  (trust {conf})")
+    if res["applied"]:
+        print(f"archived {len(res['archived'])} memory(ies). "
+              "Files kept — `foldcrumbs restore <file>` brings one back.")
+    else:
+        print(f"{len(res['candidates'])} memory(ies) would be archived "
+              "(not deleted). Run `foldcrumbs decay --apply` to do it.")
+    return 0
+
+
+def _cmd_restore(args: argparse.Namespace) -> int:
+    from foldcrumbs import store
+    if store.set_status(args.name, "active"):
+        print(f"restored {args.name}.")
+        return 0
+    print(f"nothing to restore for {args.name} "
+          "(unknown file, or it is already active).")
+    return 1
+
+
 def _cmd_prune(args: argparse.Namespace) -> int:
     from foldcrumbs import audit
     res = audit.prune(apply=args.apply, include_stale=args.include_stale)
@@ -583,6 +610,16 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--include-stale", action="store_true",
                     help="also prune low-trust memories")
     pr.set_defaults(func=_cmd_prune)
+
+    dc = sub.add_parser("decay", help="archive memories whose trust has decayed "
+                                     "(dry-run by default)")
+    dc.add_argument("--apply", action="store_true",
+                    help="actually archive (default: dry-run)")
+    dc.set_defaults(func=_cmd_decay)
+
+    rs = sub.add_parser("restore", help="bring an archived memory back")
+    rs.add_argument("name", help="filename of the archived memory")
+    rs.set_defaults(func=_cmd_restore)
 
     ins = sub.add_parser("install", help="wire foldcrumbs into a coding agent")
     ins.add_argument("--agent", choices=["claude", "codex", "opencode"], default="claude")

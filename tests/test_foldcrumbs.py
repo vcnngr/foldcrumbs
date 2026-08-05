@@ -686,6 +686,133 @@ class TestFreshnessRanking(TmpStore):
                          "use stopped separating memories of the same age")
 
 
+class TestDecay(TmpStore):
+    """Decay that acts: a store where nothing ever leaves competes with itself."""
+
+    def _stale(self, title, body):
+        # An old, weakly-sourced preference: the age penalty and the
+        # provenance weight are both already in compute_confidence, and both
+        # survive a round trip through the file. The pass reads that number —
+        # it does not invent a decay of its own.
+        from datetime import datetime, timedelta, timezone
+        rec = MemoryRecord(title=title, content=body, type="preference",
+                           confidence=0.3, provenance="inferred")
+        rec.created_at = datetime.now(timezone.utc) - timedelta(days=120)
+        store.write_memory(rec)
+        self.assertLess(store.get(rec.filename()).compute_confidence(),
+                        0.3, "the fixture is no longer stale on reload")
+        return rec
+
+    def test_a_dry_run_names_candidates_without_touching_them(self):
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        res = audit.decay()
+        self.assertIn(stale.filename(), res["candidates"])
+        self.assertEqual(res["archived"], [])
+        self.assertEqual(store.get(stale.filename()).status, "active",
+                         "a dry run changed the store")
+
+    def test_applying_archives_without_deleting(self):
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        body = (Path(self.dir) / stale.filename()).read_text()
+        res = audit.decay(apply=True)
+        self.assertEqual(res["archived"], [stale.filename()])
+        self.assertTrue((Path(self.dir) / stale.filename()).is_file(),
+                        "archiving deleted the file")
+        self.assertIn("Nobody follows this any more.",
+                      (Path(self.dir) / stale.filename()).read_text(),
+                      "archiving lost the memory's content")
+        self.assertNotEqual(body, (Path(self.dir) / stale.filename()).read_text())
+        self.assertEqual(store.get(stale.filename()).status, "archived")
+
+    def test_an_archived_memory_leaves_recall_and_the_index(self):
+        from foldcrumbs import audit
+        stale = self._stale("Deployment ritual", "Nobody follows this any more.")
+        self.assertTrue(store.search("deployment ritual", federated=False))
+        audit.decay(apply=True)
+        self.assertEqual(store.search("deployment ritual", federated=False), [],
+                         "an archived memory was still recalled")
+        self.assertNotIn(stale.filename(), store.rebuild_index().read_text(),
+                         "an archived memory was still indexed")
+
+    def test_restoring_brings_it_back_whole(self):
+        # Decaying out of relevance is not the same as having been wrong, and
+        # only the second deserves to be unrecoverable.
+        from foldcrumbs import audit
+        stale = self._stale("Deployment ritual", "Nobody follows this any more.")
+        audit.decay(apply=True)
+        self.assertTrue(store.set_status(stale.filename(), "active"))
+        back = store.get(stale.filename())
+        self.assertEqual(back.status, "active")
+        self.assertEqual(back.content, "Nobody follows this any more.")
+        self.assertTrue(store.search("deployment ritual", federated=False),
+                        "a restored memory was not recalled again")
+
+    def test_restore_does_not_revive_what_was_superseded_or_deleted(self):
+        # Those did not decay out of relevance: something replaced them, or
+        # someone removed them. Reviving them here would undo a decision this
+        # call knows nothing about.
+        old = MemoryRecord(title="Deadline", content="Ship on Friday.",
+                           type="fact")
+        new = MemoryRecord(title="Deadline moved", content="Ship on Monday.",
+                           type="fact")
+        store.write_memory(old)
+        store.write_memory(new)
+        self.assertTrue(store.supersede(old.filename(), new.filename()))
+        self.assertFalse(store.set_status(old.filename(), "active"),
+                         "a superseded memory was brought back")
+        self.assertEqual(store.get(old.filename()).status, "superseded")
+
+        gone = MemoryRecord(title="Retired", content="Not wanted any more.",
+                            type="fact")
+        store.write_memory(gone)
+        self.assertEqual(store.forget(gone.filename()), "deleted")
+        self.assertFalse(store.set_status(gone.filename(), "active"),
+                         "a deleted memory was brought back")
+        self.assertEqual(store.get(gone.filename()).status, "deleted")
+
+    def test_archiving_only_takes_active_memories(self):
+        # The other direction of the same rule.
+        old = MemoryRecord(title="Deadline", content="Ship on Friday.",
+                           type="fact")
+        new = MemoryRecord(title="Deadline moved", content="Ship on Monday.",
+                           type="fact")
+        store.write_memory(old)
+        store.write_memory(new)
+        self.assertTrue(store.supersede(old.filename(), new.filename()))
+        self.assertFalse(store.set_status(old.filename(), "archived"),
+                         "a superseded memory was archived over")
+        self.assertEqual(store.get(old.filename()).status, "superseded")
+
+    def test_a_trusted_memory_is_never_archived(self):
+        from foldcrumbs import audit
+        keep = MemoryRecord(title="Live rule", content="Still true today.",
+                            type="instruction", confidence=0.9)
+        store.write_memory(keep)
+        self._stale("Old rule", "Nobody follows this any more.")
+        res = audit.decay(apply=True)
+        self.assertNotIn(keep.filename(), res["candidates"])
+        self.assertEqual(store.get(keep.filename()).status, "active")
+
+    def test_archiving_takes_the_recall_history_with_it(self):
+        from foldcrumbs import audit, recalls
+        stale = self._stale("Deployment ritual", "Nobody follows this any more.")
+        store.search("deployment ritual", federated=False)
+        self.assertIn(stale.id, recalls.counts())
+        audit.decay(apply=True)
+        self.assertNotIn(stale.id, recalls.counts(),
+                         "an archived memory kept weighting the ranking")
+
+    def test_recall_never_archives_anything(self):
+        # Reading must not silently change what the store contains.
+        stale = self._stale("Deployment ritual", "Nobody follows this any more.")
+        for _ in range(5):
+            store.search("deployment ritual", federated=False)
+        self.assertEqual(store.get(stale.filename()).status, "active",
+                         "recall archived a memory behind the caller's back")
+
+
 class TestDistill(unittest.TestCase):
     def test_parser_tolerates_fences(self):
         text = '```json\n[{"type":"decision","title":"x","content":"c","confidence":0.9}]\n```'

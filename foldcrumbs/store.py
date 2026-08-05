@@ -715,6 +715,48 @@ def forget(
     return action
 
 
+def set_status(
+    name: str, status: str, cwd: str | os.PathLike[str] | None = None
+) -> bool:
+    """Move a memory between ``active`` and ``archived``. Rebuilds the index.
+
+    Archiving is not deleting. The file keeps every word it had — this only
+    stops it competing for attention: it leaves the index, recall, and this
+    project's published shard, so other instances stop being shown it too. The
+    memory can be brought back with the same call, which is the point:
+    something that decayed out of relevance is not the same as something that
+    was wrong, and only the second deserves to be unrecoverable.
+    """
+    if status not in ("active", "archived"):
+        raise ValueError(f"not a status this moves between: {status}")
+    rec = get(name, cwd)
+    if rec is None:
+        return False
+    target = _resolve_in_store(name, cwd)
+    if target is None:
+        return False
+    _refuse_if_foreign(rec, "archive")
+    # Only between these two, and only in the direction asked for. Restoring
+    # is the inverse of archiving, not a general revival: a memory that was
+    # superseded or deleted did not decay out of relevance — something
+    # replaced it, or someone removed it — and bringing those back here would
+    # undo a decision this call knows nothing about. Undoing *those* is what
+    # supersede and forget are for.
+    allowed = "archived" if status == "active" else "active"
+    if rec.status != allowed:
+        return False
+    rec.status = status
+    rec.updated_at = datetime.now(timezone.utc)
+    _write_text(target, rec.to_markdown())
+    if status != "active":
+        # Its recall history goes with it: while archived it answers nothing,
+        # and the count would otherwise sit there weighting a memory that is
+        # not in the running. Coming back, it starts earning again.
+        recalls.forget(rec.id, cwd)
+    rebuild_index(cwd)
+    return True
+
+
 def supersede(
     old_name: str, new_name: str, cwd: str | os.PathLike[str] | None = None
 ) -> bool:
