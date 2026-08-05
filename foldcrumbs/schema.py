@@ -197,6 +197,11 @@ class MemoryRecord:
     # each time — recorded here so those callers can tell rather than guess.
     id_missing: bool = field(default=False, compare=False)
 
+    # Same for the timestamps: both default to "now" when the file does not
+    # carry them, so a caller reasoning about age cannot tell a memory touched
+    # a moment ago from one whose date was simply never written down.
+    updated_at_missing: bool = field(default=False, compare=False)
+
     @property
     def is_foreign(self) -> bool:
         return self.origin_root is not None
@@ -321,6 +326,7 @@ class MemoryRecord:
         # Anything needing a stable order (the federated index, fed by several
         # machines) has to substitute something deterministic instead.
         rec.created_at_missing = _parse_dt_opt(meta.get("created_at")) is None
+        rec.updated_at_missing = _parse_dt_opt(meta.get("updated_at")) is None
         return rec
 
 

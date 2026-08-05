@@ -145,6 +145,7 @@ class TestRecordFieldOrder(unittest.TestCase):
         self.assertEqual(rec.origin_root, "claude")
         self.assertIsNone(rec.contested_by)      # appended, so still default
         self.assertFalse(rec.id_missing)         # appended after it
+        self.assertFalse(rec.updated_at_missing)  # and after that
 
     def test_claims_survive_a_round_trip(self):
         rec = MemoryRecord(title="T", content="body",
@@ -815,23 +816,42 @@ class TestDecay(TmpStore):
         self.assertNotIn(stale.filename(), audit.decay()["candidates"],
                          "a re-validated memory was archived anyway")
 
-    def test_a_memory_with_no_usable_date_keeps_its_place(self):
-        # An unknown date is not evidence of age, and this step removes it
+    def _undated(self, name, front):
+        path = Path(self.dir) / name
+        path.write_text(
+            "---\nname: Undated\ndescription: hook\ntype: preference\n"
+            f"confidence: 0.3\nprovenance: inferred\n{front}---\n\n"
+            "Written before dates were serialized.\n", encoding="utf-8")
+        return [m for m in store.load_all() if m.title == "Undated"][0]
+
+    def test_a_memory_with_no_date_at_all_keeps_its_place(self):
+        # An unknown date is not evidence of age, and archiving removes it
         # from recall — the one place it could earn its way back.
         from foldcrumbs import audit
-        undated = Path(self.dir) / "preference_undated.md"
-        # Partial front matter: a recorded updated_at, no created_at. Without
-        # the guard the old timestamp alone would age it out.
-        undated.write_text(
-            "---\nname: Undated\ndescription: hook\ntype: preference\n"
-            "confidence: 0.3\nprovenance: inferred\n"
-            "updated_at: 2020-01-01T00:00:00+00:00\n---\n\n"
-            "Written before dates were serialized.\n", encoding="utf-8")
-        rec = [m for m in store.load_all() if m.title == "Undated"][0]
-        self.assertTrue(rec.created_at_missing)
+        rec = self._undated("preference_undated.md", "")
+        self.assertTrue(rec.created_at_missing and rec.updated_at_missing)
         self.assertLess(rec.compute_confidence(), audit.STALE_CONF)
         self.assertEqual(audit.decay()["candidates"], {},
                          "a memory was archived on an age nobody knows")
+
+    def test_a_legacy_memory_with_only_a_creation_date_still_decays(self):
+        # Both timestamps default to "now" when absent, so reading the value
+        # rather than asking whether the file carries it made such a memory
+        # look untouched a second ago — and it would never decay at all.
+        from foldcrumbs import audit
+        rec = self._undated("preference_undated.md",
+                            "created_at: 2020-01-01T00:00:00+00:00\n")
+        self.assertTrue(rec.updated_at_missing)
+        self.assertFalse(rec.created_at_missing)
+        self.assertIn("preference_undated.md", audit.decay()["candidates"],
+                      "a memory dated only by its creation never decayed")
+
+    def test_a_memory_dated_only_by_an_update_decays_on_that(self):
+        from foldcrumbs import audit
+        rec = self._undated("preference_undated.md",
+                            "updated_at: 2020-01-01T00:00:00+00:00\n")
+        self.assertTrue(rec.created_at_missing)
+        self.assertIn("preference_undated.md", audit.decay()["candidates"])
 
     def test_a_trusted_memory_is_never_archived(self):
         from foldcrumbs import audit
