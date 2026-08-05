@@ -965,6 +965,31 @@ class TestDecay(TmpStore):
         self.assertNotIn(stale.filename(),
                          index.read_text(), "healing left it advertised")
 
+    def test_doctor_does_not_call_a_store_with_retired_links_healthy(self):
+        # The audit learned to see them; the report a person actually reads
+        # did not, so the store looked fine while its index advertised
+        # memories that answer nothing.
+        import contextlib as _c
+        import io
+        from foldcrumbs import audit, cli
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        audit.decay(apply=True)
+        index = Path(self.dir) / "MEMORY.md"
+        index.write_text(
+            index.read_text() + f"\n- [Old rule]({stale.filename()}) — hook\n",
+            encoding="utf-8")
+        out = io.StringIO()
+        with _c.redirect_stdout(out):
+            cli._cmd_doctor(None)
+        printed = out.getvalue()
+        self.assertIn("retired", printed,
+                      "doctor never mentions retired links")
+        self.assertIn(stale.filename(), printed,
+                      "doctor reported a healthy store while the index was "
+                      "advertising an archived memory")
+        self.assertIn("foldcrumbs index", printed,
+                      "doctor found it but suggested nothing")
+
     def test_a_trusted_memory_is_never_archived(self):
         from foldcrumbs import audit
         keep = MemoryRecord(title="Live rule", content="Still true today.",

@@ -108,9 +108,11 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
     print(f"memories   : {a['active']} active / {a['total']} total")
     print(f"dead links : {len(a['dead_links'])}" + (f"  {a['dead_links']}" if a['dead_links'] else ""))
     print(f"orphans    : {len(a['orphans'])}" + (f"  {a['orphans']}" if a['orphans'] else ""))
+    print(f"retired    : {len(a['retired_links'])}"
+          + (f"  {a['retired_links']}" if a['retired_links'] else ""))
     print(f"pollution  : {len(a['pollution'])}" + (f"  {a['pollution']}" if a['pollution'] else ""))
     print(f"low-trust  : {len(a['stale'])}" + (f"  {a['stale']}" if a['stale'] else ""))
-    if a["dead_links"] or a["orphans"]:
+    if a["dead_links"] or a["orphans"] or a["retired_links"]:
         print("hint: run `foldcrumbs index` to rebuild, or `foldcrumbs doctor` after a distill.")
     if a["pollution"]:
         print("hint: run `foldcrumbs prune` (dry-run) then `foldcrumbs prune --apply`.")
