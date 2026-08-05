@@ -4707,6 +4707,43 @@ class TestProfiles(_FederationEnv):
         self.assertEqual(listed[ref.label]["kind"], self.profiles.SHARED,
                          "a config root was not described as a shared profile")
 
+    def test_a_name_two_roots_answer_to_is_refused_not_guessed(self):
+        # Labels have never been unique — two config dirs called .claude under
+        # different homes are both plausible. Guessing points a process at
+        # another agent's store, or unregisters one nobody meant to touch.
+        first = self.profiles.add("councillor")
+        twin = self._home / "twin-home" / "councillor"
+        twin.mkdir(parents=True, exist_ok=True)
+        self.federation.register(twin, mode="explicit", label="councillor")
+        self.assertEqual(
+            len([p for p in self.profiles.listing()
+                 if p["name"] == "councillor"]), 2)
+        with self.assertRaises(self.profiles.AmbiguousProfile):
+            self.profiles.env_line("councillor")
+        with self.assertRaises(self.profiles.AmbiguousProfile):
+            self.profiles.remove("councillor")
+        self.assertTrue((first.path).is_dir(),
+                        "an ambiguous name unregistered something anyway")
+
+    def test_a_name_already_taken_is_refused(self):
+        self.profiles.add("councillor")
+        with self.assertRaises(ValueError):
+            self.profiles.add("councillor")
+
+    def test_the_env_line_survives_an_awkward_path(self):
+        # A memory directory can hold a space, a quote, a dollar sign. A line
+        # meant to be pasted or eval'd would otherwise set the wrong variable
+        # — or run whatever the path spells.
+        import shlex
+        awkward = self._home / 'od d "$(echo pwned)"'
+        awkward.mkdir(parents=True, exist_ok=True)
+        self.profiles.add("tricky", path=awkward)
+        line = self.profiles.env_line("tricky")
+        var, _, value = line[len("export "):].partition("=")
+        self.assertEqual(shlex.split(f"{var}={value}"),
+                         [f"{var}={awkward}"],
+                         f"a shell would not read this back whole: {line}")
+
     def test_removing_a_profile_leaves_its_memories_alone(self):
         ref = self.profiles.add("councillor")
         (ref.path / "fact_kept.md").write_text(

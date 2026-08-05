@@ -125,7 +125,8 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     if action == "add":
         try:
             ref = profiles.add(args.name, args.kind, args.path)
-        except (ValueError, federation.FederationConflict) as exc:
+        except (ValueError, federation.FederationConflict,
+                profiles.AmbiguousProfile) as exc:
             print(f"refused: {exc}")
             return 1
         if ref is None:
@@ -139,7 +140,11 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         return 0
 
     if action == "env":
-        line = profiles.env_line(args.name)
+        try:
+            line = profiles.env_line(args.name)
+        except profiles.AmbiguousProfile as exc:
+            print(f"refused: {exc}")
+            return 1
         if line is None:
             print(f"no profile named {args.name!r}")
             return 1
@@ -147,7 +152,12 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         return 0
 
     if action == "remove":
-        if not profiles.remove(args.name):
+        try:
+            gone = profiles.remove(args.name)
+        except profiles.AmbiguousProfile as exc:
+            print(f"refused: {exc}")
+            return 1
+        if not gone:
             print(f"no profile named {args.name!r}")
             return 1
         print(f"removed profile {args.name} — its memories are untouched")

@@ -29,6 +29,7 @@ line that does work, to put in a service file, a shell profile, or an eval.
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 
 from . import config, federation
@@ -51,6 +52,31 @@ def default_path(name: str) -> Path:
     return config.STATE_DIR / "profiles" / name
 
 
+class AmbiguousProfile(LookupError):
+    """More than one root answers to that name.
+
+    Names are labels, and nothing has ever made a label unique — two config
+    directories called ``.claude`` under different homes are both plausible.
+    So a command that acts on a name refuses rather than picking one: the
+    wrong guess here points a process at another agent's store, or unregisters
+    an agent that was never meant to be touched.
+    """
+
+
+def _matching(name: str) -> list:
+    return [r for r in federation.iter_roots() if r.label == name]
+
+
+def _only(name: str):
+    """The single root by that name, or None. Raises if several answer."""
+    found = _matching(name)
+    if len(found) > 1:
+        raise AmbiguousProfile(
+            f"{len(found)} profiles are called {name!r}: "
+            + ", ".join(f"{r.id} → {r.path}" for r in found))
+    return found[0] if found else None
+
+
 def add(name: str, kind: str = DEDICATED, path: str | os.PathLike[str] | None = None):
     """Register a profile. Returns its root, or None if it could not be made.
 
@@ -62,6 +88,10 @@ def add(name: str, kind: str = DEDICATED, path: str | os.PathLike[str] | None = 
         raise ValueError(f"not a profile shape: {kind}")
     if not name or "/" in name or os.sep in name or name.startswith("."):
         raise ValueError(f"not usable as a profile name: {name!r}")
+    if _matching(name):
+        raise ValueError(
+            f"a profile called {name!r} is already registered — remove it "
+            "first, or choose another name")
     if path is None:
         if kind == SHARED:
             raise ValueError(
@@ -102,13 +132,14 @@ def env_line(name: str) -> str | None:
     because the shapes differ: a dedicated profile pins one directory, a
     shared one selects an instance whose memory is still per project.
     """
-    for ref in federation.iter_roots():
-        if ref.label != name:
-            continue
-        if ref.mode == "explicit":
-            return f'export FOLDCRUMBS_DIR="{ref.path}"'
-        return f'export CLAUDE_CONFIG_DIR="{ref.path}"'
-    return None
+    ref = _only(name)
+    if ref is None:
+        return None
+    # Quoted for a shell, because it is going into one. A memory directory can
+    # hold a space, a quote, a dollar sign — and a line meant to be pasted or
+    # eval'd would then set the wrong variable, or run whatever the path spells.
+    var = "FOLDCRUMBS_DIR" if ref.mode == "explicit" else "CLAUDE_CONFIG_DIR"
+    return f"export {var}={shlex.quote(str(ref.path))}"
 
 
 def remove(name: str) -> bool:
@@ -117,7 +148,5 @@ def remove(name: str) -> bool:
     Removing a profile takes it out of the shared view; it is not a way to
     delete an agent's memory, and nothing here touches the store.
     """
-    for ref in federation.iter_roots():
-        if ref.label == name:
-            return federation.unregister(ref.id)
-    return False
+    ref = _only(name)
+    return federation.unregister(ref.id) if ref is not None else False
