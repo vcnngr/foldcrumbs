@@ -716,7 +716,8 @@ def forget(
 
 
 def set_status(
-    name: str, status: str, cwd: str | os.PathLike[str] | None = None
+    name: str, status: str, cwd: str | os.PathLike[str] | None = None,
+    rebuild: bool = True,
 ) -> bool:
     """Move a memory between ``active`` and ``archived``. Rebuilds the index.
 
@@ -753,7 +754,11 @@ def set_status(
         # and the count would otherwise sit there weighting a memory that is
         # not in the running. Coming back, it starts earning again.
         recalls.forget(rec.id, cwd)
-    rebuild_index(cwd)
+    # ``rebuild`` lets a caller moving several memories at once pay for the
+    # index once instead of once per memory — a sweep over a large store would
+    # otherwise rewrite it as many times as it archived.
+    if rebuild:
+        rebuild_index(cwd)
     return True
 
 

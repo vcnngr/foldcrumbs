@@ -128,14 +128,13 @@ def _has_decayed(m) -> bool:
         dates.append(m.updated_at)
     if not getattr(m, "created_at_missing", False) and m.created_at is not None:
         dates.append(m.created_at)
+    # Every date here has a zone: the parser reads a naive timestamp as UTC
+    # precisely so comparisons cannot raise. Re-normalising would be dead
+    # code, and a guard that never fires is a guard nobody maintains — the
+    # test holds the parser to it instead.
     if not dates:
         return False
-    touched = max(dates)
-    try:
-        age = (datetime.now(timezone.utc) - touched).days
-    except TypeError:
-        return False
-    return age >= DECAY_GRACE_DAYS
+    return (datetime.now(timezone.utc) - max(dates)).days >= DECAY_GRACE_DAYS
 
 
 def decay(cwd=None, apply: bool = False) -> dict:
@@ -162,7 +161,9 @@ def decay(cwd=None, apply: bool = False) -> dict:
     archived: list[str] = []
     if apply:
         archived = [n for n in candidates
-                    if store.set_status(n, "archived", cwd)]
+                    if store.set_status(n, "archived", cwd, rebuild=False)]
+        if archived:
+            store.rebuild_index(cwd)
     return {"candidates": candidates, "archived": archived, "applied": apply}
 
 

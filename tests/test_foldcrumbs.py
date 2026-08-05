@@ -869,6 +869,50 @@ class TestDecay(TmpStore):
                          "a memory written today was archived on an old "
                          "updated_at")
 
+    def test_a_timestamp_without_a_zone_does_not_stop_the_pass(self):
+        # A hand-edited file can carry a timestamp with no offset. Comparing
+        # those against aware ones makes max() raise, which would take down
+        # the whole sweep over one file instead of skipping it.
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        naive = Path(self.dir) / "preference_hand_edited.md"
+        naive.write_text(
+            "---\nname: Hand edited\ndescription: hook\ntype: preference\n"
+            "confidence: 0.3\nprovenance: inferred\n"
+            "created_at: 2020-01-01T00:00:00\n"
+            "updated_at: 2020-01-02T00:00:00+00:00\n---\n\n"
+            "Someone typed these dates by hand.\n", encoding="utf-8")
+        rec = [m for m in store.load_all() if m.title == "Hand edited"][0]
+        self.assertIsNotNone(rec.created_at.tzinfo,
+                             "the parser stopped attaching a zone")
+        res = audit.decay()          # must not raise
+        self.assertIn(stale.filename(), res["candidates"],
+                      "one hand-edited file stopped the whole pass")
+        self.assertIn("preference_hand_edited.md", res["candidates"],
+                      "a naive timestamp was not read as UTC")
+
+    def test_a_sweep_rebuilds_the_index_once(self):
+        # Rebuilding per memory means a large store rewrites its index as many
+        # times as it archives.
+        from foldcrumbs import audit
+        for i in range(5):
+            self._stale(f"Old rule {i}", "Nobody follows this any more.")
+        builds, real = [], store.rebuild_index
+
+        def counting(cwd=None):
+            builds.append(1)
+            return real(cwd)
+
+        store.rebuild_index = counting
+        try:
+            res = audit.decay(apply=True)
+        finally:
+            store.rebuild_index = real
+        self.assertEqual(len(res["archived"]), 5)
+        self.assertEqual(len(builds), 1,
+                         f"the index was rebuilt {len(builds)} times for "
+                         f"{len(res['archived'])} memories")
+
     def test_a_trusted_memory_is_never_archived(self):
         from foldcrumbs import audit
         keep = MemoryRecord(title="Live rule", content="Still true today.",
