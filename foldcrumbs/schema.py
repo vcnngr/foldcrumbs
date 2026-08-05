@@ -191,6 +191,17 @@ class MemoryRecord:
     # this is only how it reaches the reader of theirs.
     contested_by: str | None = field(default=None, compare=False)
 
+    # Whether this record's id was minted just now instead of read from the
+    # file. A memory written before ids were serialized gets a fresh uuid on
+    # every load, so anything keyed on the id would key on a different value
+    # each time — recorded here so those callers can tell rather than guess.
+    id_missing: bool = field(default=False, compare=False)
+
+    # Same for the timestamps: both default to "now" when the file does not
+    # carry them, so a caller reasoning about age cannot tell a memory touched
+    # a moment ago from one whose date was simply never written down.
+    updated_at_missing: bool = field(default=False, compare=False)
+
     @property
     def is_foreign(self) -> bool:
         return self.origin_root is not None
@@ -285,12 +296,14 @@ class MemoryRecord:
         meta, body = _split_frontmatter(text)
         tags_raw = meta.get("tags", "")
         tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+        stored_id = meta.get("id", "").strip()
         rec = cls(
             title=meta.get("name", "").strip() or "Untitled",
             content=body.strip(),
             type=meta.get("type", "fact").strip(),
             description=meta.get("description", "").strip(),
-            id=meta.get("id", "").strip() or str(uuid.uuid4()),
+            id=stored_id or str(uuid.uuid4()),
+            id_missing=not stored_id,
             confidence=_safe_float(meta.get("confidence"), 0.8),
             provenance=meta.get("provenance", "imported").strip() or "imported",
             status=meta.get("status", "active").strip() or "active",
@@ -313,6 +326,7 @@ class MemoryRecord:
         # Anything needing a stable order (the federated index, fed by several
         # machines) has to substitute something deterministic instead.
         rec.created_at_missing = _parse_dt_opt(meta.get("created_at")) is None
+        rec.updated_at_missing = _parse_dt_opt(meta.get("updated_at")) is None
         return rec
 
 

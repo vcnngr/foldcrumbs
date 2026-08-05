@@ -144,6 +144,8 @@ class TestRecordFieldOrder(unittest.TestCase):
         self.assertEqual(rec.supersedes_external, ["0123456789abcdef:x.md"])
         self.assertEqual(rec.origin_root, "claude")
         self.assertIsNone(rec.contested_by)      # appended, so still default
+        self.assertFalse(rec.id_missing)         # appended after it
+        self.assertFalse(rec.updated_at_missing)  # and after that
 
     def test_claims_survive_a_round_trip(self):
         rec = MemoryRecord(title="T", content="body",
@@ -190,6 +192,830 @@ class TestStore(TmpStore):
         b = MemoryRecord(title="", content="two", type="fact")
         self.assertEqual(a.title, "Untitled")
         self.assertNotEqual(a.filename(), b.filename())
+
+
+class TestRecallReinforcement(TmpStore):
+    """A memory that keeps being needed should separate itself from its peers."""
+
+    def _put(self, title, body):
+        rec = MemoryRecord(title=title, content=body, type="fact")
+        store.write_memory(rec)
+        return rec
+
+    def test_a_recall_records_what_it_returned(self):
+        from foldcrumbs import recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        self.assertEqual(recalls.counts(), {})
+        hits = store.search("lockfile", federated=False)
+        self.assertEqual([m.title for m in hits], ["Lockfile"])
+        self.assertEqual(recalls.counts().get(rec.id), 1)
+        store.search("lockfile", federated=False)
+        self.assertEqual(recalls.counts().get(rec.id), 2)
+
+    def test_only_what_was_returned_is_reinforced(self):
+        # Counting candidates instead of results would reinforce the whole
+        # store on every search, which is the same as reinforcing nothing.
+        from foldcrumbs import recalls
+        wanted = self._put("Lockfile", "The lockfile is committed.")
+        other = self._put("Timezone", "All timestamps are UTC.")
+        store.search("lockfile", federated=False)
+        counted = recalls.counts()
+        self.assertEqual(counted.get(wanted.id), 1)
+        self.assertIsNone(counted.get(other.id),
+                          "a memory nobody asked for was reinforced")
+
+    def test_use_separates_equals_without_outranking_relevance(self):
+        from foldcrumbs import recalls
+        # Two memories the query matches equally well.
+        used = self._put("Deploy notes A", "Deploy runs on Tuesday.")
+        unused = self._put("Deploy notes B", "Deploy runs on Tuesday.")
+        recalls.reinforce([used.id] * 10)
+        hits = store.search("deploy runs", federated=False)
+        self.assertEqual([m.filename() for m in hits],
+                         [used.filename(), unused.filename()],
+                         "the well-used memory did not come first")
+        # And a strong match still beats a heavily-used weak one.
+        exact = self._put("Rollback", "Rollback is one command: make undo.")
+        recalls.reinforce([used.id] * 50)
+        hits = store.search("rollback is one command", federated=False)
+        self.assertEqual(hits[0].filename(), exact.filename(),
+                         "use outranked a better match")
+
+    def test_a_better_match_always_wins_however_used_the_other_is(self):
+        # Folding the bonus into the score let a near match times its bonus
+        # overtake an exact one — 0.9613 x 1.1 beats 1.0 — so a memory could
+        # be outranked by a worse answer that simply got asked for more.
+        from foldcrumbs import recalls
+        # 1.0000 against 0.9655 — close enough that a 10% bonus overtook it,
+        # far enough that one genuinely answers the question better.
+        exact = self._put("Deploy exact", "deploy runs tuesday at nine")
+        near = self._put("Deploy near", "deploy always runs on a tuesday morning")
+        recalls.reinforce([near.id] * 100)
+        hits = store.search("deploy runs tuesday", federated=False)
+        self.assertEqual(len(hits), 2, "the fixture stopped matching both")
+        self.assertEqual(hits[0].filename(), exact.filename(),
+                         "a heavily-used near match outranked the exact one")
+
+    def test_an_arbitrary_tiebreak_does_not_compound(self):
+        # Equally-relevant memories are cut by the limit on filename order.
+        # Reinforcing only the winner turned that coin flip into a permanent
+        # lead — exposure compounding into rank, reflecting nothing but having
+        # sorted first.
+        from foldcrumbs import recalls
+        a = self._put("Deploy A", "Deploy runs on Tuesday.")
+        b = self._put("Deploy B", "Deploy runs on Tuesday.")
+        for _ in range(5):
+            store.search("deploy runs on tuesday", limit=1, federated=False)
+        counted = recalls.counts()
+        self.assertEqual(counted.get(a.filename()), counted.get(b.filename()),
+                         f"the tiebreak compounded: {counted}")
+
+    def test_a_memory_that_leaves_any_way_loses_its_count(self):
+        # forget is not the only exit: supersede, the contradiction pass and
+        # prune all retire a memory. Cleaning up at each call site is a rule
+        # to remember four times and forget the fifth.
+        from foldcrumbs import recalls
+        old = self._put("Deadline", "Ship on Friday.")
+        store.search("deadline ship", federated=False)
+        self.assertIn(old.id, recalls.counts())
+        new = self._put("Deadline moved", "Ship on Monday instead.")
+        self.assertTrue(store.supersede(old.filename(), new.filename()))
+        store.search("deadline ship", federated=False)
+        self.assertNotIn(old.id, recalls.counts(),
+                         "a superseded memory kept its count")
+
+    def test_a_store_that_could_not_be_read_keeps_its_counts(self):
+        # A caller that cannot vouch for its listing passes None. An unreadable
+        # directory yields the same empty list as an empty store, and treating
+        # the two alike would erase every count ever earned.
+        from foldcrumbs import recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        store.search("lockfile", federated=False)
+        self.assertIn(rec.id, recalls.counts())
+        recalls.reinforce([], cwd=None, known=None)
+        self.assertIn(rec.id, recalls.counts(),
+                      "an unvouched listing erased the counts")
+
+    def test_a_file_that_will_not_open_does_not_cost_the_others_their_counts(self):
+        # End-to-end, through search() itself. The directory exists, so a
+        # guard that only checked is_dir() called the listing complete — while
+        # the memory that would not open was missing from it, and every count
+        # belonging to a memory unreadable at that instant was erased.
+        from foldcrumbs import recalls
+        kept = self._put("Lockfile", "The lockfile is committed.")
+        other = self._put("Timezone", "All timestamps are UTC.")
+        store.search("lockfile", federated=False)
+        store.search("timestamps utc", federated=False)
+        before = recalls.counts()
+        self.assertEqual(sorted(before), sorted([kept.id, other.id]))
+
+        unreadable = Path(self.dir) / kept.filename()
+        real_read = Path.read_text
+
+        def refuses(self_path, *args, **kw):
+            if Path(self_path) == unreadable:
+                raise OSError(errno.EACCES, "permission denied")
+            return real_read(self_path, *args, **kw)
+
+        Path.read_text = refuses
+        try:
+            hits = store.search("timestamps utc", federated=False)
+        finally:
+            Path.read_text = real_read
+        self.assertEqual([m.title for m in hits], ["Timezone"],
+                         "the readable memory stopped being found")
+        self.assertIn(kept.id, recalls.counts(),
+                      "a momentarily unreadable memory lost its count")
+
+    def test_the_scan_streams_rather_than_building_a_list(self):
+        # The federated scan runs this on a thread it stops waiting for and
+        # keeps whatever arrived before the deadline. Reading the whole
+        # directory before yielding anything turns every timeout into an empty
+        # result — a slow store stops contributing instead of contributing
+        # less.
+        for i in range(6):
+            self._put(f"Memory {i}", f"Body {i}.")
+        seen = []
+        for rec in store.iter_memories_in(Path(self.dir)):
+            seen.append(rec.title)
+            if len(seen) == 2:
+                break          # what a deadline does
+        self.assertEqual(len(seen), 2,
+                         "the scan read past the point the caller stopped")
+
+    def test_an_abandoned_scan_never_calls_itself_complete(self):
+        # Completeness starts False and is earned by reaching the end, so a
+        # reader that gave up cannot mistake its partial view for the store.
+        for i in range(4):
+            self._put(f"Memory {i}", f"Body {i}.")
+        report: dict = {}
+        gen = store.iter_memories_in(Path(self.dir), report=report)
+        next(gen)
+        self.assertFalse(report.get("complete"),
+                         "a scan called itself complete before finishing")
+        gen.close()
+        self.assertFalse(report.get("complete"),
+                         "an abandoned scan reported completeness")
+        _, complete = store.scan_store(Path(self.dir))
+        self.assertTrue(complete, "a scan read to the end was not complete")
+
+    def test_a_truncated_scan_is_not_complete(self):
+        for i in range(5):
+            self._put(f"Memory {i}", f"Body {i}.")
+        records, complete = store.scan_store(Path(self.dir), max_files=2)
+        self.assertEqual(len(records), 2)
+        self.assertFalse(complete, "a capped scan claimed to be the whole store")
+
+    def test_a_file_that_parses_to_nothing_does_not_make_a_scan_incomplete(self):
+        # Only *unreadable* means incomplete. A file that opened has been
+        # accounted for, however little it turned out to hold — and calling
+        # that incomplete would stop the store from ever reconciling counts,
+        # since from_markdown is tolerant enough that such files are common.
+        self._put("Lockfile", "The lockfile is committed.")
+        (Path(self.dir) / "not_a_memory.md").write_text(
+            "just some prose someone dropped here", encoding="utf-8")
+        records, complete = store.scan_store(Path(self.dir))
+        self.assertIn("Lockfile", [m.title for m in records])
+        self.assertTrue(complete, "a readable file was counted as unreadable")
+
+    def test_a_file_that_is_not_text_does_not_blind_the_store(self):
+        # UnicodeDecodeError is a ValueError, not an OSError. Splitting the
+        # read from the parse let it escape the handler and abort the scan, so
+        # a single junk file anywhere in the memory directory stopped recall
+        # from finding anything at all.
+        kept = self._put("Lockfile", "The lockfile is committed.")
+        (Path(self.dir) / "binary.md").write_bytes(b"\xff\xfe\x00garbage\x80")
+        records, complete = store.scan_store(Path(self.dir))
+        self.assertIn(kept.title, [m.title for m in records],
+                      "one undecodable file hid the whole store")
+        self.assertTrue(complete,
+                        "a file that was read counted as unreadable, which "
+                        "switches reconciliation off for good")
+        hits = store.search("lockfile committed", federated=False)
+        self.assertEqual([m.title for m in hits], ["Lockfile"])
+
+    def test_a_different_memory_on_the_same_file_starts_from_nothing(self):
+        # Filenames are type + title, so a different memory can land on the
+        # same file: "Deadline: ship Friday" becoming "Deadline: ship Monday"
+        # scores below the dedup threshold and simply overwrites it. Keyed by
+        # filename the new memory inherited a rank it never earned; keyed by
+        # id it cannot, and the stale entry leaves at the next reconciliation.
+        from foldcrumbs import recalls
+        first = self._put("Deadline", "Ship on Friday.")
+        for _ in range(7):
+            store.search("deadline ship friday", federated=False)
+        self.assertGreater(recalls.counts().get(first.id, 0), 1)
+        replacement = MemoryRecord(title="Deadline",
+                                   content="Ship on Monday instead, plans changed.",
+                                   type="fact")
+        self.assertEqual(replacement.filename(), first.filename(),
+                         "the fixture no longer collides on the filename")
+        store.write_memory(replacement)
+        store.search("deadline ship monday", federated=False)
+        counted = recalls.counts()
+        self.assertEqual(counted.get(replacement.id), 1,
+                         "the new memory inherited the old one's rank")
+        self.assertNotIn(first.id, counted,
+                         "the replaced memory's weight was left behind")
+
+    def test_rewriting_the_same_memory_keeps_its_count(self):
+        # The other half: touching a memory must not cost it its history.
+        from foldcrumbs import recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        for _ in range(3):
+            store.search("lockfile committed", federated=False)
+        before = recalls.counts().get(rec.id)
+        rec.content = "The lockfile is committed, always."
+        store.write_memory(rec)
+        self.assertEqual(recalls.counts().get(rec.id), before,
+                         "editing a memory reset its own history")
+
+    def test_a_read_only_consumer_writes_nothing(self):
+        # A machine sharing the store over Syncthing while another does the
+        # writing. Recall still works there; writing is what is switched off,
+        # and a count is no exception — otherwise every recall churns a synced
+        # file and invites conflicts.
+        from foldcrumbs import config as _config, recalls
+        self._put("Lockfile", "The lockfile is committed.")
+        marker = _config.STATE_DIR / "no-distill"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", encoding="utf-8")
+        try:
+            hits = store.search("lockfile committed", federated=False)
+        finally:
+            marker.unlink()
+        self.assertEqual([m.title for m in hits], ["Lockfile"],
+                         "recall stopped working on a read-only consumer")
+        self.assertFalse((Path(self.dir) / recalls.SIDECAR).exists(),
+                         "a read-only consumer wrote to the shared store")
+
+    def test_reinforcement_does_not_wait_on_a_held_lock(self):
+        # This runs on the read path. The default five-second wait is right
+        # for a registration and absurd for a count nobody needs: a contended
+        # sidecar would have held up every recall behind it.
+        from foldcrumbs import federation, recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        waits = []
+        real = federation.file_lock
+
+        def noting(path, allow_unsupported=False, wait=None):
+            if path.name == ".lock-recalls":
+                waits.append(wait)
+            return real(path, allow_unsupported=allow_unsupported, wait=wait)
+
+        federation.file_lock = noting
+        try:
+            store.search("lockfile committed", federated=False)
+        finally:
+            federation.file_lock = real
+        self.assertTrue(waits, "the sidecar was written without a lock")
+        self.assertLess(waits[0], 1.0,
+                        f"a recall would wait {waits[0]}s on a busy sidecar")
+        self.assertGreater(recalls.counts().get(rec.id, 0), 0)
+
+    def test_a_lost_lock_cannot_transfer_a_rank(self):
+        # Clearing the old count when a file is taken over was tried first,
+        # and it is a write that can fail: one lost lock silently handed the
+        # new memory the old one's rank. Keyed by id there is nothing to
+        # clear — the new record simply has no history, whatever the lock did.
+        from foldcrumbs import federation, recalls
+        first = self._put("Deadline", "Ship on Friday.")
+        for _ in range(7):
+            store.search("deadline ship friday", federated=False)
+        self.assertGreater(recalls.counts().get(first.id, 0), 1)
+
+        @contextlib.contextmanager
+        def never_granted(path, allow_unsupported=False, wait=None):
+            yield False           # every sidecar write fails from here on
+
+        real = federation.file_lock
+        federation.file_lock = never_granted
+        try:
+            replacement = MemoryRecord(
+                title="Deadline", content="Ship on Monday instead, plans changed.",
+                type="fact")
+            self.assertEqual(replacement.filename(), first.filename(),
+                             "the fixture no longer collides on the filename")
+            store.write_memory(replacement)
+        finally:
+            federation.file_lock = real
+        hits = store.search("deadline ship monday", federated=False)
+        self.assertEqual(hits[0].id, replacement.id)
+        self.assertEqual(recalls.counts().get(replacement.id), 1,
+                         "the replacement started with a rank it never earned")
+
+    def test_a_memory_written_before_ids_is_not_counted(self):
+        # Such a file gets a fresh uuid on every load, so a count would be
+        # filed under a key that never comes back: it could never accumulate,
+        # and each recall would add an entry and reconcile away the last —
+        # churning a file that may well be synced between machines.
+        from foldcrumbs import recalls
+        legacy = Path(self.dir) / "fact_legacy.md"
+        legacy.write_text(
+            "---\nname: Legacy\ndescription: hook\ntype: fact\n---\n\n"
+            "Written before ids were serialized.\n", encoding="utf-8")
+        first = [m for m in store.load_all() if m.title == "Legacy"][0]
+        second = [m for m in store.load_all() if m.title == "Legacy"][0]
+        self.assertTrue(first.id_missing)
+        self.assertNotEqual(first.id, second.id,
+                            "the fixture no longer models an id-less memory")
+        for _ in range(4):
+            hits = store.search("legacy written before", federated=False)
+            self.assertEqual([m.title for m in hits], ["Legacy"],
+                             "an id-less memory stopped being recalled")
+        self.assertEqual(recalls.counts(), {},
+                         "an id that changes on every read was counted anyway")
+
+    def test_an_empty_store_is_an_answer_and_clears_the_counts(self):
+        # The other half: when the store really has nothing active, no count
+        # belongs to anything. Refusing to act on an empty answer — or bailing
+        # out because this recall had nothing to add — left the weight behind.
+        from foldcrumbs import recalls
+        recalls.reinforce(["fact_ghost.md"] * 4)
+        self.assertEqual(recalls.counts(), {"fact_ghost.md": 4})
+        self.assertEqual(store.search("anything at all", federated=False), [])
+        self.assertEqual(recalls.counts(), {},
+                         "a weight survived a store with nothing in it")
+
+    def test_a_reused_filename_does_not_inherit_the_old_weight(self):
+        # Filenames are type + slug, so a new memory with the same title lands
+        # on the same file. Inheriting the retired memory's count would hand a
+        # brand-new memory a rank it never earned.
+        from foldcrumbs import recalls
+        first = self._put("Deadline", "Ship on Friday.")
+        for _ in range(6):
+            store.search("deadline ship friday", federated=False)
+        self.assertGreater(recalls.counts().get(first.id, 0), 1)
+        replacement = self._put("Deadline moved", "Ship on Monday instead.")
+        self.assertTrue(store.supersede(first.filename(),
+                                        replacement.filename()))
+        # Same title, so the same file — retired and rewritten with no recall
+        # in between, which is exactly when a leftover weight is inherited.
+        again = self._put("Deadline", "Ship on Wednesday now.")
+        self.assertEqual(again.filename(), first.filename(),
+                         "the fixture no longer reuses the filename")
+        store.search("deadline ship wednesday", federated=False)
+        self.assertEqual(recalls.counts().get(again.id), 1,
+                         "the new memory inherited the old one's weight")
+
+    def test_a_zero_limit_reinforces_nothing(self):
+        # search() returns nothing, so nothing was used. Reading the cutoff
+        # from scored[limit - 1] made that scored[-1] — the *worst* match —
+        # and reinforced candidates no caller ever saw.
+        from foldcrumbs import recalls
+        self._put("Lockfile", "The lockfile is committed.")
+        self.assertEqual(store.search("lockfile", limit=0, federated=False), [])
+        self.assertEqual(recalls.counts(), {},
+                         "a recall that returned nothing reinforced something")
+
+    def test_the_count_never_drags_in_what_did_not_match(self):
+        from foldcrumbs import recalls
+        rec = self._put("Unrelated", "Nothing to do with the question.")
+        recalls.reinforce([rec.id] * 100)
+        hits = store.search("kubernetes ingress annotations", federated=False)
+        self.assertEqual([m.title for m in hits], [],
+                         "reinforcement pulled in a memory that did not match")
+
+    def test_forgetting_a_memory_forgets_its_count(self):
+        from foldcrumbs import recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        store.search("lockfile", federated=False)
+        self.assertIn(rec.id, recalls.counts())
+        store.forget(rec.filename())
+        self.assertNotIn(rec.id, recalls.counts(),
+                         "the count outlived the memory it described")
+
+    def test_the_sidecar_is_not_read_as_a_memory(self):
+        from foldcrumbs import recalls
+        self._put("Lockfile", "The lockfile is committed.")
+        store.search("lockfile", federated=False)
+        self.assertTrue((Path(self.dir) / recalls.SIDECAR).is_file())
+        titles = [m.title for m in store.load_all()]
+        self.assertEqual(titles, ["Lockfile"],
+                         f"the sidecar leaked into the store: {titles}")
+
+    def test_recall_survives_a_store_that_cannot_be_written(self):
+        # Reinforcement is advisory. A read-only store must still answer.
+        from foldcrumbs import recalls
+        self._put("Lockfile", "The lockfile is committed.")
+        real = recalls._write
+
+        def refuses(target, data):
+            raise OSError(errno.EROFS, "read-only file system")
+
+        recalls._write = refuses
+        try:
+            hits = store.search("lockfile", federated=False)
+        finally:
+            recalls._write = real
+        self.assertEqual([m.title for m in hits], ["Lockfile"],
+                         "a failed count cost the caller its answer")
+
+
+class TestFreshnessRanking(TmpStore):
+    """Between two equally relevant answers, the more recent one goes first."""
+
+    def _put(self, title, body, days_old=0):
+        from datetime import datetime, timedelta, timezone
+        rec = MemoryRecord(title=title, content=body, type="fact")
+        if days_old:
+            rec.created_at = (datetime.now(timezone.utc)
+                              - timedelta(days=days_old))
+        store.write_memory(rec)
+        return rec
+
+    def test_the_more_recent_of_two_equal_answers_comes_first(self):
+        # Named so the filename tiebreak, which runs last, would put the old
+        # one first: otherwise the test passes without freshness doing
+        # anything at all.
+        old = self._put("Deploy alpha", "Deploy runs on Tuesday.", days_old=400)
+        new = self._put("Deploy zulu", "Deploy runs on Tuesday.")
+        self.assertLess(old.filename(), new.filename(),
+                        "the fixture no longer contradicts alphabetical order")
+        hits = store.search("deploy runs on tuesday", federated=False)
+        self.assertEqual([m.id for m in hits], [new.id, old.id],
+                         "the year-old memory was shown first")
+
+    def test_recency_never_outranks_a_better_match(self):
+        # Age is a weak signal — a decision from last year can be exactly the
+        # answer — so it must not promote a worse match, however fresh.
+        exact = self._put("Deploy exact", "deploy runs tuesday at nine",
+                          days_old=400)
+        near = self._put("Deploy near", "deploy always runs on a tuesday morning")
+        hits = store.search("deploy runs tuesday", federated=False)
+        self.assertEqual({m.id for m in hits}, {exact.id, near.id},
+                         "the fixture stopped matching both")
+        self.assertEqual(hits[0].id, exact.id,
+                         "a fresher near match outranked the exact one")
+
+    def test_a_memory_with_no_date_is_neither_fresh_nor_stale(self):
+        # Reading a missing date as the epoch would bury every memory written
+        # before dates were serialized — the opposite of not knowing.
+        from foldcrumbs import recalls
+        undated = Path(self.dir) / "fact_undated.md"
+        undated.write_text(
+            "---\nname: Undated\ndescription: hook\ntype: fact\n---\n\n"
+            "Deploy runs on Tuesday.\n", encoding="utf-8")
+        rec = [m for m in store.load_all() if m.title == "Undated"][0]
+        self.assertTrue(rec.created_at_missing)
+        self.assertEqual(recalls.freshness(rec), 0.5)
+        ancient = self._put("Deploy ancient", "Deploy runs on Tuesday.",
+                            days_old=3000)
+        self.assertLess(recalls.freshness(ancient), 0.5)
+        hits = store.search("deploy runs on tuesday", federated=False)
+        self.assertEqual([m.title for m in hits[:2]],
+                         ["Undated", "Deploy ancient"],
+                         "an undated memory was treated as ancient")
+
+    def test_a_clock_skew_does_not_bury_a_memory(self):
+        # A memory dated in the future is a wrong clock somewhere, not a
+        # reason to rank it last.
+        from foldcrumbs import recalls
+        future = self._put("Deploy future", "Deploy runs on Tuesday.",
+                           days_old=-30)
+        self.assertEqual(recalls.freshness(future), 1.0)
+
+    def test_use_still_separates_two_memories_of_the_same_age(self):
+        # Freshness leads the tiebreak but does not own it: written together,
+        # the one that has actually been needed goes first.
+        from foldcrumbs import recalls
+        a = self._put("Deploy A", "Deploy runs on Tuesday.")
+        b = self._put("Deploy B", "Deploy runs on Tuesday.")
+        recalls.reinforce([b.id] * 10)
+        hits = store.search("deploy runs on tuesday", federated=False)
+        self.assertEqual([m.id for m in hits], [b.id, a.id],
+                         "use stopped separating memories of the same age")
+
+
+class TestDecay(TmpStore):
+    """Decay that acts: a store where nothing ever leaves competes with itself."""
+
+    def _stale(self, title, body):
+        # An old, weakly-sourced preference: the age penalty and the
+        # provenance weight are both already in compute_confidence, and both
+        # survive a round trip through the file. The pass reads that number —
+        # it does not invent a decay of its own.
+        from datetime import datetime, timedelta, timezone
+        rec = MemoryRecord(title=title, content=body, type="preference",
+                           confidence=0.3, provenance="inferred")
+        old = datetime.now(timezone.utc) - timedelta(days=120)
+        rec.created_at = rec.updated_at = old       # untouched since, too
+        store.write_memory(rec)
+        self.assertLess(store.get(rec.filename()).compute_confidence(),
+                        0.3, "the fixture is no longer stale on reload")
+        return rec
+
+    def test_a_dry_run_names_candidates_without_touching_them(self):
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        res = audit.decay()
+        self.assertIn(stale.filename(), res["candidates"])
+        self.assertEqual(res["archived"], [])
+        self.assertEqual(store.get(stale.filename()).status, "active",
+                         "a dry run changed the store")
+
+    def test_applying_archives_without_deleting(self):
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        body = (Path(self.dir) / stale.filename()).read_text()
+        res = audit.decay(apply=True)
+        self.assertEqual(res["archived"], [stale.filename()])
+        self.assertTrue((Path(self.dir) / stale.filename()).is_file(),
+                        "archiving deleted the file")
+        self.assertIn("Nobody follows this any more.",
+                      (Path(self.dir) / stale.filename()).read_text(),
+                      "archiving lost the memory's content")
+        self.assertNotEqual(body, (Path(self.dir) / stale.filename()).read_text())
+        self.assertEqual(store.get(stale.filename()).status, "archived")
+
+    def test_an_archived_memory_leaves_recall_and_the_index(self):
+        from foldcrumbs import audit
+        stale = self._stale("Deployment ritual", "Nobody follows this any more.")
+        self.assertTrue(store.search("deployment ritual", federated=False))
+        audit.decay(apply=True)
+        self.assertEqual(store.search("deployment ritual", federated=False), [],
+                         "an archived memory was still recalled")
+        self.assertNotIn(stale.filename(), store.rebuild_index().read_text(),
+                         "an archived memory was still indexed")
+
+    def test_restoring_brings_it_back_whole(self):
+        # Decaying out of relevance is not the same as having been wrong, and
+        # only the second deserves to be unrecoverable.
+        from foldcrumbs import audit
+        stale = self._stale("Deployment ritual", "Nobody follows this any more.")
+        audit.decay(apply=True)
+        self.assertTrue(store.set_status(stale.filename(), "active"))
+        back = store.get(stale.filename())
+        self.assertEqual(back.status, "active")
+        self.assertEqual(back.content, "Nobody follows this any more.")
+        self.assertTrue(store.search("deployment ritual", federated=False),
+                        "a restored memory was not recalled again")
+
+    def test_restore_does_not_revive_what_was_superseded_or_deleted(self):
+        # Those did not decay out of relevance: something replaced them, or
+        # someone removed them. Reviving them here would undo a decision this
+        # call knows nothing about.
+        old = MemoryRecord(title="Deadline", content="Ship on Friday.",
+                           type="fact")
+        new = MemoryRecord(title="Deadline moved", content="Ship on Monday.",
+                           type="fact")
+        store.write_memory(old)
+        store.write_memory(new)
+        self.assertTrue(store.supersede(old.filename(), new.filename()))
+        self.assertFalse(store.set_status(old.filename(), "active"),
+                         "a superseded memory was brought back")
+        self.assertEqual(store.get(old.filename()).status, "superseded")
+
+        gone = MemoryRecord(title="Retired", content="Not wanted any more.",
+                            type="fact")
+        store.write_memory(gone)
+        self.assertEqual(store.forget(gone.filename()), "deleted")
+        self.assertFalse(store.set_status(gone.filename(), "active"),
+                         "a deleted memory was brought back")
+        self.assertEqual(store.get(gone.filename()).status, "deleted")
+
+    def test_archiving_only_takes_active_memories(self):
+        # The other direction of the same rule.
+        old = MemoryRecord(title="Deadline", content="Ship on Friday.",
+                           type="fact")
+        new = MemoryRecord(title="Deadline moved", content="Ship on Monday.",
+                           type="fact")
+        store.write_memory(old)
+        store.write_memory(new)
+        self.assertTrue(store.supersede(old.filename(), new.filename()))
+        self.assertFalse(store.set_status(old.filename(), "archived"),
+                         "a superseded memory was archived over")
+        self.assertEqual(store.get(old.filename()).status, "superseded")
+
+    def test_a_freshly_written_memory_is_given_its_turn(self):
+        # Distillation writes `inferred` records at modest confidence, so a
+        # brand-new memory can already sit below the threshold. Archiving it
+        # on the next run means it never got used because it was never
+        # offered — decay is about having had a chance, not about the number.
+        from foldcrumbs import audit
+        new = MemoryRecord(title="Fresh guess", content="Probably prefers this.",
+                           type="preference", confidence=0.3,
+                           provenance="inferred")
+        store.write_memory(new)
+        self.assertLess(store.get(new.filename()).compute_confidence(),
+                        audit.STALE_CONF, "the fixture is no longer low-trust")
+        res = audit.decay(apply=True)
+        self.assertNotIn(new.filename(), res["candidates"],
+                         "a memory was archived before it had been offered")
+        self.assertEqual(store.get(new.filename()).status, "active")
+
+    def test_validating_a_memory_gives_it_its_grace_back(self):
+        # `validate` moves updated_at, so a memory just confirmed by use
+        # starts its chance again rather than being archived next run.
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        self.assertIn(stale.filename(), audit.decay()["candidates"])
+        rec = store.get(stale.filename())
+        rec.validate()
+        store.write_memory(rec)
+        self.assertNotIn(stale.filename(), audit.decay()["candidates"],
+                         "a re-validated memory was archived anyway")
+
+    def _undated(self, name, front):
+        path = Path(self.dir) / name
+        path.write_text(
+            "---\nname: Undated\ndescription: hook\ntype: preference\n"
+            f"confidence: 0.3\nprovenance: inferred\n{front}---\n\n"
+            "Written before dates were serialized.\n", encoding="utf-8")
+        return [m for m in store.load_all() if m.title == "Undated"][0]
+
+    def test_a_memory_with_no_date_at_all_keeps_its_place(self):
+        # An unknown date is not evidence of age, and archiving removes it
+        # from recall — the one place it could earn its way back.
+        from foldcrumbs import audit
+        rec = self._undated("preference_undated.md", "")
+        self.assertTrue(rec.created_at_missing and rec.updated_at_missing)
+        self.assertLess(rec.compute_confidence(), audit.STALE_CONF)
+        self.assertEqual(audit.decay()["candidates"], {},
+                         "a memory was archived on an age nobody knows")
+
+    def test_a_legacy_memory_with_only_a_creation_date_still_decays(self):
+        # Both timestamps default to "now" when absent, so reading the value
+        # rather than asking whether the file carries it made such a memory
+        # look untouched a second ago — and it would never decay at all.
+        from foldcrumbs import audit
+        rec = self._undated("preference_undated.md",
+                            "created_at: 2020-01-01T00:00:00+00:00\n")
+        self.assertTrue(rec.updated_at_missing)
+        self.assertFalse(rec.created_at_missing)
+        self.assertIn("preference_undated.md", audit.decay()["candidates"],
+                      "a memory dated only by its creation never decayed")
+
+    def test_a_memory_dated_only_by_an_update_decays_on_that(self):
+        from foldcrumbs import audit
+        rec = self._undated("preference_undated.md",
+                            "updated_at: 2020-01-01T00:00:00+00:00\n")
+        self.assertTrue(rec.created_at_missing)
+        self.assertIn("preference_undated.md", audit.decay()["candidates"])
+
+    def test_a_stale_update_date_cannot_age_out_a_new_memory(self):
+        # An imported or hand-edited file can carry an updated_at older than
+        # its creation date. Preferring updated_at outright would archive a
+        # memory that was in fact just written, so the age comes from the
+        # newest date on the file, not the first one that happens to be there.
+        from datetime import datetime, timezone
+        from foldcrumbs import audit
+        rec = self._undated(
+            "preference_undated.md",
+            "created_at: {}\nupdated_at: 2020-01-01T00:00:00+00:00\n".format(
+                datetime.now(timezone.utc).isoformat()))
+        self.assertLess(rec.compute_confidence(), audit.STALE_CONF)
+        self.assertEqual(audit.decay()["candidates"], {},
+                         "a memory written today was archived on an old "
+                         "updated_at")
+
+    def test_a_timestamp_without_a_zone_does_not_stop_the_pass(self):
+        # A hand-edited file can carry a timestamp with no offset. Comparing
+        # those against aware ones makes max() raise, which would take down
+        # the whole sweep over one file instead of skipping it.
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        naive = Path(self.dir) / "preference_hand_edited.md"
+        naive.write_text(
+            "---\nname: Hand edited\ndescription: hook\ntype: preference\n"
+            "confidence: 0.3\nprovenance: inferred\n"
+            "created_at: 2020-01-01T00:00:00\n"
+            "updated_at: 2020-01-02T00:00:00+00:00\n---\n\n"
+            "Someone typed these dates by hand.\n", encoding="utf-8")
+        rec = [m for m in store.load_all() if m.title == "Hand edited"][0]
+        self.assertIsNotNone(rec.created_at.tzinfo,
+                             "the parser stopped attaching a zone")
+        res = audit.decay()          # must not raise
+        self.assertIn(stale.filename(), res["candidates"],
+                      "one hand-edited file stopped the whole pass")
+        self.assertIn("preference_hand_edited.md", res["candidates"],
+                      "a naive timestamp was not read as UTC")
+
+    def test_a_sweep_rebuilds_the_index_once(self):
+        # Rebuilding per memory means a large store rewrites its index as many
+        # times as it archives.
+        from foldcrumbs import audit
+        for i in range(5):
+            self._stale(f"Old rule {i}", "Nobody follows this any more.")
+        builds, real = [], store.rebuild_index
+
+        def counting(cwd=None):
+            builds.append(1)
+            return real(cwd)
+
+        store.rebuild_index = counting
+        try:
+            res = audit.decay(apply=True)
+        finally:
+            store.rebuild_index = real
+        self.assertEqual(len(res["archived"]), 5)
+        self.assertEqual(len(builds), 1,
+                         f"the index was rebuilt {len(builds)} times for "
+                         f"{len(res['archived'])} memories")
+
+    def test_an_interrupted_sweep_still_leaves_the_index_truthful(self):
+        # If the rebuild is skipped on the way out, the index keeps
+        # advertising memories that are no longer there to answer.
+        from foldcrumbs import audit
+        stale = [self._stale(f"Old rule {i}", "Nobody follows this any more.")
+                 for i in range(3)]
+        real = store.set_status
+        calls = []
+
+        def fails_partway(name, status, cwd=None, rebuild=True):
+            calls.append(name)
+            if len(calls) == 2:
+                raise OSError(errno.EIO, "the disk gave up")
+            return real(name, status, cwd, rebuild)
+
+        store.set_status = fails_partway
+        try:
+            with self.assertRaises(OSError):
+                audit.decay(apply=True)
+        finally:
+            store.set_status = real
+        idx = (Path(self.dir) / "MEMORY.md").read_text()
+        archived = [m for m in store.load_all() if m.status == "archived"]
+        self.assertTrue(archived, "the sweep archived nothing at all")
+        for m in archived:
+            self.assertNotIn(m.filename(), idx,
+                             "an interrupted sweep left an archived memory "
+                             "advertised in the index")
+        self.assertEqual(len(stale), 3)
+
+    def test_a_retired_memory_left_in_the_index_is_healed(self):
+        # Archived, superseded and deleted records keep their files, so a
+        # stale entry for one is not a dead link — and without noticing it,
+        # the index stays wrong for good: whatever retired them has already
+        # run, and nothing later looks again.
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        audit.decay(apply=True)
+        # Put the index back the way an interrupted sweep would have left it.
+        index = Path(self.dir) / "MEMORY.md"
+        index.write_text(
+            index.read_text() + f"\n- [Old rule]({stale.filename()}) — hook\n",
+            encoding="utf-8")
+        report = audit.audit()
+        self.assertIn(stale.filename(), report["retired_links"],
+                      "a retired memory in the index went unnoticed")
+        self.assertEqual(report["dead_links"], [],
+                         "its file is on disk, so it is not a dead link")
+        self.assertTrue(audit.heal_index(), "the index was not healed")
+        self.assertNotIn(stale.filename(),
+                         index.read_text(), "healing left it advertised")
+
+    def test_doctor_does_not_call_a_store_with_retired_links_healthy(self):
+        # The audit learned to see them; the report a person actually reads
+        # did not, so the store looked fine while its index advertised
+        # memories that answer nothing.
+        import contextlib as _c
+        import io
+        from foldcrumbs import audit, cli
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        audit.decay(apply=True)
+        index = Path(self.dir) / "MEMORY.md"
+        index.write_text(
+            index.read_text() + f"\n- [Old rule]({stale.filename()}) — hook\n",
+            encoding="utf-8")
+        out = io.StringIO()
+        with _c.redirect_stdout(out):
+            cli._cmd_doctor(None)
+        printed = out.getvalue()
+        self.assertIn("retired", printed,
+                      "doctor never mentions retired links")
+        self.assertIn(stale.filename(), printed,
+                      "doctor reported a healthy store while the index was "
+                      "advertising an archived memory")
+        self.assertIn("foldcrumbs index", printed,
+                      "doctor found it but suggested nothing")
+
+    def test_a_trusted_memory_is_never_archived(self):
+        from foldcrumbs import audit
+        keep = MemoryRecord(title="Live rule", content="Still true today.",
+                            type="instruction", confidence=0.9)
+        store.write_memory(keep)
+        self._stale("Old rule", "Nobody follows this any more.")
+        res = audit.decay(apply=True)
+        self.assertNotIn(keep.filename(), res["candidates"])
+        self.assertEqual(store.get(keep.filename()).status, "active")
+
+    def test_archiving_takes_the_recall_history_with_it(self):
+        from foldcrumbs import audit, recalls
+        stale = self._stale("Deployment ritual", "Nobody follows this any more.")
+        store.search("deployment ritual", federated=False)
+        self.assertIn(stale.id, recalls.counts())
+        audit.decay(apply=True)
+        self.assertNotIn(stale.id, recalls.counts(),
+                         "an archived memory kept weighting the ranking")
+
+    def test_recall_never_archives_anything(self):
+        # Reading must not silently change what the store contains.
+        stale = self._stale("Deployment ritual", "Nobody follows this any more.")
+        for _ in range(5):
+            store.search("deployment ritual", federated=False)
+        self.assertEqual(store.get(stale.filename()).status, "active",
+                         "recall archived a memory behind the caller's back")
 
 
 class TestDistill(unittest.TestCase):
@@ -3804,6 +4630,207 @@ class TestIndexShards(_FederationEnv):
         self.assertIsNone(self.index_shard.write_shard(self.proj))
 
 
+class TestProfiles(_FederationEnv):
+    """One identity per agent or node, on top of the roots that already exist."""
+
+    def setUp(self):
+        super().setUp()
+        from foldcrumbs import profiles
+        self.profiles = profiles
+
+    def test_a_dedicated_profile_keeps_one_store_for_every_project(self):
+        ref = self.profiles.add("councillor")
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref.mode, "explicit")
+        a = ref.memory_dir(self._home / "projA")
+        b = ref.memory_dir(self._home / "projB")
+        self.assertEqual(a, b,
+                         "a dedicated profile split its memory by project")
+
+    def test_a_shared_profile_keeps_memory_per_project(self):
+        other = self._root(".claude-work")
+        ref = self.profiles.add("assistant", self.profiles.SHARED, other)
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref.mode, "config")
+        a = ref.memory_dir(self._home / "projA")
+        b = ref.memory_dir(self._home / "projB")
+        self.assertNotEqual(a, b,
+                            "a shared profile merged two projects' memory")
+
+    def test_a_shared_profile_will_not_guess_its_directory(self):
+        # That directory belongs to someone else; picking one would be a
+        # decision dressed up as a default.
+        with self.assertRaises(ValueError):
+            self.profiles.add("assistant", self.profiles.SHARED)
+
+    def test_a_name_that_would_escape_its_directory_is_refused(self):
+        for bad in ("../elsewhere", "with/slash", ".hidden", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                self.profiles.add(bad)
+
+    def test_env_names_the_variable_that_matches_the_shape(self):
+        self.profiles.add("councillor")
+        self.profiles.add("assistant", self.profiles.SHARED,
+                          self._root(".claude-work"))
+        self.assertIn("FOLDCRUMBS_DIR", self.profiles.env_line("councillor"))
+        self.assertIn("CLAUDE_CONFIG_DIR", self.profiles.env_line("assistant"))
+        self.assertIsNone(self.profiles.env_line("nobody"))
+
+    def test_the_env_line_actually_selects_that_store(self):
+        # The command exists because a CLI cannot change its parent's
+        # environment. The least it can do is print a line that works.
+        import importlib
+        from foldcrumbs import config as _config, store
+        ref = self.profiles.add("councillor")
+        line = self.profiles.env_line("councillor")
+        var, _, value = line[len("export "):].partition("=")
+        os.environ[var] = value.strip('"')
+        try:
+            importlib.reload(_config)
+            self.assertEqual(_config.memory_dir(self._home / "anywhere"),
+                             ref.memory_dir(self._home / "anywhere"))
+            store.write_memory(MemoryRecord(title="Mine", content="Body.",
+                                            type="fact"))
+            self.assertTrue((ref.memory_dir() / "fact_mine.md").is_file(),
+                            "the printed line did not select that store")
+        finally:
+            os.environ.pop(var, None)
+            importlib.reload(_config)
+
+    def test_roots_registered_before_profiles_are_listed_too(self):
+        # They are the same thing. Hiding them would suggest a second
+        # registry that does not exist.
+        ref = self.federation.register(self._root(".claude-work"),
+                                       mode="config")
+        listed = {p["name"]: p for p in self.profiles.listing()}
+        self.assertIn(ref.label, listed)
+        self.assertEqual(listed[ref.label]["kind"], self.profiles.SHARED,
+                         "a config root was not described as a shared profile")
+
+    def test_a_name_two_roots_answer_to_is_refused_not_guessed(self):
+        # Labels have never been unique — two config dirs called .claude under
+        # different homes are both plausible. Guessing points a process at
+        # another agent's store, or unregisters one nobody meant to touch.
+        first = self.profiles.add("councillor")
+        twin = self._home / "twin-home" / "councillor"
+        twin.mkdir(parents=True, exist_ok=True)
+        self.federation.register(twin, mode="explicit", label="councillor")
+        self.assertEqual(
+            len([p for p in self.profiles.listing()
+                 if p["name"] == "councillor"]), 2)
+        with self.assertRaises(self.profiles.AmbiguousProfile):
+            self.profiles.env_line("councillor")
+        with self.assertRaises(self.profiles.AmbiguousProfile):
+            self.profiles.remove("councillor")
+        self.assertTrue((first.path).is_dir(),
+                        "an ambiguous name unregistered something anyway")
+
+    def test_a_name_another_root_already_holds_is_refused(self):
+        # Under the registry lock, not before it: asking first would be a
+        # check-then-act — two processes both find the name free, both take
+        # it, and it then identifies nothing.
+        first = self.profiles.add("councillor")
+        elsewhere = self._home / "another-councillor"
+        elsewhere.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(self.federation.FederationConflict):
+            self.profiles.add("councillor", path=elsewhere)
+        self.assertEqual(
+            [p["path"] for p in self.profiles.listing()
+             if p["name"] == "councillor"], [str(first.path)],
+            "a second root took a name that was already in use")
+
+    def test_re_adding_the_same_profile_is_idempotent(self):
+        # Same name, same directory: that is the profile being registered
+        # again, not a second one claiming its name.
+        first = self.profiles.add("councillor")
+        again = self.profiles.add("councillor")
+        self.assertIsNotNone(again)
+        self.assertEqual(again.id, first.id)
+
+    def test_the_env_line_survives_an_awkward_path(self):
+        # A memory directory can hold a space, a quote, a dollar sign. A line
+        # meant to be pasted or eval'd would otherwise set the wrong variable
+        # — or run whatever the path spells.
+        import shlex
+        awkward = self._home / 'od d "$(echo pwned)"'
+        awkward.mkdir(parents=True, exist_ok=True)
+        self.profiles.add("tricky", path=awkward)
+        line = self.profiles.env_line("tricky")
+        var, _, value = line[len("export "):].partition("=")
+        self.assertEqual(shlex.split(f"{var}={value}"),
+                         [f"{var}={awkward}"],
+                         f"a shell would not read this back whole: {line}")
+
+    def _fake_agent(self, *names):
+        home = self._home / "agent-home" / "profiles"
+        for n in names:
+            (home / n).mkdir(parents=True, exist_ok=True)
+        (home / ".hidden").mkdir(parents=True, exist_ok=True)
+        (home / "not-a-dir.txt").write_text("x", encoding="utf-8")
+        return home
+
+    def test_import_reads_the_other_runtime_and_writes_nothing_to_it(self):
+        # Those directories belong to that runtime. foldcrumbs takes names
+        # from them; anything else would make two tools own one tree.
+        home = self._fake_agent("cz-claude", "devlog")
+        before = sorted(p.name for p in home.rglob("*"))
+        res = self.profiles.import_agent(home=home, apply=True)
+        self.assertEqual(res["found"], ["cz-claude", "devlog"],
+                         "hidden and non-directory entries were picked up")
+        self.assertEqual(sorted(res["added"]), ["cz-claude", "devlog"])
+        self.assertEqual(sorted(p.name for p in home.rglob("*")), before,
+                         "importing wrote into the other runtime's tree")
+
+    def test_each_imported_profile_gets_its_own_dedicated_store(self):
+        home = self._fake_agent("cz-claude", "devlog")
+        self.profiles.import_agent(home=home, apply=True)
+        listed = {p["name"]: p for p in self.profiles.listing()}
+        dirs = set()
+        for name in ("cz-claude", "devlog"):
+            self.assertEqual(listed[name]["kind"], self.profiles.DEDICATED,
+                             f"{name} was not given a memory of its own")
+            dirs.add(listed[name]["path"])
+        self.assertEqual(len(dirs), 2, "two agents were pointed at one store")
+        for d in dirs:
+            self.assertTrue(str(d).startswith(str(self._state)),
+                            "an agent's memory was put inside the other "
+                            "runtime's tree")
+
+    def test_a_dry_run_imports_nothing(self):
+        home = self._fake_agent("cz-claude")
+        res = self.profiles.import_agent(home=home)
+        self.assertEqual(res["added"], [])
+        self.assertEqual([p["name"] for p in self.profiles.listing()], [])
+        self.assertIn("cz-claude", res["found"])
+
+    def test_importing_twice_does_not_duplicate_a_profile(self):
+        home = self._fake_agent("cz-claude")
+        self.profiles.import_agent(home=home, apply=True)
+        again = self.profiles.import_agent(home=home, apply=True)
+        self.assertEqual(again["added"], [])
+        self.assertEqual(again["skipped"], ["cz-claude"])
+        self.assertEqual(
+            len([p for p in self.profiles.listing() if p["name"] == "cz-claude"]),
+            1, "a second registration was made for the same agent")
+
+    def test_a_runtime_that_is_not_installed_is_not_an_error(self):
+        res = self.profiles.import_agent(home=self._home / "nothing-here")
+        self.assertEqual(res["found"], [])
+        self.assertEqual(res["added"], [])
+
+    def test_removing_a_profile_leaves_its_memories_alone(self):
+        ref = self.profiles.add("councillor")
+        (ref.path / "fact_kept.md").write_text(
+            "---\nname: Kept\ntype: fact\n---\n\nBody.\n", encoding="utf-8")
+        self.assertTrue(self.profiles.remove("councillor"))
+        self.assertNotIn("councillor",
+                         [p["name"] for p in self.profiles.listing()])
+        self.assertTrue((ref.path / "fact_kept.md").is_file(),
+                        "removing a profile deleted its memories")
+        self.assertFalse(self.profiles.remove("councillor"),
+                         "removing an unknown profile reported success")
+
+
 class TestFederatedSearch(_FederationEnv):
     """Federated recall: the path OpenCode and Codex depend on."""
 
@@ -4798,17 +5825,21 @@ class TestFederatedSearch(_FederationEnv):
             self.store.write_memory(
                 MemoryRecord(title=f"local {i}", content=f"body {i}",
                              type="fact"), cwd=str(self.proj))
-        reads, real = [], self.store.iter_memories
+        # Counted at the one place that touches the directory, so the test
+        # keeps measuring listings even if the callers above it change.
+        reads, real = [], self.store.scan_store
+        local_dir = self.store.config.memory_dir(str(self.proj))
 
-        def counting(cwd=None):
-            reads.append(1)
-            return real(cwd)
+        def counting(directory, max_files=None):
+            if Path(directory) == local_dir:
+                reads.append(1)
+            return real(directory, max_files)
 
-        self.store.iter_memories = counting
+        self.store.scan_store = counting
         try:
             self.store.search("local", cwd=str(self.proj), federated=True)
         finally:
-            self.store.iter_memories = real
+            self.store.scan_store = real
         self.assertEqual(len(reads), 1,
                          f"local store listed {len(reads)} times for one recall")
 

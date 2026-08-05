@@ -48,6 +48,13 @@ def audit(cwd=None) -> dict:
     active_names = {_name(m) for m in active}
     return {
         "dead_links": sorted(t for t in linked if t not in on_disk),
+        # Linked, and the file is right there — but the memory behind it has
+        # been retired. Archived, superseded and deleted records keep their
+        # files, so this is invisible to the dead-link check, and an index
+        # left in that state stays wrong for good: the operation that retired
+        # them has already run, and nothing later notices.
+        "retired_links": sorted(t for t in linked
+                                if t in on_disk and t not in active_names),
         "orphans": sorted(n for n in active_names if n not in linked),
         "pollution": sorted(_name(m) for m in active
                             if _is_hard_artifact(m.title) or _is_hard_artifact(m.content)),
@@ -65,7 +72,7 @@ def heal_index(cwd=None) -> bool:
     across machines should gate this on ``config.distill_enabled()`` so only a
     writing machine repairs (avoids sync churn)."""
     a = audit(cwd)
-    if a["dead_links"] or a["orphans"]:
+    if a["dead_links"] or a["orphans"] or a["retired_links"]:
         store.rebuild_index(cwd)
         return True
     return False
@@ -93,6 +100,88 @@ def prune_artifacts(cwd=None) -> list[str]:
     return removed
 
 
+# A memory has to be given a chance before it can be judged for having had
+# one. Distillation writes `inferred` records at modest confidence, so a
+# freshly written memory can already sit below the threshold — archiving it on
+# the next run would mean it never got used because it was never offered.
+DECAY_GRACE_DAYS = 30
+
+
+def _has_decayed(m) -> bool:
+    """Whether a memory has both fallen below the threshold and had its turn.
+
+    Trust is only half the question. The other half is time: something written
+    or re-validated recently has not decayed, it simply has not proved itself
+    yet — and ``validate`` moves ``updated_at``, so a memory that was just
+    confirmed gets its grace back.
+
+    A memory with no usable date keeps its place. An unknown date is not
+    evidence of age, and this step deletes nothing that can be re-earned only
+    by being recalled — which cannot happen once it is out of recall.
+    """
+    if m.compute_confidence() >= STALE_CONF:
+        return False
+    from datetime import datetime, timezone
+
+    # The most recent date the file actually carries — the newest, not the
+    # first one that happens to be there. Both attributes default to "now"
+    # when absent, so asking for the value is not enough: a legacy memory
+    # holding only created_at would look untouched a second ago and never
+    # decay. And preferring updated_at outright is wrong too, because an
+    # imported or hand-edited file can carry one older than its creation date,
+    # which would archive a memory that was just written.
+    dates = []
+    if not getattr(m, "updated_at_missing", False) and m.updated_at is not None:
+        dates.append(m.updated_at)
+    if not getattr(m, "created_at_missing", False) and m.created_at is not None:
+        dates.append(m.created_at)
+    # Every date here has a zone: the parser reads a naive timestamp as UTC
+    # precisely so comparisons cannot raise. Re-normalising would be dead
+    # code, and a guard that never fires is a guard nobody maintains — the
+    # test holds the parser to it instead.
+    if not dates:
+        return False
+    return (datetime.now(timezone.utc) - max(dates)).days >= DECAY_GRACE_DAYS
+
+
+def decay(cwd=None, apply: bool = False) -> dict:
+    """Archive active memories whose trust has decayed below the threshold.
+
+    The decay itself is not new — ``compute_confidence`` has always applied
+    provenance, contradiction and age. What was missing is a step that acts on
+    it: a store where nothing ever leaves ends up competing with itself, every
+    stale entry taking up the retrieval space of something current.
+
+    Archived, never deleted. A memory that decayed out of relevance is not a
+    memory that was wrong, and ``foldcrumbs restore`` brings it back whole.
+    ``prune --apply`` is still the way to remove files for good, and it is
+    still a separate, explicit act.
+
+    Explicit and scheduled, never a side effect of recall: reading must not
+    silently change what the store contains. Dry-run unless ``apply``.
+    """
+    candidates = {
+        _name(m): round(m.compute_confidence(), 2)
+        for m in store.iter_memories(cwd)
+        if m.status == "active" and _has_decayed(m)
+    }
+    archived: list[str] = []
+    if apply:
+        try:
+            for n in candidates:
+                if store.set_status(n, "archived", cwd, rebuild=False):
+                    archived.append(n)
+        finally:
+            # Whatever happened above, the index must describe what the store
+            # now holds. Skipping it on the way out through an exception would
+            # leave archived memories advertised — and heal_index would not
+            # notice, since their files are still there. It does now, which is
+            # the real backstop for a sweep interrupted outright.
+            if archived:
+                store.rebuild_index(cwd)
+    return {"candidates": candidates, "archived": archived, "applied": apply}
+
+
 def prune(cwd=None, apply: bool = False, include_stale: bool = False) -> dict:
     """Find (and with ``apply``, delete) prune candidates.
 
@@ -102,8 +191,8 @@ def prune(cwd=None, apply: bool = False, include_stale: bool = False) -> dict:
     candidates: dict[str, str] = {}
     for m in store.iter_memories(cwd):
         name = _name(m)
-        if m.status in ("deleted", "superseded"):
-            candidates[name] = "superseded/deleted"
+        if m.status in ("deleted", "superseded", "archived"):
+            candidates[name] = f"{m.status} (file kept until pruned)"
         elif m.status == "active" and (_is_hard_artifact(m.title) or _is_hard_artifact(m.content)):
             candidates[name] = "artifact"
         elif (include_stale and m.status == "active"

@@ -137,7 +137,7 @@ _CONTENDED_ERRNOS = frozenset(
 
 
 @contextlib.contextmanager
-def _mkdir_lock(lockdir: Path):
+def _mkdir_lock(lockdir: Path, wait: float | None = None):
     """Portable mutual exclusion for platforms without ``fcntl``.
 
     ``mkdir`` is atomic and fails if the directory exists, which is all an
@@ -159,7 +159,8 @@ def _mkdir_lock(lockdir: Path):
     A holder killed mid-mutation therefore leaves the lock behind. That is a
     manual cleanup, and the log says exactly which directory to remove.
     """
-    deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+    deadline = time.monotonic() + (
+        _LOCK_WAIT_SECONDS if wait is None else wait)
     owner_name = f"owner-{uuid.uuid4().hex}"
     owner = lockdir / owner_name
     held = False
@@ -229,7 +230,8 @@ def _mkdir_lock(lockdir: Path):
 
 
 @contextlib.contextmanager
-def file_lock(lock_path: Path, allow_unsupported: bool = False):
+def file_lock(lock_path: Path, allow_unsupported: bool = False,
+              wait: float | None = None):
     """Exclusive lock on one path, bounded in time. Yields True while held.
 
     Scoped deliberately: callers pass the narrowest path that covers what
@@ -254,7 +256,8 @@ def file_lock(lock_path: Path, allow_unsupported: bool = False):
             config.log_event(f"federation: cannot open lock {lock_path}")
             yield False
             return
-        deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+        deadline = time.monotonic() + (
+        _LOCK_WAIT_SECONDS if wait is None else wait)
         while True:
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -304,7 +307,7 @@ def file_lock(lock_path: Path, allow_unsupported: bool = False):
             fh.close()
         return
 
-    with _mkdir_lock(Path(str(lock_path) + ".d")) as held:
+    with _mkdir_lock(Path(str(lock_path) + ".d"), wait) as held:
         if not held:
             config.log_event(f"federation: could not lock {lock_path}; not mutating")
         yield held
@@ -1134,6 +1137,7 @@ def register(
     label: str | None = None,
     *,
     relocate: bool = True,
+    unique_label: bool = False,
 ) -> RootRef | None:
     """Register a root so other instances can see it. Idempotent.
 
@@ -1149,7 +1153,22 @@ def register(
     with _registry_lock() as locked:
         if not locked:
             return None
-        return _register_locked(root_path, mode, label, relocate=relocate)
+        return _register_locked(root_path, mode, label, relocate=relocate,
+                                unique_label=unique_label)
+
+
+def _label_taken(label: str, root_path: Path) -> RootRef | None:
+    """A registered root already answering to this label, other than this one.
+
+    Read under the registry lock by ``_register_locked`` — that is the whole
+    point. Checking before calling register is a check-then-act: two processes
+    both find the name free and both take it, and the result is a name that
+    identifies nothing.
+    """
+    for ref in iter_roots():
+        if ref.label == label and _same_path(ref.path, root_path) is not True:
+            return ref
+    return None
 
 
 def _register_locked(
@@ -1158,6 +1177,7 @@ def _register_locked(
     label: str | None,
     *,
     relocate: bool,
+    unique_label: bool = False,
 ) -> RootRef | None:
     explicit_path = root_path is not None
     root_path = root_path if explicit_path else current_root_path()
@@ -1170,6 +1190,14 @@ def _register_locked(
     want_mode = mode or ("config" if explicit_path else current_mode())
     if want_mode not in VALID_MODES:
         raise FederationConflict(f"unknown root mode {want_mode!r}")
+
+    if unique_label:
+        wanted = label or _label_for(root_path)
+        clash = _label_taken(wanted, root_path)
+        if clash is not None:
+            raise FederationConflict(
+                f"a root called {wanted!r} is already registered at "
+                f"{clash.path} ({clash.id})")
 
     try:
         root_path.mkdir(parents=True, exist_ok=True)

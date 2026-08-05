@@ -18,7 +18,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config, distill, federation, install, llm, store
+from . import config, distill, federation, install, llm, profiles, store
 from .profile import format_context_block
 from .schema import VALID_TYPES, MemoryRecord
 
@@ -108,13 +108,120 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
     print(f"memories   : {a['active']} active / {a['total']} total")
     print(f"dead links : {len(a['dead_links'])}" + (f"  {a['dead_links']}" if a['dead_links'] else ""))
     print(f"orphans    : {len(a['orphans'])}" + (f"  {a['orphans']}" if a['orphans'] else ""))
+    print(f"retired    : {len(a['retired_links'])}"
+          + (f"  {a['retired_links']}" if a['retired_links'] else ""))
     print(f"pollution  : {len(a['pollution'])}" + (f"  {a['pollution']}" if a['pollution'] else ""))
     print(f"low-trust  : {len(a['stale'])}" + (f"  {a['stale']}" if a['stale'] else ""))
-    if a["dead_links"] or a["orphans"]:
+    if a["dead_links"] or a["orphans"] or a["retired_links"]:
         print("hint: run `foldcrumbs index` to rebuild, or `foldcrumbs doctor` after a distill.")
     if a["pollution"]:
         print("hint: run `foldcrumbs prune` (dry-run) then `foldcrumbs prune --apply`.")
     return 0
+
+
+def _cmd_profile(args: argparse.Namespace) -> int:
+    action = getattr(args, "action", None) or "list"
+
+    if action == "add":
+        try:
+            ref = profiles.add(args.name, args.kind, args.path)
+        except (ValueError, federation.FederationConflict,
+                profiles.AmbiguousProfile) as exc:
+            print(f"refused: {exc}")
+            return 1
+        if ref is None:
+            print("could not register that profile (unwritable, or a "
+                  "conflicting root is already there)")
+            return 1
+        print(f"profile {ref.label} ({args.kind}) → {ref.path}")
+        line = profiles.env_line(ref.label)
+        if line:
+            print(f"to use it: {line}")
+        return 0
+
+    if action == "import":
+        res = profiles.import_agent(args.agent, apply=args.apply,
+                                    prefix=args.prefix)
+        if not res["found"]:
+            print(f"no {args.agent} profiles found on this machine.")
+            return 0
+        for name in res["found"]:
+            mark = "  (already registered)" if res["plan"][name] in res["skipped"] else ""
+            print(f"  {res['plan'][name]}{mark}")
+        if res["applied"]:
+            print(f"registered {len(res['added'])} profile(s); "
+                  f"{len(res['skipped'])} already there. "
+                  "`foldcrumbs profile env <name>` prints what to set.")
+        else:
+            new = [n for n in res["plan"].values() if n not in res["skipped"]]
+            print(f"{len(new)} profile(s) would be registered, each with a "
+                  "memory of its own. Run with --apply to do it.")
+        return 0
+
+    if action == "env":
+        try:
+            line = profiles.env_line(args.name)
+        except profiles.AmbiguousProfile as exc:
+            print(f"refused: {exc}")
+            return 1
+        if line is None:
+            print(f"no profile named {args.name!r}")
+            return 1
+        print(line)
+        return 0
+
+    if action == "remove":
+        try:
+            gone = profiles.remove(args.name)
+        except profiles.AmbiguousProfile as exc:
+            print(f"refused: {exc}")
+            return 1
+        if not gone:
+            print(f"no profile named {args.name!r}")
+            return 1
+        print(f"removed profile {args.name} — its memories are untouched")
+        return 0
+
+    rows = profiles.listing()
+    if not rows:
+        print("no profiles registered (run `foldcrumbs profile add <name>`)")
+        return 0
+    for r in rows:
+        marks = []
+        if r["current"]:
+            marks.append("this instance")
+        if r["in_use"]:
+            marks.append("in use here")
+        suffix = f"  [{', '.join(marks)}]" if marks else ""
+        print(f"  {r['name']:<20} {r['kind']:<10} {r['path']}{suffix}")
+    return 0
+
+
+def _cmd_decay(args: argparse.Namespace) -> int:
+    from foldcrumbs import audit
+    res = audit.decay(apply=args.apply)
+    if not res["candidates"]:
+        print("nothing has decayed below the trust threshold.")
+        return 0
+    for name, conf in sorted(res["candidates"].items()):
+        print(f"  {name}  (trust {conf})")
+    if res["applied"]:
+        print(f"archived {len(res['archived'])} memory(ies). "
+              "Files kept — `foldcrumbs restore <file>` brings one back.")
+    else:
+        print(f"{len(res['candidates'])} memory(ies) would be archived "
+              "(not deleted). Run `foldcrumbs decay --apply` to do it.")
+    return 0
+
+
+def _cmd_restore(args: argparse.Namespace) -> int:
+    from foldcrumbs import store
+    if store.set_status(args.name, "active"):
+        print(f"restored {args.name}.")
+        return 0
+    print(f"nothing to restore for {args.name} "
+          "(unknown file, or it is already active).")
+    return 1
 
 
 def _cmd_prune(args: argparse.Namespace) -> int:
@@ -583,6 +690,49 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--include-stale", action="store_true",
                     help="also prune low-trust memories")
     pr.set_defaults(func=_cmd_prune)
+
+    dc = sub.add_parser("decay", help="archive memories whose trust has decayed "
+                                     "(dry-run by default)")
+    dc.add_argument("--apply", action="store_true",
+                    help="actually archive (default: dry-run)")
+    dc.set_defaults(func=_cmd_decay)
+
+    rs = sub.add_parser("restore", help="bring an archived memory back")
+    rs.add_argument("name", help="filename of the archived memory")
+    rs.set_defaults(func=_cmd_restore)
+
+    pf = sub.add_parser("profile", help="named memory profiles (one per agent "
+                                       "or node)")
+    pf_sub = pf.add_subparsers(dest="action")
+    pf_sub.add_parser("list", help="show every profile (default)")
+    pf_add = pf_sub.add_parser("add", help="register a profile")
+    pf_add.add_argument("name", help="what to call it")
+    pf_add.add_argument("--kind", choices=[profiles.DEDICATED,
+                                           profiles.SHARED],
+                        default=profiles.DEDICATED,
+                        help="'dedicated' keeps one memory dir for every "
+                             "project; 'shared' keeps memory per project "
+                             "under a config dir")
+    pf_add.add_argument("--path", help="where its memory lives (required for "
+                                       "a shared profile)")
+    pf_imp = pf_sub.add_parser("import", help="give each profile of a "
+                                              "multi-agent runtime a memory "
+                                              "of its own (dry-run by default)")
+    pf_imp.add_argument("--agent", default="hermes",
+                        choices=sorted(profiles.AGENT_HOMES),
+                        help="which runtime's profiles to read")
+    pf_imp.add_argument("--prefix", help="prepend this to every name")
+    pf_imp.add_argument("--apply", action="store_true",
+                        help="actually register (default: dry-run)")
+    pf_imp.set_defaults(func=_cmd_profile)
+
+    pf_env = pf_sub.add_parser("env", help="print the environment line that "
+                                          "makes a process use it")
+    pf_env.add_argument("name")
+    pf_rm = pf_sub.add_parser("remove", help="unregister a profile; its "
+                                            "memories are untouched")
+    pf_rm.add_argument("name")
+    pf.set_defaults(func=_cmd_profile)
 
     ins = sub.add_parser("install", help="wire foldcrumbs into a coding agent")
     ins.add_argument("--agent", choices=["claude", "codex", "opencode"], default="claude")

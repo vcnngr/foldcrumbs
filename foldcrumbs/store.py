@@ -19,6 +19,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from . import config
+from . import recalls
 from .schema import MemoryRecord
 
 # Index render order: hard rules first, soft context last (mirrors profile.py).
@@ -138,6 +139,17 @@ def _reap_locked() -> None:
     for rid in [r for r, t in _root_busy.items() if not t.is_alive()]:
         del _root_busy[rid]
 
+# Two matches count as equally relevant when their scores agree to this many
+# decimals. Below that the difference comes from a fuzzy ratio, not from one
+# answering the question better than the other.
+_RANK_PRECISION = 2
+
+# How the two secondary signals share the tiebreak. Freshness leads because it
+# applies to every memory from the moment it is written, while a recall count
+# starts at zero and says nothing until the memory has been needed a few times.
+_FRESHNESS_SHARE = 0.6
+_REINFORCEMENT_SHARE = 0.4
+
 _DEDUP_THRESHOLD = 0.85  # title+content similarity above which two memories match
 
 
@@ -213,26 +225,63 @@ def iter_memories(cwd: str | os.PathLike[str] | None = None) -> Iterator[MemoryR
 
 
 def iter_memories_in(
-    directory: Path, max_files: int | None = None
+    directory: Path, max_files: int | None = None, report: dict | None = None
 ) -> Iterator[MemoryRecord]:
-    """Yield every memory in an arbitrary store directory.
+    """Yield every memory in a store directory, one file at a time.
 
-    ``max_files`` bounds how many files are *read*, not how many records come
-    out: unreadable and malformed ones cost a read too, so counting only what
-    survives parsing bounds nothing. Names are listed up front (cheap); the
-    reads are what this limits.
+    Lazy on purpose. The federated scan runs this on a thread it stops waiting
+    for and keeps whatever arrived before the deadline, so a slow store still
+    contributes what it managed to read. Building the list first would turn
+    every timeout into an empty result.
+
+    Unreadable and malformed files are skipped: one corrupt file must not
+    blind the rest of the store. That means a short result is not evidence of
+    a short store, so a caller deciding by *absence* can pass ``report`` and
+    read ``report["complete"]`` afterwards. It starts False and becomes True
+    only on reaching the end, which makes an abandoned scan incomplete by
+    construction — exactly what a timed-out reader should conclude.
+
+    A malformed file does not make a scan incomplete: it was read, and it
+    holds no memory. An unreadable one does. So does truncation by
+    ``max_files``, which bounds how many files are *read*, not how many
+    records come out — unreadable and malformed ones cost a read too, so
+    counting only what survives parsing bounds nothing.
     """
+    if report is not None:
+        report["complete"] = False
     d = Path(directory)
-    if not d.exists():
+    try:
+        if not d.is_dir():
+            return
+        names = sorted(d.glob("*.md"))
+    except OSError:
         return
-    names = sorted(d.glob("*.md"))
+    truncated = max_files is not None and len(names) > max_files
     if max_files is not None:
         names = names[:max_files]
+    readable = True
     for path in names:
         if is_store_artifact(path.name):
             continue
         try:
-            rec = MemoryRecord.from_markdown(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            readable = False
+            continue
+        except ValueError:
+            # Bytes arrived, they just are not text (UnicodeDecodeError is a
+            # ValueError, not an OSError — splitting read from parse let it
+            # escape and abort the whole scan, so one junk file in the
+            # directory blinded recall entirely).
+            #
+            # Counted as read, not as unreadable: the store only ever writes
+            # UTF-8, so this is something else's file. Calling it unreadable
+            # would switch off reconciliation for good — stale counts, and the
+            # weights they leave for the next memory to reuse a filename —
+            # which is worse than losing the count of one corrupt file.
+            continue
+        try:
+            rec = MemoryRecord.from_markdown(text)
         except Exception:
             continue
         # Remember where it actually lives so the index links to the real file,
@@ -240,6 +289,17 @@ def iter_memories_in(
         # or after a title edit).
         rec.source_path = path.name
         yield rec
+    if report is not None:
+        report["complete"] = readable and not truncated
+
+
+def scan_store(
+    directory: Path, max_files: int | None = None
+) -> tuple[list[MemoryRecord], bool]:
+    """``iter_memories_in`` read to the end, with its completeness."""
+    report: dict = {}
+    records = list(iter_memories_in(directory, max_files, report))
+    return records, bool(report.get("complete"))
 
 
 def _gate_key(ref) -> tuple:
@@ -647,8 +707,59 @@ def forget(
         # the title (imported files can live under non-canonical names).
         _write_text(target, rec.to_markdown())
         action = "deleted"
+    # The count goes with the memory, whether the file stayed or not. A
+    # soft-deleted memory can be recalled again only by being restored, and
+    # until then its count is just weight on a name nothing serves.
+    recalls.forget(rec.id, cwd)
     rebuild_index(cwd)
     return action
+
+
+def set_status(
+    name: str, status: str, cwd: str | os.PathLike[str] | None = None,
+    rebuild: bool = True,
+) -> bool:
+    """Move a memory between ``active`` and ``archived``. Rebuilds the index.
+
+    Archiving is not deleting. The file keeps every word it had — this only
+    stops it competing for attention: it leaves the index, recall, and this
+    project's published shard, so other instances stop being shown it too. The
+    memory can be brought back with the same call, which is the point:
+    something that decayed out of relevance is not the same as something that
+    was wrong, and only the second deserves to be unrecoverable.
+    """
+    if status not in ("active", "archived"):
+        raise ValueError(f"not a status this moves between: {status}")
+    rec = get(name, cwd)
+    if rec is None:
+        return False
+    target = _resolve_in_store(name, cwd)
+    if target is None:
+        return False
+    _refuse_if_foreign(rec, "archive")
+    # Only between these two, and only in the direction asked for. Restoring
+    # is the inverse of archiving, not a general revival: a memory that was
+    # superseded or deleted did not decay out of relevance — something
+    # replaced it, or someone removed it — and bringing those back here would
+    # undo a decision this call knows nothing about. Undoing *those* is what
+    # supersede and forget are for.
+    allowed = "archived" if status == "active" else "active"
+    if rec.status != allowed:
+        return False
+    rec.status = status
+    rec.updated_at = datetime.now(timezone.utc)
+    _write_text(target, rec.to_markdown())
+    if status != "active":
+        # Its recall history goes with it: while archived it answers nothing,
+        # and the count would otherwise sit there weighting a memory that is
+        # not in the running. Coming back, it starts earning again.
+        recalls.forget(rec.id, cwd)
+    # ``rebuild`` lets a caller moving several memories at once pay for the
+    # index once instead of once per memory — a sweep over a large store would
+    # otherwise rewrite it as many times as it archived.
+    if rebuild:
+        rebuild_index(cwd)
+    return True
 
 
 def supersede(
@@ -665,6 +776,7 @@ def supersede(
         return False
     old.mark_superseded(new.id)
     _write_text(config.memory_dir(cwd) / old_name, old.to_markdown())
+    recalls.forget(old.id, cwd)
     rebuild_index(cwd)
     return True
 
@@ -704,6 +816,7 @@ def mark_superseded_on_disk(
     _ensure_dir(cwd)
     old.mark_superseded(new_id)
     _write_text(target, old.to_markdown())
+    recalls.forget(old.id, cwd)
     return target
 
 
@@ -772,7 +885,11 @@ def search(
     # Read once and reused for the claims below. Scoring consumes the whole
     # local store anyway, so holding it costs nothing — while leaving it lazy
     # meant the federated pass parsed every local file a second time.
-    local = list(iter_memories(cwd))
+    local, complete = _read_local(cwd)
+    # Foreign filenames are absent by construction: the sidecar is this
+    # store's own observation of what it needed, and another instance's store
+    # is never ours to write.
+    recalled = recalls.counts(cwd)
     candidates: Iterator[MemoryRecord] = iter(local)
     if federated:
         candidates = itertools.chain(candidates, iter_federated(cwd, local=local))
@@ -794,13 +911,89 @@ def search(
         else:
             score = SequenceMatcher(None, q, hay).ratio()
         if score >= 0.22:
-            scored.append((score, m))
-    # Ties broken by locality then filename: a local memory outranks an
-    # identical foreign one (it is the one this instance can act on), and the
-    # rest is deterministic rather than dependent on directory order.
-    scored.sort(key=lambda t: (-t[0], t[1].is_foreign,
-                               t[1].source_path or t[1].filename()))
-    return [m for _, m in scored[:limit]]
+            scored.append((score, _tiebreak(m, recalled), m))
+    # Relevance decides the order; recency and use only separate memories
+    # that matched *equally well*. Folding either into the score itself let a
+    # near match times its bonus overtake an exact one — 0.9613 x 1.1 beats
+    # 1.0 — so they are a later key, never part of the number compared.
+    # Comparable means equal to two decimals: finer than that is noise from a
+    # fuzzy ratio, not a real difference in how well something matched.
+    # Ties then break by locality (a local memory is the one this instance can
+    # act on) and finally by filename, so the result never depends on
+    # directory order.
+    scored.sort(key=lambda t: (-round(t[0], _RANK_PRECISION), -t[1],
+                               t[2].is_foreign,
+                               t[2].source_path or t[2].filename()))
+    top = [m for _, _, m in scored[:limit]]
+    # None unless the listing is *complete*. A partial one — a directory that
+    # exists but a file that would not open — names fewer memories than the
+    # store holds, and reconciling against it would erase the counts of every
+    # memory that happened to be unreadable at that moment.
+    recalls.reinforce(_reinforceable(scored, top, limit), cwd,
+                      known=_active_names(local) if complete else None)
+    return top
+
+
+def _tiebreak(rec: MemoryRecord, recalled: dict[str, int]) -> float:
+    """How to order two memories the query matched equally well.
+
+    Neither signal answers the question better than the other did — that was
+    already decided. These say which of two equal answers to put first: the
+    more recent one, and the one that has actually been needed. Both are
+    confined to the tiebreak on purpose, so no amount of either can promote a
+    worse match.
+    """
+    reinforcement = recalls.strength(
+        0 if not _countable(rec) else recalled.get(rec.id, 0))
+    return (_FRESHNESS_SHARE * recalls.freshness(rec)
+            + _REINFORCEMENT_SHARE * reinforcement)
+
+
+def _reinforceable(scored: list, top: list[MemoryRecord], limit: int) -> list[str]:
+    """Which local memories this recall should count as used.
+
+    What was returned — and anything that matched *just as well* but fell the
+    wrong side of the limit. Without that second part the cut through a group
+    of equally-relevant memories is decided by filename, and only the winner is
+    ever reinforced: an arbitrary tiebreak would compound into a permanent lead
+    that reflects nothing but having been first alphabetically.
+    """
+    names = [m.id for m in top if _countable(m)]
+    if limit <= 0:
+        return []       # nothing was returned, so nothing was used
+    if len(scored) <= limit:
+        return names
+    cutoff = round(scored[limit - 1][0], _RANK_PRECISION)
+    for score, _, m in scored[limit:]:
+        if round(score, _RANK_PRECISION) != cutoff:
+            break              # sorted, so nothing later can tie either
+        if _countable(m):
+            names.append(m.id)
+    return names
+
+
+def _read_local(
+    cwd: str | os.PathLike[str] | None,
+) -> tuple[list[MemoryRecord], bool]:
+    """This store's memories, and whether that list is the whole store."""
+    return scan_store(config.memory_dir(cwd))
+
+
+def _countable(rec: MemoryRecord) -> bool:
+    """Whether a recall of this record can be counted at all.
+
+    Not a foreign one: reinforcing is a write, and another instance's store is
+    never ours to write. And not one whose id was minted on load — a memory
+    saved before ids were serialized gets a different uuid every time it is
+    read, so a count would be filed under a key that never comes back. It
+    would never accumulate, and each recall would add one entry and reconcile
+    away the last, churning a file that may well be synced between machines.
+    """
+    return not rec.is_foreign and not rec.id_missing
+
+
+def _active_names(local: list[MemoryRecord]) -> set[str]:
+    return {m.id for m in local if m.status == "active" and _countable(m)}
 
 
 def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
