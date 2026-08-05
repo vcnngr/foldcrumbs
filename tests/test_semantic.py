@@ -315,7 +315,7 @@ class TestSemanticRecall(TmpStore):
         self.assertEqual(store.search(q, federated=False), [])
 
     def test_a_perfect_lexical_match_outranks_a_higher_semantic_rival(self):
-        exact = self._put("Rollback", "rollback is one command: make undo")
+        self._put("Rollback", "rollback is one command: make undo")
         self._put("Undo flow", "entirely different wording, shares nothing")
         q = "rollback is one command"
 
