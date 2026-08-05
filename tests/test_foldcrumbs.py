@@ -697,7 +697,8 @@ class TestDecay(TmpStore):
         from datetime import datetime, timedelta, timezone
         rec = MemoryRecord(title=title, content=body, type="preference",
                            confidence=0.3, provenance="inferred")
-        rec.created_at = datetime.now(timezone.utc) - timedelta(days=120)
+        old = datetime.now(timezone.utc) - timedelta(days=120)
+        rec.created_at = rec.updated_at = old       # untouched since, too
         store.write_memory(rec)
         self.assertLess(store.get(rec.filename()).compute_confidence(),
                         0.3, "the fixture is no longer stale on reload")
@@ -784,6 +785,53 @@ class TestDecay(TmpStore):
         self.assertFalse(store.set_status(old.filename(), "archived"),
                          "a superseded memory was archived over")
         self.assertEqual(store.get(old.filename()).status, "superseded")
+
+    def test_a_freshly_written_memory_is_given_its_turn(self):
+        # Distillation writes `inferred` records at modest confidence, so a
+        # brand-new memory can already sit below the threshold. Archiving it
+        # on the next run means it never got used because it was never
+        # offered — decay is about having had a chance, not about the number.
+        from foldcrumbs import audit
+        new = MemoryRecord(title="Fresh guess", content="Probably prefers this.",
+                           type="preference", confidence=0.3,
+                           provenance="inferred")
+        store.write_memory(new)
+        self.assertLess(store.get(new.filename()).compute_confidence(),
+                        audit.STALE_CONF, "the fixture is no longer low-trust")
+        res = audit.decay(apply=True)
+        self.assertNotIn(new.filename(), res["candidates"],
+                         "a memory was archived before it had been offered")
+        self.assertEqual(store.get(new.filename()).status, "active")
+
+    def test_validating_a_memory_gives_it_its_grace_back(self):
+        # `validate` moves updated_at, so a memory just confirmed by use
+        # starts its chance again rather than being archived next run.
+        from foldcrumbs import audit
+        stale = self._stale("Old rule", "Nobody follows this any more.")
+        self.assertIn(stale.filename(), audit.decay()["candidates"])
+        rec = store.get(stale.filename())
+        rec.validate()
+        store.write_memory(rec)
+        self.assertNotIn(stale.filename(), audit.decay()["candidates"],
+                         "a re-validated memory was archived anyway")
+
+    def test_a_memory_with_no_usable_date_keeps_its_place(self):
+        # An unknown date is not evidence of age, and this step removes it
+        # from recall — the one place it could earn its way back.
+        from foldcrumbs import audit
+        undated = Path(self.dir) / "preference_undated.md"
+        # Partial front matter: a recorded updated_at, no created_at. Without
+        # the guard the old timestamp alone would age it out.
+        undated.write_text(
+            "---\nname: Undated\ndescription: hook\ntype: preference\n"
+            "confidence: 0.3\nprovenance: inferred\n"
+            "updated_at: 2020-01-01T00:00:00+00:00\n---\n\n"
+            "Written before dates were serialized.\n", encoding="utf-8")
+        rec = [m for m in store.load_all() if m.title == "Undated"][0]
+        self.assertTrue(rec.created_at_missing)
+        self.assertLess(rec.compute_confidence(), audit.STALE_CONF)
+        self.assertEqual(audit.decay()["candidates"], {},
+                         "a memory was archived on an age nobody knows")
 
     def test_a_trusted_memory_is_never_archived(self):
         from foldcrumbs import audit

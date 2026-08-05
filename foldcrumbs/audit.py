@@ -93,6 +93,39 @@ def prune_artifacts(cwd=None) -> list[str]:
     return removed
 
 
+# A memory has to be given a chance before it can be judged for having had
+# one. Distillation writes `inferred` records at modest confidence, so a
+# freshly written memory can already sit below the threshold — archiving it on
+# the next run would mean it never got used because it was never offered.
+DECAY_GRACE_DAYS = 30
+
+
+def _has_decayed(m) -> bool:
+    """Whether a memory has both fallen below the threshold and had its turn.
+
+    Trust is only half the question. The other half is time: something written
+    or re-validated recently has not decayed, it simply has not proved itself
+    yet — and ``validate`` moves ``updated_at``, so a memory that was just
+    confirmed gets its grace back.
+
+    A memory with no usable date keeps its place. An unknown date is not
+    evidence of age, and this step deletes nothing that can be re-earned only
+    by being recalled — which cannot happen once it is out of recall.
+    """
+    if m.compute_confidence() >= STALE_CONF:
+        return False
+    from datetime import datetime, timezone
+
+    touched = getattr(m, "updated_at", None) or getattr(m, "created_at", None)
+    if touched is None or getattr(m, "created_at_missing", False):
+        return False
+    try:
+        age = (datetime.now(timezone.utc) - touched).days
+    except TypeError:
+        return False
+    return age >= DECAY_GRACE_DAYS
+
+
 def decay(cwd=None, apply: bool = False) -> dict:
     """Archive active memories whose trust has decayed below the threshold.
 
@@ -112,7 +145,7 @@ def decay(cwd=None, apply: bool = False) -> dict:
     candidates = {
         _name(m): round(m.compute_confidence(), 2)
         for m in store.iter_memories(cwd)
-        if m.status == "active" and m.compute_confidence() < STALE_CONF
+        if m.status == "active" and _has_decayed(m)
     }
     archived: list[str] = []
     if apply:
