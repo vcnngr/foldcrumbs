@@ -93,7 +93,12 @@ def _parse_dt(value: str | None) -> datetime:
     return _parse_dt_opt(value) or _now()
 
 
-_CLAIM_RE = re.compile(r"^[0-9a-f]{16}:[^/\\]+\.md$")
+# Claims share one comma-separated frontmatter line, so the filename half
+# cannot contain a comma — nor a line break, which POSIX allows in a filename
+# and which would split the field across lines. Either way the claim would be
+# read back as fragments matching nothing and the supersession would vanish.
+# Excluded here so such a claim is never written in the first place.
+_CLAIM_RE = re.compile(r"^[0-9a-f]{16}:[^/\\,\r\n]+\.md$")
 
 
 def _clean_claim(raw: str) -> str | None:
@@ -175,6 +180,16 @@ class MemoryRecord:
     # easily share one ("~/a/.claude" and "~/b/.claude" are both "claude"),
     # which would attribute the claim to whichever was rendered.
     supersedes_external: list[str] = field(default_factory=list)
+
+    # Appended, never inserted. Every field above shipped in 0.6.0 in this
+    # order, and a caller may pass them positionally; slipping a new one in
+    # between would bind their arguments to the wrong fields — silently, since
+    # the types happen to be compatible. New fields go at the end, always.
+    #
+    # Title of the local memory that declares this foreign one obsolete, when
+    # one does. Set on load, never serialized: the claim lives on our record,
+    # this is only how it reaches the reader of theirs.
+    contested_by: str | None = field(default=None, compare=False)
 
     @property
     def is_foreign(self) -> bool:

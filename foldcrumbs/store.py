@@ -7,8 +7,11 @@ loading, dedup and index regeneration. Pure stdlib (difflib for fuzzy match).
 
 from __future__ import annotations
 
+import copy
 import itertools
 import os
+import threading
+import time
 import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -68,6 +71,72 @@ _TYPE_LABEL = {
 # must stay responsive: an unbounded scan across four roots is a hang waiting
 # for a large store or a slow mount.
 _MAX_FEDERATED_SCAN = 500
+
+# Wall-clock ceiling per foreign root. The reachability probe only stats the
+# root; the directory listing and the reads after it can block just as long.
+_FEDERATED_SCAN_TIMEOUT = 2.0
+
+# The scan thread for a root that timed out is still blocked in the kernel on
+# that mount; it cannot be killed. Starting another one on the next recall
+# would stack a thread per call for as long as the mount stays hung — an
+# afternoon of recalls in a long-lived MCP server adds up. Keep the one
+# outstanding worker per root instead, and let a root back in only once its
+# previous scan has actually finished, which is also how it recovers.
+# Keyed on root *and* project: the records a scan collects belong to one
+# memory directory, and the contested-by marking to one store's claims. Keying
+# on the root alone let a recall for a different project join that scan and be
+# handed another project's memories outright.
+_pending_scans: dict[tuple[str, str], dict] = {}
+# The dict is read and written from whatever thread calls recall — an MCP
+# server can serve two at once — and "look, then start a worker" is a
+# check-then-act like any other.
+_pending_lock = threading.Lock()
+
+# Stuck-ness belongs to the *root*, not to one project's scan of it. The slot
+# above is per project so results are never crossed; without this, a hung
+# mount would still get a fresh unkillable thread for every project a
+# long-lived process touches.
+# A *list* per root: two projects can time out on the same hung mount at once,
+# and a single slot would let the second overwrite the first — forgetting a
+# thread still blocked in the kernel, and reopening the gate as soon as the
+# one we remembered happened to die.
+# Keyed on the root's *location*, not its id. Ids deliberately survive a move,
+# so an id-only gate kept skipping a root that had been relocated to a healthy
+# path while the old path's worker stayed blocked — the root stayed invisible
+# until the process restarted. The location still covers every project, which
+# is what keeps one hung mount to a single thread.
+# The mode belongs in the key for the same reason: switching a root between
+# `config` and `explicit` leaves its id *and* its path untouched while moving
+# its memory somewhere else entirely, so the old layout's blocked worker went
+# on gating a layout it had never read.
+_stuck_roots: dict[tuple[str, str, str], list[threading.Thread]] = {}
+
+# The root a scan is *currently* running against, whatever project asked for
+# it. The stuck list only fills once someone's timeout expires, so without
+# this every concurrent recall for a different project would start its own
+# worker against the same hung mount before anyone noticed.
+_root_busy: dict[tuple[str, str, str], threading.Thread] = {}
+
+
+def _reap_locked() -> None:
+    """Drop finished scans from every slot, not only the one being asked for.
+
+    A scan that timed out and later completed leaves its results — up to
+    ``_MAX_FEDERATED_SCAN`` records — and a dead thread behind. Reaping just
+    the requested slot means a long-lived process keeps one such entry for
+    every project it ever timed out on. Callers already holding a reference to
+    a reaped entry keep working from it; only the map forgets.
+
+    The caller must hold ``_pending_lock``.
+    """
+    for key in [k for k, v in _pending_scans.items()
+                if not v["thread"].is_alive()]:
+        del _pending_scans[key]
+    for rid in [r for r, ts in _stuck_roots.items()
+                if not any(t.is_alive() for t in ts)]:
+        del _stuck_roots[rid]
+    for rid in [r for r, t in _root_busy.items() if not t.is_alive()]:
+        del _root_busy[rid]
 
 _DEDUP_THRESHOLD = 0.85  # title+content similarity above which two memories match
 
@@ -173,7 +242,19 @@ def iter_memories_in(
         yield rec
 
 
-def iter_federated(cwd: str | os.PathLike[str] | None = None) -> Iterator[MemoryRecord]:
+def _gate_key(ref) -> tuple:
+    """The key both `_stuck_roots` and `_root_busy` gate a root on.
+
+    Per location *and* layout: a move or a mode change gets a fresh gate,
+    while every project of a config root keeps sharing one. Built here rather
+    than spelled out at each use so a test cannot seed a shape the code has
+    stopped reading — which is how a gate test starts passing for free.
+    """
+    return (ref.id, str(ref.path), ref.mode)
+
+
+def iter_federated(cwd: str | os.PathLike[str] | None = None,
+                   local: list[MemoryRecord] | None = None) -> Iterator[MemoryRecord]:
     """Yield active memories from every *other* registered instance.
 
     Reads the foreign stores themselves rather than their index shards: the
@@ -181,34 +262,177 @@ def iter_federated(cwd: str | os.PathLike[str] | None = None) -> Iterator[Memory
     record comes back tagged with its origin, which marks it read-only and
     lets callers say whose memory it is.
 
-    Unreachable roots are skipped rather than waited on — this runs inside
-    ``recall``, and one unplugged drive must not hang it.
+    Every root's scan is time-bounded, not merely its reachability probe. The
+    probe only stats the root: a project directory or a single file on the
+    same mount can still stop responding afterwards, and the ``glob`` and
+    ``read_text`` that follow would then block recall indefinitely. Each root
+    is scanned on a throwaway thread we stop waiting for, so a slow store
+    costs this recall its contribution and nothing more.
     """
     from foldcrumbs import federation, index_shard
 
+    # Claims this store makes about other instances' memories. Resolved here
+    # as well as in the injected block: a recall that ignores them can hand
+    # back the very decision this store has already declared obsolete.
+    claims = index_shard._external_supersessions(cwd, records=local)
+    # The project, not just the directory. An ``explicit`` root serves every
+    # cwd from one fixed path, so two projects share a memory dir — but not
+    # their claims, and it is the claims that decide which records come back
+    # marked obsolete. Keying on the directory alone let one project's
+    # supersessions hide records from another's recall.
+    project = index_shard.project_key(cwd)
+    # Once, at entry, before any root can be skipped. Reaping inside the loop
+    # never reached entries whose root had since become unavailable — those
+    # `continue` earlier — or been unregistered, which drops it from the loop
+    # entirely. Their dead threads and up to _MAX_FEDERATED_SCAN records each
+    # then stayed for the life of the process.
+    with _pending_lock:
+        _reap_locked()
     for ref in federation.iter_roots():
         if ref.is_current():
             continue
         if ref.available_within(index_shard._AVAILABILITY_TIMEOUT) is not True:
             continue
         d = ref.memory_dir(cwd)
-        try:
-            total = sum(1 for _ in d.glob("*.md")) if d.is_dir() else 0
-            if total > _MAX_FEDERATED_SCAN:
+        slot = (ref.id, str(d), project)
+        gate = _gate_key(ref)
+
+        def scan(collected, d=d, ref=ref) -> None:
+            try:
+                # Say what was left out. A capped scan that stays quiet is
+                # indistinguishable from a store with no matches, which is the
+                # same silent-truncation trap the rendered block avoids.
+                # Counted inside the worker, so a hung mount cannot make even
+                # this cost more than the scan's own deadline.
+                total = sum(1 for _ in d.glob("*.md")) if d.is_dir() else 0
+                if total > _MAX_FEDERATED_SCAN:
+                    config.log_event(
+                        f"federation: reading only {_MAX_FEDERATED_SCAN} of "
+                        f"{total} files in {ref.label}")
+                for rec in iter_memories_in(d, max_files=_MAX_FEDERATED_SCAN):
+                    if rec.status != "active":
+                        continue
+                    name = rec.source_path or rec.filename()
+                    rec.origin_root = ref.label
+                    rec.origin_root_id = ref.id
+                    rec.origin_path = str(d / name)
+                    # Deliberately not contested_by: these records are shared
+                    # with whoever joins this scan, and each caller has its own
+                    # claims. Baking in the starter's meant a caller that
+                    # recorded a supersession *while* the scan ran got the old
+                    # marking back and could be handed the memory it had just
+                    # declared obsolete.
+                    with _pending_lock:
+                        collected.append(rec)
+            except OSError:
                 config.log_event(
-                    f"federation: reading only {_MAX_FEDERATED_SCAN} of "
-                    f"{total} files in {ref.label}"
-                )
-            for rec in iter_memories_in(d, max_files=_MAX_FEDERATED_SCAN):
-                if rec.status != "active":
-                    continue
-                rec.origin_root = ref.label
-                rec.origin_root_id = ref.id
-                rec.origin_path = str(d / (rec.source_path or rec.filename()))
-                yield rec
-        except OSError:
-            config.log_event(f"federation: recall skipped {ref.label} (unreadable)")
+                    f"federation: recall skipped {ref.label} (unreadable)")
+
+        # Claim the slot and start the worker as one step: two concurrent
+        # recalls checking first and starting after would each see no live
+        # worker and start their own, which is the leak this prevents.
+        #
+        # A scan already in flight is *joined*, not skipped. Only one that has
+        # already outlived its deadline is abandoned — treating every live
+        # scan as stuck made a second concurrent recall silently return
+        # nothing from a root whose scan was perfectly healthy.
+        deadline = time.monotonic() + _FEDERATED_SCAN_TIMEOUT
+        inflight = None
+        while True:
+            with _pending_lock:
+                blocked = [t for t in _stuck_roots.get(gate, []) if t.is_alive()]
+                if blocked:
+                    _stuck_roots[gate] = blocked   # drop the ones that ended
+                    config.log_event(
+                        f"federation: skipping {ref.label}, {len(blocked)} "
+                        "scan(s) of it are still blocked")
+                    break
+                _stuck_roots.pop(gate, None)
+                inflight = _pending_scans.get(slot)
+                if inflight is not None and not inflight["thread"].is_alive():
+                    _pending_scans.pop(slot, None)
+                    inflight = None
+                if inflight is not None and inflight["timed_out"]:
+                    config.log_event(
+                        f"federation: skipping {ref.label}, its previous scan "
+                        "is still blocked")
+                    inflight = None
+                    break
+                if inflight is not None:
+                    break                            # ours; join it below
+                busy = _root_busy.get(gate)
+                if busy is None or not busy.is_alive():
+                    collected = []
+                    inflight = {
+                        "thread": threading.Thread(
+                            target=scan, kwargs={"collected": collected},
+                            daemon=True),
+                        "results": collected,
+                        "timed_out": False,
+                    }
+                    _pending_scans[slot] = inflight
+                    _root_busy[gate] = inflight["thread"]
+                    inflight["thread"].start()
+                    break
+            # Another *project* is scanning this root. Its results are not ours
+            # to use — different project, different claims — so wait for it
+            # rather than either add a second thread to a possibly hung mount
+            # or drop the root from this recall's answer. Bounded: past the
+            # deadline the root is left out, and the log says so.
+            busy.join(max(0.0, deadline - time.monotonic()))
+            if time.monotonic() >= deadline:
+                config.log_event(
+                    f"federation: {ref.label} was busy with another project's "
+                    "scan for too long; leaving it out of this recall")
+                inflight = None
+                break
+        if inflight is None:
             continue
+        worker = inflight["thread"]
+        # The remaining budget, not a fresh one. Waiting for the root and then
+        # scanning it are both part of what this root is allowed to cost; two
+        # full timeouts would make a single root take twice the ceiling the
+        # constant states, and four roots eight times.
+        worker.join(max(0.0, deadline - time.monotonic()))
+        if worker.is_alive():
+            # Partial results are honest — the block and the log both say a
+            # root was cut short — and a hung mount stops being able to hold
+            # up a recall that has other stores to answer from. Remember the
+            # thread so the next recall does not start a second one.
+            with _pending_lock:
+                inflight["timed_out"] = True
+                # Once per thread. Several callers can share one scan and
+                # all reach the deadline together; appending blindly makes one
+                # blocked thread look like many, both in the list and in what
+                # the log reports.
+                recorded = _stuck_roots.setdefault(gate, [])
+                if worker not in recorded:
+                    recorded.append(worker)
+                if _root_busy.get(gate) is worker:
+                    del _root_busy[gate]   # the stuck list owns it now
+            config.log_event(
+                f"federation: {ref.label} did not finish scanning in "
+                f"{_FEDERATED_SCAN_TIMEOUT}s; using what it returned")
+        else:
+            with _pending_lock:
+                if _pending_scans.get(slot) is inflight:
+                    del _pending_scans[slot]
+                if _root_busy.get(gate) is worker:
+                    del _root_busy[gate]
+        # Copy under the lock, yield outside it. A ``yield`` inside the ``with``
+        # suspends the generator while still holding the lock: the scan thread
+        # blocks on its next append for as long as the caller takes to consume,
+        # and a caller that abandons the generator early never releases it.
+        with _pending_lock:
+            snapshot = list(inflight["results"])
+        # Each caller applies its own claims, to its own copy: the records
+        # belong to every joiner at once, so setting the field on the shared
+        # object would race the next caller as surely as sharing the marking.
+        for rec in snapshot:
+            mine = copy.copy(rec)
+            mine.contested_by = claims.get(
+                f"{ref.id}:{rec.source_path or rec.filename()}")
+            yield mine
 
 
 def load_all(cwd: str | os.PathLike[str] | None = None) -> list[MemoryRecord]:
@@ -516,6 +740,7 @@ def search(
     types: list[str] | None = None,
     tags: list[str] | None = None,
     federated: bool = True,
+    include_contested: bool = False,
 ) -> list[MemoryRecord]:
     """Grep-like search over active memories: substring + word-overlap + fuzzy.
 
@@ -530,6 +755,10 @@ def search(
     this function over MCP, so without it federation would be invisible there.
     Callers that act on a result — forgetting, superseding — must pass False,
     since only the owning instance may write its own store.
+
+    A foreign memory this store has declared obsolete is left out unless
+    ``include_contested``: recall feeds answers, and returning a record whose
+    replacement is already recorded here is worse than returning nothing.
     """
     import re
 
@@ -540,11 +769,17 @@ def search(
     want_types = {t.lower() for t in types} if types else None
     want_tags = {t.lower() for t in tags} if tags else None
     scored: list[tuple[float, MemoryRecord]] = []
-    candidates = iter_memories(cwd)
+    # Read once and reused for the claims below. Scoring consumes the whole
+    # local store anyway, so holding it costs nothing — while leaving it lazy
+    # meant the federated pass parsed every local file a second time.
+    local = list(iter_memories(cwd))
+    candidates: Iterator[MemoryRecord] = iter(local)
     if federated:
-        candidates = itertools.chain(candidates, iter_federated(cwd))
+        candidates = itertools.chain(candidates, iter_federated(cwd, local=local))
     for m in candidates:
         if m.status != "active":
+            continue
+        if m.contested_by and not include_contested:
             continue
         if want_types and m.type not in want_types:
             continue

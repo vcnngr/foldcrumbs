@@ -33,6 +33,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -57,6 +58,11 @@ _ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
 VALID_MODES = ("config", "explicit")
 
+# What ``file_lock`` yields when the filesystem refuses locks outright but the
+# caller opted into proceeding. Truthy, so "did I get in" still reads the same;
+# distinguishable, so operations that genuinely need exclusion can decline.
+DEGRADED = "degraded"
+
 
 class FederationConflict(ValueError):
     """A registration that would silently reinterpret an existing root."""
@@ -65,6 +71,54 @@ class FederationConflict(ValueError):
 def roots_dir() -> Path:
     """Registry directory: one JSON shard per registered root."""
     return config.STATE_DIR / "roots"
+
+
+_ABSENT = object()      # the path is not there
+_UNKNOWN = object()     # the filesystem would not say
+
+
+def _identity(path: str):
+    """``(device, inode)`` for a path, or ``_ABSENT`` / ``_UNKNOWN``.
+
+    Identity comes from the filesystem rather than from a resolved name:
+    ``realpath`` follows symlinks but leaves a bind mount's two names distinct,
+    so one directory reached under each still compared as different.
+
+    Absent and unknown are kept apart on purpose. A path that is *gone* is
+    evidence; a path the filesystem declined to describe — unreadable, on a
+    stalled mount — is not, and collapsing the two would make a slow disk look
+    like a deletion.
+    """
+    def probe():
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            return _ABSENT
+        except OSError:
+            return _UNKNOWN
+        return (st.st_dev, st.st_ino)
+
+    got = _bounded(probe, _REGISTRY_PROBE_TIMEOUT)
+    return _UNKNOWN if got is None else got
+
+
+def _same_path(a, b) -> bool | None:
+    """Whether two paths name one directory. None when it cannot be told.
+
+    Text first, then filesystem identity, so a directory reached through a
+    symlink or an alternate spelling is recognised as itself. Two paths that
+    are both missing are unknown, not equal: nothing was compared.
+    """
+    if str(a) == str(b):
+        return True
+    ia, ib = _identity(str(a)), _identity(str(b))
+    if ia is _UNKNOWN or ib is _UNKNOWN:
+        return None
+    if ia is _ABSENT and ib is _ABSENT:
+        return None
+    if ia is _ABSENT or ib is _ABSENT:
+        return False
+    return ia == ib
 
 
 def _now_iso() -> str:
@@ -175,7 +229,7 @@ def _mkdir_lock(lockdir: Path):
 
 
 @contextlib.contextmanager
-def file_lock(lock_path: Path):
+def file_lock(lock_path: Path, allow_unsupported: bool = False):
     """Exclusive lock on one path, bounded in time. Yields True while held.
 
     Scoped deliberately: callers pass the narrowest path that covers what
@@ -213,6 +267,19 @@ def file_lock(lock_path: Path):
                 # cannot change.
                 if exc.errno not in _CONTENDED_ERRNOS:
                     fh.close()
+                    if allow_unsupported:
+                        # The filesystem refuses locks outright — some network
+                        # and FUSE mounts do — but still honours the atomic
+                        # link the marker is published with. Refusing here
+                        # would make registration impossible on a root that
+                        # worked before the lock existed; proceeding keeps
+                        # create-once and loses only the wider atomicity.
+                        config.log_event(
+                            f"federation: {lock_path} cannot be locked "
+                            f"({exc.strerror}); relying on create-once"
+                        )
+                        yield DEGRADED
+                        return
                     config.log_event(
                         f"federation: {lock_path} cannot be locked "
                         f"({exc.strerror}); not mutating"
@@ -343,7 +410,21 @@ def _marker_payload(root_path: Path, mode: str, rid: str | None = None) -> dict:
     }
 
 
-def _publish_marker(root_path: Path, payload: dict, replace: bool) -> dict | None:
+def marker_lock_path(root_path: Path) -> Path:
+    """Lock guarding a root's marker, kept beside the marker itself.
+
+    Not the registry lock. The marker belongs to the *root*, and two processes
+    can be pointed at different ``FOLDCRUMBS_STATE_DIR``s — exactly what a
+    relocation is — in which case they take different registry locks and
+    exclude nobody while replacing the same file. A lock that lives with the
+    root is the only one both of them can agree on.
+    """
+    return Path(root_path) / f"{ROOT_MARKER}.lock"
+
+
+def _publish_marker(
+    root_path: Path, payload: dict, *, replace: bool, exclusive: bool
+) -> dict | None:
     """Publish a marker create-once, returning whatever ended up on disk.
 
     ``os.link`` is the whole point: it fails if the target exists, so of N
@@ -356,6 +437,17 @@ def _publish_marker(root_path: Path, payload: dict, replace: bool) -> dict | Non
     an id that no marker records, or the next run mints a second one for the
     same root.
     """
+    if replace and not exclusive:
+        # The single place every rewrite passes through. Both flags are
+        # keyword-only and required: a default would have made this gate
+        # opt-in, and the value anyone would omit is the permissive one. Three branches learned
+        # this rule one at a time and a fourth still missed it; enforcing it
+        # here means the next one cannot. Creating is untouched — the atomic
+        # link below is the whole guarantee for that.
+        config.log_event(
+            f"federation: refusing to replace the marker in {root_path} "
+            "without exclusion")
+        return None
     target = Path(root_path) / ROOT_MARKER
     try:
         fd, tmp = tempfile.mkstemp(dir=str(root_path), suffix=".tmp")
@@ -400,16 +492,77 @@ def ensure_marker(root_path: Path, mode: str = "config") -> dict | None:
     existing = read_marker_data(root_path)
     if existing:
         return existing
+    # Under the same lock replacements use, so creating a marker cannot land
+    # inside another process's unlink/link gap. Taken once and held across
+    # both steps below: file_lock opens a fresh descriptor each call, so a
+    # nested acquisition in this process would deadlock on itself.
+    with file_lock(marker_lock_path(root_path), allow_unsupported=True) as locked:
+        if not locked:
+            config.log_event(f"federation: cannot lock the marker in {root_path}")
+            return None
+        return _ensure_marker_locked(
+            root_path, mode, exclusive=locked is not DEGRADED)
+
+
+def _ensure_marker_locked(
+    root_path: Path, mode: str = "config", *, exclusive: bool
+) -> dict | None:
+    """``ensure_marker`` body. The caller must hold the root's marker lock.
+
+    ``exclusive`` is False on a filesystem that refuses locks. Creating still
+    goes ahead — the atomic link is the whole guarantee there — but replacing
+    a corrupt marker does not: that is a rewrite, and a rewrite without
+    exclusion is the race the lock was added to close.
+    """
+    existing = read_marker_data(root_path)
+    if existing:
+        return existing      # someone published while we waited
     payload = _marker_payload(Path(root_path), mode)
-    published = _publish_marker(root_path, payload, replace=False)
+    published = _publish_marker(root_path, payload, replace=False,
+                                exclusive=exclusive)
     if published:
         return published
     # Nothing valid on disk: either the write failed, or an unparseable marker
     # is squatting the name. Replace it once, still create-once.
     if (Path(root_path) / ROOT_MARKER).exists():
+        if not exclusive:
+            config.log_event(
+                f"federation: {root_path} has a corrupt marker that cannot be "
+                "replaced safely without locking on this filesystem")
+            return None
         config.log_event(f"federation: replacing corrupt marker in {root_path}")
-        return _publish_marker(root_path, payload, replace=True)
+        return _publish_marker(root_path, payload, replace=True,
+                               exclusive=exclusive)
     return None
+
+
+def _replace_marker_locked(
+    root_path: Path, payload: dict, *, exclusive: bool
+) -> dict | None:
+    """Replace a marker. The caller must already hold the root's marker lock."""
+    return _publish_marker(root_path, payload, replace=True,
+                           exclusive=exclusive)
+
+
+def replace_marker(root_path: Path, payload: dict) -> dict | None:
+    """Replace a root's marker under the root's own lock.
+
+    Every caller re-reads the result rather than assuming its own payload
+    landed: the lock makes the replacement atomic against other foldcrumbs
+    processes, not against a hand edit, and the id that matters is the one on
+    disk afterwards.
+    """
+    # No degraded path: replacing is last-writer-wins without a lock, which
+    # is exactly what the root lock exists to prevent. Creating is different —
+    # the atomic link carries that on its own — so ensure_marker may proceed
+    # where this one declines.
+    with file_lock(marker_lock_path(root_path)) as locked:
+        if not locked:
+            config.log_event(
+                f"federation: cannot replace the marker in {root_path} without "
+                "locking")
+            return None
+        return _replace_marker_locked(root_path, payload, exclusive=True)
 
 
 # --- current instance ------------------------------------------------------
@@ -555,7 +708,319 @@ def is_tombstoned(root_id: str) -> bool:
     return read_tombstone(root_id) is not None
 
 
-def _detect_clone(rid: str, root_path: Path) -> bool | None:
+_MISSING = object()
+
+
+def _home_registry(marker: dict) -> str | None:
+    """Which registry owns this root, or None when that cannot be told.
+
+    Absent is not malformed. A marker written before the field existed simply
+    belongs to the registry reading it; one holding a list or a number belongs
+    to nobody knowable — and collapsing the second case into the first is a
+    fail-*open*, because "here" is exactly where a tombstone authorising a
+    mode change would be found.
+    """
+    raw = marker.get("registry", _MISSING)
+    if raw is _MISSING:
+        return str(config.STATE_DIR)
+    # Absolute, or unidentifiable. A configured registry always is — config
+    # normalises it — so a relative value can only be hand-written or damaged,
+    # and consumers resolve it against the caller's working directory: consent
+    # for a mode change would then depend on where the command was run, and a
+    # project-local `roots/<id>.removed` could authorise a reinterpretation.
+    if isinstance(raw, str) and raw and os.path.isabs(raw):
+        return raw
+    return None
+
+
+# A registry named by a marker can live on a mount that has stopped
+# answering. Probing it is a courtesy to the caller, not a reason to hang a
+# registration, so it is given a deadline like every other foreign read.
+_REGISTRY_PROBE_TIMEOUT = 1.0
+
+
+def _bounded(probe, timeout: float):
+    """Run a filesystem probe with a deadline. None when it does not answer.
+
+    Callers must test that None *explicitly*. It is a third state, not a falsy
+    result: every probe here answers a question whose permissive branch is the
+    dangerous one — "the original is gone", "no removal was recorded" — and a
+    plain truth test hands an unanswered probe straight to it.
+
+
+    ``except OSError`` does not bound a stalled call: a hung NFS or FUSE mount
+    simply never returns. The probe runs on a throwaway thread we stop waiting
+    for — the same trade the recall path makes, for the same reason.
+    """
+    import threading
+
+    out: list = []
+
+    def run() -> None:
+        try:
+            out.append(probe())
+        except OSError:
+            out.append(None)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    return out[0] if out else None
+
+
+def _removal_recorded(root_id: str, registry: str) -> bool | None:
+    """Was this root's removal recorded in the registry that owns it?
+
+    Consent has to be looked for where it would have been written, not where
+    this process happens to be looking. The marker is inside the root, so it
+    is shared by every registry: treating "not registered *here*" as licence
+    to change the mode would re-address the memories of an instance elsewhere
+    that still has the root live.
+
+    None when that registry cannot be read — unverifiable, which is not the
+    same as absent, and is treated as a refusal by the caller.
+    """
+    if not valid_id(root_id) or not isinstance(registry, str) or not registry:
+        return None      # unverifiable, which the caller treats as a refusal
+    try:
+        d = Path(registry) / "roots"
+    except (TypeError, ValueError):
+        return None
+
+    def probe():
+        if not d.is_dir():
+            return None
+        return (d / f"{root_id}.removed").is_file()
+
+    try:
+        return _bounded(probe, _REGISTRY_PROBE_TIMEOUT)
+    except (OSError, ValueError):
+        return None
+
+
+# One probe per root at a time, and its answer reused briefly. iter_roots()
+# runs on every recall, so probing each root's marker afresh cost a full
+# timeout *and* an abandoned thread per call on a hung mount — the cost grew
+# with traffic, which is exactly backwards.
+_MARKER_PROBE_TTL = 30.0
+_marker_probes: dict[str, dict] = {}
+_marker_probe_lock = threading.Lock()
+
+
+def _cached_home_registry(root_path: Path) -> str | None:
+    """Which registry this root claims, reusing a recent or in-flight answer.
+
+    None means "could not tell", and callers must read it as such rather than
+    as a move: a slow mount is not a relocation.
+    """
+    key = str(root_path)
+
+    def probe(mine: threading.Thread) -> None:
+        # Publishes its own answer, however late it arrives. A read that misses
+        # the timeout still finishes eventually, and dropping what it learned
+        # left the cache serving "could not tell" for the rest of the TTL.
+        value = _home_registry(read_marker_data(root_path) or {})
+        with _marker_probe_lock:
+            entry = _marker_probes.get(key)
+            if entry is not None and entry["thread"] is mine:
+                entry.update(value=value, at=time.monotonic(), thread=None)
+
+    with _marker_probe_lock:
+        entry = _marker_probes.get(key)
+        if entry is not None:
+            if entry["thread"] is not None:
+                # Still blocked from an earlier attempt. Reuse what it last
+                # said rather than stacking another thread behind it.
+                return entry["value"]
+            if time.monotonic() - entry["at"] < _MARKER_PROBE_TTL:
+                return entry["value"]
+        # Reserved before the worker starts, and under the same lock that
+        # decided to start one: released any earlier, two concurrent recalls
+        # would each find no entry and each spawn a probe of their own.
+        worker = threading.Thread(target=lambda: probe(worker), daemon=True)
+        _marker_probes[key] = {
+            "value": entry["value"] if entry else None,
+            "at": time.monotonic(),
+            "thread": worker,
+        }
+    worker.start()
+    worker.join(_REGISTRY_PROBE_TIMEOUT)
+    with _marker_probe_lock:
+        entry = _marker_probes.get(key)
+        return entry["value"] if entry else None
+
+
+def _registers(shard: object, root_id: str, root_path: Path) -> bool:
+    """Whether a registry shard is the registration for this root, here.
+
+    The one question a departure may act on: not "is there a file", but "does
+    this registry say it holds *this* root at *this* path". Anything else —
+    absent, malformed, another root, another path — is not ours to withdraw.
+    """
+    if not isinstance(shard, dict) or shard.get("id") != root_id:
+        return False
+    return _same_path(shard.get("path", ""), root_path) is True
+
+
+# Registry-alias verdicts, reused briefly. iter_roots() runs on every recall,
+# and an identity probe per root per recall is the very cost the marker cache
+# exists to avoid. The common case never reaches this: _same_path answers on
+# string equality alone, so only a root that genuinely names another spelling
+# is ever probed, and few do.
+_registry_aliases: dict[tuple[str, str], dict] = {}
+
+
+def _registry_is_ours(home: str) -> bool | None:
+    """Whether a marker's registry is the one we are reading from.
+
+    None means "could not tell", and callers must read it as such: a slow
+    mount is not a relocation.
+    """
+    key = (home, str(config.STATE_DIR))
+    if key[0] == key[1]:
+        return True
+    now = time.monotonic()
+    with _marker_probe_lock:
+        entry = _registry_aliases.get(key)
+        if entry is not None and now - entry["at"] < _MARKER_PROBE_TTL:
+            return entry["value"]
+    value = _same_path(home, config.STATE_DIR)
+    with _marker_probe_lock:
+        _registry_aliases[key] = {"value": value, "at": time.monotonic()}
+    return value
+
+
+def _leave_registry(root_id: str, registry: str, root_path: Path) -> None:
+    """Best-effort: tell the registry we are leaving that we have left.
+
+    Readers there settle it on their own by reading the marker, so this is not
+    the guarantee — it is what makes the change take effect *now* rather than
+    at their next look. Failure is expected and harmless: the old registry may
+    be unreachable, read-only, or busy.
+
+    Bounded, because "best effort" describes the *outcome*, not the time. Every
+    step here touches the registry being left, which can be a mount that has
+    stopped answering — and an unbounded courtesy would hang the relocation it
+    was meant to tidy up after.
+    """
+    def attempt() -> bool:
+        # Only a registry that is provably *another* directory. The two paths
+        # can be aliases of one directory — a symlinked FOLDCRUMBS_STATE_DIR,
+        # a different spelling — and then this courtesy would tombstone and
+        # delete the shard registration had just written for this very root.
+        if _same_path(registry, config.STATE_DIR) is not False:
+            config.log_event(
+                f"federation: {registry} is not a different registry from "
+                f"{config.STATE_DIR}; not recording a departure from it")
+            return False
+        roots = Path(registry) / "roots"
+        # Checked *before* the lock, because taking one is itself a write:
+        # file_lock creates the directory and the lock file, so a crafted
+        # marker naming any path had this function build a tree there before
+        # a single validation had run. Reading proves nothing on its own —
+        # the shard can change before we hold the lock — so the same check
+        # runs again below, under it. This one exists to keep an unrelated
+        # directory untouched.
+        if not _registers(_read_json(roots / f"{root_id}.json"),
+                          root_id, root_path):
+            return False
+        with file_lock(roots / ".lock") as locked:
+            if not locked:
+                return False
+            # Re-read under the lock, and check *identity* before position.
+            # This runs on a thread the relocation stopped waiting for, so it
+            # can acquire the lock long afterwards — by then the root may have
+            # been registered back here, may have moved on again, or another
+            # root entirely may occupy the path this call captured. Only a
+            # marker that is still this root, and still says it lives
+            # elsewhere, licenses the write.
+            current = read_marker_data(root_path) or {}
+            if current.get("id") != root_id:
+                config.log_event(
+                    f"federation: {root_path} no longer holds {root_id}; not "
+                    "recording the earlier departure")
+                return False
+            belongs = _home_registry(current)
+            if belongs is not None and _same_path(belongs, registry) is True:
+                config.log_event(
+                    f"federation: {root_id} belongs to {registry} again; "
+                    "not recording the earlier departure")
+                return False
+            shard, tomb = roots / f"{root_id}.json", roots / f"{root_id}.removed"
+            # The registry path comes from the marker, which is a file in the
+            # root — hand-editable, and not ours. Before writing or deleting
+            # anything there, require the registration this call claims to be
+            # withdrawing: a shard that names this root at this path. Without
+            # it, a crafted marker pointed this function at any directory and
+            # had it create a lock and a tombstone there and unlink a JSON
+            # file, all outside the configured state directory.
+            if not _registers(_read_json(shard), root_id, root_path):
+                config.log_event(
+                    f"federation: {registry} no longer registers {root_id} at "
+                    f"{root_path}; leaving it untouched")
+                return False
+            _write_json(tomb, {"removed_at": _now_iso(), "id": root_id,
+                               "path": str(root_path),
+                               "reason": f"moved to {config.STATE_DIR}"})
+            shard.unlink(missing_ok=True)
+        # Outside the roots lock, each under its own. A root that leaves and
+        # later returns clears its tombstone here, which would make every
+        # project shard it left behind valid again by id and memory path —
+        # advertising memories that have since been changed or deleted, until
+        # each project happened to republish.
+        from foldcrumbs import index_shard
+        left = index_shard.drop_root_shards_in(Path(registry), root_id)
+        if left:
+            config.log_event(
+                f"federation: dropped {left} project shard(s) of {root_id} "
+                f"left behind in {registry}")
+        return True
+
+    if _bounded(attempt, _REGISTRY_PROBE_TIMEOUT):
+        config.log_event(
+            f"federation: recorded {root_path}'s departure in {registry}")
+    else:
+        config.log_event(
+            f"federation: could not record {root_path}'s departure in "
+            f"{registry}; its readers will settle it themselves")
+
+
+def _adopt_checked(
+    marker: dict, requested: str | None, root_path: Path
+) -> tuple[str, str]:
+    """Adopt the marker that landed, and hold it to what the caller asked for.
+
+    Every replacement can return a winner that is not the payload we sent, so
+    every one of them has to be re-validated. Three separate call sites each
+    learned that the hard way and one at a time; validating inside the
+    adoption is what stops the next branch from missing it again.
+    """
+    rid, recorded = _adopt(marker)
+    if requested is not None and recorded != requested:
+        raise FederationConflict(
+            f"{root_path} ended up registered as mode {recorded!r} while this "
+            f"call asked for {requested!r}; another process won the marker. "
+            "Try again."
+        )
+    return rid, recorded
+
+
+def _adopt(marker: dict) -> tuple[str, str]:
+    """Read identity *and* mode from the marker that actually landed.
+
+    ``replace_marker`` returns whatever is on disk afterwards, which need not
+    be the payload we sent — another process can publish in between, and
+    during a state-dir relocation the two are not even holding the same lock.
+    Taking only the id from it and keeping our own mode was the same mistake
+    one field over: the shard would then tell readers to look for this root's
+    memory in a directory it does not use.
+    """
+    return marker["id"], marker.get("mode", "config")
+
+
+def _detect_clone(
+    rid: str, root_path: Path, registry: str | None = None
+) -> bool | None:
     """True when ``root_path`` is a *copy* of an already-registered root.
 
     Returns None when identity cannot be established — the caller must then
@@ -565,18 +1030,43 @@ def _detect_clone(rid: str, root_path: Path) -> bool | None:
     marker, so two live roots would claim one id and fight over one shard. A
     move is the same situation minus the original, so the distinguishing test
     is whether the previously registered path still carries that id.
+
+    ``registry`` is where to look for that prior record: the root's *home*,
+    not necessarily the one this process is using. A copy registered from an
+    instance pointed at a different state dir found no shard and no tombstone
+    here, concluded there was nothing to clone, and kept the original's id —
+    leaving two live roots claiming one identity.
     """
-    shard = shard_path(rid)
-    prior = _read_json(shard) if shard else None
-    if prior is None:
+    if registry is None:
+        registry = str(config.STATE_DIR)
+    if not valid_id(rid):
+        return None
+
+    def _at(suffix: str):
+        """_MISSING, {} for present-but-unreadable, the payload, or None on
+        a probe that did not answer. The three cases are not the same: absent
+        means nothing to clone, unreadable means we cannot tell."""
+        path = Path(registry) / "roots" / f"{rid}{suffix}"
+
+        def probe():
+            if not path.is_file():
+                return _MISSING
+            return _read_json(path) or {}
+
+        return _bounded(probe, _REGISTRY_PROBE_TIMEOUT)
+
+    prior = _at(".json")
+    if prior is None or prior == {}:
+        return None          # unreadable or unreachable: cannot tell
+    if prior is _MISSING:
         # A removed root leaves no shard, but its identity is still live on
         # disk: without this the copy of an unregistered root would claim the
         # original's id. The tombstone carries the path for exactly this.
-        tomb = read_tombstone(rid)
-        if tomb is None:
+        tomb = _at(".removed")
+        if tomb is _MISSING:
             return False  # nothing ever registered this id: nothing to clone
-        if not tomb.get("path"):
-            # Present but unreadable, or written before tombstones carried
+        if tomb is None or not tomb.get("path"):
+            # Unreachable, unreadable, or written before tombstones carried
             # metadata. Fail closed: we cannot tell a copy from a rejoin, and
             # guessing wrong hands two live roots the same id.
             return None
@@ -584,13 +1074,50 @@ def _detect_clone(rid: str, root_path: Path) -> bool | None:
     old = prior.get("path")
     if not old or Path(old) == root_path:
         return False
-    if read_marker(Path(old)) != rid:
-        return False  # the old path moved away: this is that move, not a copy
+    # The registry answered, but the root it points at can live on a different
+    # mount — and one that has stopped answering. Both probes below are
+    # bounded: unbounded, they hung a registration with the marker lock held.
+    old_id = _bounded(lambda: read_marker(Path(old)) or _MISSING,
+                      _REGISTRY_PROBE_TIMEOUT)
+    if old_id is None:
+        config.log_event(
+            f"federation: {old} did not answer while checking whether "
+            f"{root_path} is a copy of it")
+        return None                     # cannot tell: fail closed
+    if old_id is _MISSING:
+        # No marker — but the old root may simply be mid-replacement: the
+        # publication below unlinks before it links, and this probe holds the
+        # *copy's* lock, not the original's. A vanished directory is a genuine
+        # move; a directory still sitting there without a marker is a moment we
+        # cannot interpret, so it is refused rather than read as consent to
+        # keep the id.
+        still_there = _bounded(lambda: Path(old).is_dir(),
+                               _REGISTRY_PROBE_TIMEOUT)
+        if still_there is None:
+            # Unanswered, not absent. A plain truth test read this as "gone" —
+            # the permissive answer — so a hung mount handed the copy the
+            # original's identity.
+            config.log_event(
+                f"federation: {old} did not answer; cannot tell whether "
+                f"{root_path} is a copy of it")
+            return None
+        if still_there:
+            config.log_event(
+                f"federation: {old} exists but has no readable marker; cannot "
+                f"tell whether {root_path} is a copy of it")
+            return None
+        return False  # the old path is gone: this is that move, not a copy
+    if old_id != rid:
+        return False  # the old path holds a different root now
     try:
         # A symlink or bind mount reaches one physical root by two names. Paths
         # are stored unresolved on purpose, so identity has to be settled by
         # inode: treating an alias as a copy would re-id the original root.
-        return not os.path.samefile(old, root_path)
+        same = _bounded(lambda: os.path.samefile(old, root_path),
+                        _REGISTRY_PROBE_TIMEOUT)
+        if same is None:
+            raise OSError("identity probe did not answer")
+        return not same
     except OSError:
         # Unknown, and both answers are destructive: "clone" rewrites a live
         # root's marker, "not a clone" lets this registration overwrite the
@@ -605,6 +1132,8 @@ def register(
     root_path: Path | None = None,
     mode: str | None = None,
     label: str | None = None,
+    *,
+    relocate: bool = True,
 ) -> RootRef | None:
     """Register a root so other instances can see it. Idempotent.
 
@@ -620,13 +1149,15 @@ def register(
     with _registry_lock() as locked:
         if not locked:
             return None
-        return _register_locked(root_path, mode, label)
+        return _register_locked(root_path, mode, label, relocate=relocate)
 
 
 def _register_locked(
     root_path: Path | None,
     mode: str | None,
     label: str | None,
+    *,
+    relocate: bool,
 ) -> RootRef | None:
     explicit_path = root_path is not None
     root_path = root_path if explicit_path else current_root_path()
@@ -642,7 +1173,42 @@ def _register_locked(
 
     try:
         root_path.mkdir(parents=True, exist_ok=True)
-        marker = ensure_marker(root_path, want_mode)
+    except OSError:
+        return None
+    # Held across the whole registration, not around each marker write. The
+    # marker and the shard were two steps under two different locks, so another
+    # process could replace the marker in between and the shard would then be
+    # published under an identity that had already been superseded.
+    with file_lock(marker_lock_path(root_path),
+                   allow_unsupported=True) as marker_held:
+        if not marker_held:
+            config.log_event(f"federation: cannot lock the marker in {root_path}")
+            return None
+        return _register_with_marker(
+            root_path, want_mode, mode, label,
+            exclusive=marker_held is not DEGRADED, relocate=relocate)
+
+
+def _register_with_marker(
+    root_path: Path, want_mode: str, mode: str | None, label: str | None,
+    *, exclusive: bool, relocate: bool,
+) -> RootRef | None:
+    """Body of a registration. The caller holds the root's marker lock.
+
+    ``exclusive`` is False when the filesystem refuses locks. Creating a marker
+    is still safe there — the atomic link gives create-once on its own — but
+    *replacing* one is last-writer-wins, so the branches that rewrite it
+    decline instead of racing. A first registration therefore still works on
+    such a root; a relocation, mode change or clone re-id waits for a
+    filesystem that can lock.
+    """
+    def _needs_exclusion(what: str) -> None:
+        config.log_event(
+            f"federation: {root_path} needs {what}, which cannot be done "
+            "safely without locking on this filesystem"
+        )
+    try:
+        marker = _ensure_marker_locked(root_path, want_mode, exclusive=exclusive)
     except OSError:
         return None
     if marker is None:
@@ -650,35 +1216,131 @@ def _register_locked(
 
     rid = marker["id"]
     recorded_mode = marker.get("mode", "config")
-    if mode is not None and mode != recorded_mode:
+    # Refuse before touching anything. The relocation below rewrites the
+    # marker, so raising afterwards left a rejected registration having moved
+    # the root into the new registry with no shard in it — the old registry
+    # reporting a split for a change the caller was told did not happen.
+    # Consent is looked for in the registry the marker names — the root's home
+    # — read before anything below can refresh it. Two reasons: the marker is
+    # shared by every registry, so local ignorance is no licence to re-address
+    # someone else's live root; and refusing before any mutation is what makes
+    # a retry behave the same as the first attempt.
+    home_registry = _home_registry(marker)
+    if (mode is not None and mode != recorded_mode
+            and (home_registry is None
+                 or _removal_recorded(rid, home_registry) is not True)):
         raise FederationConflict(
-            f"{root_path} is already registered as mode {recorded_mode!r}; "
-            f"refusing to reinterpret it as {mode!r} "
-            f"(`roots remove {rid}` then re-add if that is really the intent)"
+            f"{root_path} is registered as mode {recorded_mode!r}; refusing "
+            f"to reinterpret it as {mode!r} without a recorded removal in "
+            f"{home_registry or 'an identifiable registry'} (`roots remove "
+            f"{rid}` there, then re-add with --mode {mode})"
         )
-    if want_mode != recorded_mode:
-        # Not an error: the recorded mode wins, so no memory changes address.
-        # Still worth an audit line — the caller asked for something else.
-        config.log_event(
-            f"federation: {root_path} stays mode {recorded_mode!r} "
-            f"(this run would have chosen {want_mode!r})"
-        )
-    verdict = _detect_clone(rid, root_path)
+    # Before the relocation, and against the root's *home* registry. Running
+    # after meant the copy's marker had already been rewritten into this
+    # registry, where no prior shard or tombstone exists — so the check
+    # concluded there was nothing to clone and both roots kept one identity.
+    # Everything the marker needs to say is decided here, then written once.
+    #
+    # There is deliberately no rollback after it lands. Undoing a marker is
+    # itself a replacement, and one that can fail exactly as the shard write
+    # just did — leaving a root whose recovery depends on a step that already
+    # proved unreliable. The design recovers *forwards* instead: the marker
+    # now describes the state the caller asked for, so the next registration
+    # sees nothing left to change and only has to publish the shard.
+    # ``test_a_failed_shard_write_is_completed_by_the_next_attempt`` holds that
+    # convergence, which is the property rollback would otherwise provide.
+    # Re-identifying a copy, relocating, and changing the mode used to be three
+    # replacements in a row: whichever ran first mutated the marker, and a
+    # failure in a later one left the root half-changed — a new id carrying an
+    # old mode, or a moved registry the caller was told had not moved.
+    verdict = _detect_clone(rid, root_path, home_registry)
     if verdict is None:
         config.log_event(
             f"federation: refusing to register {root_path} — its identity is "
             f"ambiguous against the root already holding id {rid}"
         )
         return None
-    if verdict:
-        fresh = _publish_marker(
-            root_path, _marker_payload(root_path, recorded_mode), replace=True
-        )
-        if fresh is None:
-            return None
-        rid = fresh["id"]
+
+    is_copy = bool(verdict)
+    wants_mode_change = mode is not None and mode != recorded_mode
+    # By identity, not by spelling: two aliases of one state directory — a
+    # symlinked FOLDCRUMBS_STATE_DIR, a different spelling of the same path —
+    # read as a move away from ourselves, and the departure that followed
+    # deleted the shard this very registration had just written.
+    needs_relocation = (home_registry is None
+                        or _same_path(home_registry, config.STATE_DIR) is not True)
+    if needs_relocation and not relocate:
+        # Repair is not migration. ensure_registered() runs on every CLI
+        # command, so allowing it here meant `foldcrumbs status` silently moved
+        # a root into whatever registry happened to be configured — hiding the
+        # federation it came from and switching off the very warning that would
+        # have explained the change. Moving is an explicit act: install, or
+        # `roots add`.
         config.log_event(
-            f"federation: {root_path} is a copy of a live root — new id {rid}"
+            f"federation: not repairing {root_path} here — its marker names "
+            f"{home_registry}, and moving it is an explicit act"
+        )
+        return None
+    if is_copy or wants_mode_change or needs_relocation:
+        what = ", ".join(w for w, needed in (
+            ("re-identifying a copy", is_copy),
+            ("a relocation", needs_relocation),
+            ("a mode change", wants_mode_change),
+        ) if needed)
+        if not exclusive:
+            _needs_exclusion(what)
+            return None
+        final_mode = mode if wants_mode_change else recorded_mode
+        # A copy must not keep the original's identity, so its payload carries
+        # no id and _marker_payload mints one.
+        payload = _marker_payload(root_path, final_mode,
+                                  None if is_copy else rid)
+        fresh = _replace_marker_locked(root_path, payload, exclusive=exclusive)
+        if fresh is None:
+            config.log_event(
+                f"federation: {root_path} not registered — {what} could not "
+                "be written"
+            )
+            return None
+        marker = fresh
+        # Identity *and* mode from what landed, held to what was asked for:
+        # another process can win the replacement, and during a relocation the
+        # two registries do not even share a lock.
+        rid, recorded_mode = _adopt_checked(marker, mode, root_path)
+        # By identity: a state directory reached through a symlink is still
+        # the one we are registering into, and reading the spelling alone
+        # refused every registration made through the other name.
+        if _registry_is_ours(str(marker.get("registry") or "")) is not True:
+            config.log_event(
+                f"federation: {root_path} not registered — its marker now "
+                f"names {marker.get('registry')}"
+            )
+            return None
+        config.log_event(
+            f"federation: {root_path} completed {what} as {rid} "
+            f"({recorded_mode}) in {config.STATE_DIR}"
+        )
+        if needs_relocation and home_registry:
+            _leave_registry(rid, home_registry, root_path)
+        if wants_mode_change:
+            # The move invalidates every shard this root has published, in
+            # every project. Readers refuse them anyway, but refusal is
+            # permanent for a project that never opens again.
+            try:
+                from foldcrumbs import index_shard
+                index_shard.drop_stale_shards(
+                    RootRef(id=rid, path=root_path,
+                            label=label or _label_for(root_path),
+                            mode=recorded_mode))
+            except Exception:  # noqa: BLE001 - housekeeping, never fatal
+                config.log_event(
+                    f"federation: could not tidy {root_path}'s old shards")
+    if want_mode != recorded_mode:
+        # Not an error: the recorded mode wins, so no memory changes address.
+        # Still worth an audit line — the caller asked for something else.
+        config.log_event(
+            f"federation: {root_path} stays mode {recorded_mode!r} "
+            f"(this run would have chosen {want_mode!r})"
         )
 
     shard = shard_path(rid)
@@ -749,7 +1411,9 @@ def ensure_registered() -> RootRef | None:
         # Same lock as the check above, so a removal committed a moment ago
         # cannot be revoked by a repair that read stale state.
         try:
-            return _register_locked(None, None, None)
+            # Never relocates: this path exists to put back a missing shard,
+            # not to move a root between registries.
+            return _register_locked(None, None, None, relocate=False)
         except FederationConflict:
             return None
 
@@ -772,6 +1436,22 @@ def iter_roots() -> list[RootRef]:
                 continue
             # A shard left behind by a failed removal is still removed.
             if is_tombstoned(ref.id):
+                continue
+            # A root that has moved to another registry is not ours to serve.
+            # Relocation cannot always reach the registry it leaves — it may be
+            # unreachable, or locked — so the readers of that registry settle
+            # it themselves. Only a marker positively naming somewhere else
+            # drops the root: unreadable is not proof of a move, and hiding a
+            # root because its mount was briefly slow would be worse.
+            # By identity, not by spelling. Registration already treats two
+            # names for one state directory as one registry and leaves the
+            # marker's original spelling alone — so comparing text here read
+            # every root as relocated and emptied federation outright.
+            home = _cached_home_registry(ref.path)
+            if home is not None and _registry_is_ours(home) is False:
+                config.log_event(
+                    f"federation: {ref.label} now belongs to {home}; not "
+                    "serving it from here")
                 continue
             refs.append(ref)
 
@@ -890,18 +1570,62 @@ def state_dir_conflict() -> str | None:
     different but wholly invisible, which no scan of this registry could find.
     """
     here = str(config.STATE_DIR)
-    strays = {
-        r.state_dir for r in iter_roots() if r.state_dir and r.state_dir != here
-    }
+    # Three states, reported as three. Only a provably *different* directory
+    # is a split: registration treats two spellings of one state directory as
+    # one registry and keeps each marker's original wording, so comparing text
+    # reported a split — and roots "invisible" — in a setup that works. But a
+    # registry we could not reach is not thereby ours, and folding that into
+    # "fine" hid real splits behind an unreachable mount. This is a status
+    # report: saying "cannot tell" costs a line, saying nothing costs the
+    # user the one signal that would have explained missing memories.
+    strays, unreachable = set(), set()
+
+    def classify(where: str) -> None:
+        verdict = _registry_is_ours(where)
+        if verdict is False:
+            strays.add(where)
+        elif verdict is None:
+            unreachable.add(where)
+
+    for r in iter_roots():
+        if r.state_dir:
+            classify(r.state_dir)
     cur = current_root_path()
     marker = read_marker_data(cur) if cur is not None else None
-    prior = marker.get("registry") if marker else None
-    if prior and prior != here:
-        strays.add(prior)
-    if not strays:
+    # Through the same reader the mode guard uses: a hand-edited marker can
+    # hold a list or a number here, and this used to put it straight into a
+    # set and a join — unhashable or untypeable, so a status report crashed
+    # instead of reporting. None means unidentifiable, which is worth saying.
+    prior = _home_registry(marker) if marker else None
+    if marker and prior is None:
+        return (
+            f"{cur} has an unreadable registry field in its "
+            f"{ROOT_MARKER} — federation cannot tell which registry owns it; "
+            "re-run `foldcrumbs install` from this instance to rewrite it"
+        )
+    if prior:
+        classify(prior)
+    # Both are said when both are true. Reporting only the confirmed split
+    # buried the unreachable ones behind it — and those are the ones the user
+    # cannot see for themselves.
+    # Each finding carries its own consequence, because they are not the same
+    # finding. A confirmed split earns the instruction to fix the config; an
+    # unreachable registry has not been shown to be a different one at all,
+    # and telling the user to go change their setup over it would be advice
+    # the check never established.
+    parts = []
+    if strays:
+        parts.append(
+            f"roots registered against a different state dir: "
+            f"{', '.join(sorted(strays))} — set FOLDCRUMBS_STATE_DIR "
+            "consistently or those roots stay invisible here"
+        )
+    if unreachable:
+        parts.append(
+            f"could not reach {', '.join(sorted(unreachable))} to tell whether "
+            "it is this registry — if it turns out to be a different one, "
+            "roots registered there stay invisible here"
+        )
+    if not parts:
         return None
-    return (
-        f"roots registered against a different state dir: {', '.join(sorted(strays))} "
-        f"(this instance uses {here}) — set FOLDCRUMBS_STATE_DIR consistently "
-        "or those roots stay invisible here"
-    )
+    return f"{'; '.join(parts)} (this instance uses {here})"

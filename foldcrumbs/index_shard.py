@@ -167,7 +167,15 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
             ]
             entries.sort(key=lambda e: (e["created_at"], e["filename"]))
             existing = _read_shard_file(target)
-            if existing is not None and existing.get("entries") == entries:
+            # The directory counts as much as the entries. Readers refuse a
+            # shard describing a layout the root has left, and comparing
+            # entries alone made that permanent: a root that moved without
+            # its memories changing kept re-deciding it had nothing to say,
+            # so the stale directory was never rewritten and the root stayed
+            # invisible until someone happened to edit a memory.
+            if (existing is not None
+                    and existing.get("entries") == entries
+                    and existing.get("memory_dir") == str(memory_dir)):
                 return target      # already says exactly this; don't churn it
             payload = {
                 "version": SHARD_VERSION,
@@ -221,6 +229,156 @@ def _read_shard_file(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+class _Stalled(Exception):
+    """A probe did not answer. Stop judging this root's shards for now.
+
+    Raised rather than returned so it ends the whole cleanup instead of one
+    shard's verdict: on a stalled mount every further probe costs another
+    timeout and leaves another thread blocked in the kernel, so what was one
+    lost second becomes one per shard.
+    """
+
+
+def _identity_of(path: str, memo: dict):
+    """``_identity`` once per path per cleanup, or ``_Stalled``."""
+    if path not in memo:
+        memo[path] = federation._identity(path)
+    got = memo[path]
+    if got is federation._UNKNOWN:
+        raise _Stalled(path)
+    return got
+
+
+def _left_behind(recorded: str, ref, mine: tuple, memo: dict) -> bool:
+    """Whether a shard provably describes a layout this root no longer uses.
+
+    Deletion needs proof, not merely the absence of a match. Readers already
+    refuse a shard they cannot place, so keeping an ambiguous one costs a
+    rejection until the next publication — while dropping a *fresh* shard
+    published through a symlink, a bind mount, or an alternate spelling of the
+    root loses it outright, and the writer has no reason to produce it again.
+
+    So the cheap textual test only nominates a candidate; the filesystem
+    confirms it. ``mine`` is this root's identity, read once by the caller.
+    """
+    if ref.mode == "explicit":
+        if Path(recorded) == ref.path:
+            return False
+        theirs = _identity_of(recorded, memo)
+        return theirs is federation._ABSENT or theirs != mine
+    if ref.path in Path(recorded).parents:
+        return False
+    # A config root keeps its projects beneath itself, so the shard belongs
+    # here if *any* ancestor is this root — compared by identity, since the
+    # names can differ the whole way up.
+    for ancestor in Path(recorded).parents:
+        if _identity_of(str(ancestor), memo) == mine:
+            return False
+    return True
+
+
+def drop_root_shards_in(registry: Path, root_id: str) -> int:
+    """Remove a root's project shards from a registry it has left.
+
+    Departure only removes ``roots/<id>.json``. The per-project shards stayed,
+    and a root that later returns clears its own tombstone — at which point
+    those pre-move shards read as valid again, by id and by memory path, and
+    advertise whatever the store held before the move.
+    """
+    base = Path(registry) / "projects"
+    if not base.is_dir():
+        return 0
+    registration = Path(registry) / "roots" / f"{root_id}.json"
+    dropped = 0
+    for shard in base.glob(f"*/roots/{root_id}.json"):
+        # The same lock a publication takes, so this cannot delete a shard
+        # written between the glob and the unlink.
+        with federation.file_lock(shard.parent / f".lock-{root_id}") as locked:
+            if not locked:
+                continue
+            # Re-read under the lock: the departure runs on a thread the
+            # relocation stopped waiting for, so the root may have come back
+            # to this registry meanwhile and republished here. Its shards are
+            # then current, and a cleanup for a departure that is no longer
+            # the state of things would delete fresh publications.
+            if registration.is_file():
+                config.log_event(
+                    f"federation: {root_id} is registered in {registry} "
+                    "again; keeping its project shards")
+                return dropped
+            try:
+                shard.unlink()
+                dropped += 1
+            except FileNotFoundError:
+                pass
+            except OSError:
+                config.log_event(
+                    f"federation: could not drop departed shard {shard}")
+    return dropped
+
+
+def drop_stale_shards(ref) -> int:
+    """Remove this root's shards that describe a layout it no longer uses.
+
+    Changing a root's mode moves its memory directory, invalidating every
+    shard it has published — across every project, not just the one in hand.
+    Readers already refuse those, but refusal alone is permanent: a project
+    that is never opened again never republishes, so the dead shard sits there
+    being rejected and logged forever. Dropped at the moment that invalidates
+    them, they are simply absent until each project next publishes.
+
+    Decided from the shape of the recorded directory, which needs no cwd: an
+    ``explicit`` root serves one fixed path, a ``config`` root always keeps a
+    project's memory under itself.
+    """
+    base = config.STATE_DIR / "projects"
+    if not base.is_dir():
+        return 0
+    # Read once for the whole cleanup, not once per shard: this is a bounded
+    # probe, and paying its timeout for every project of a root on a stalled
+    # mount turned one lost second into one per shard, each leaving another
+    # thread blocked in the kernel.
+    mine = federation._identity(str(ref.path))
+    if not isinstance(mine, tuple):
+        config.log_event(
+            f"federation: {ref.label} did not describe itself; left its "
+            "shards alone")
+        return 0
+    memo: dict[str, object] = {str(ref.path): mine}
+    dropped = 0
+    for shard in base.glob(f"*/roots/{ref.id}.json"):
+        # Under the same lock ``write_shard`` takes for this shard. Reading
+        # then unlinking is a check-then-act on a file another process of this
+        # instance can replace: a project publishing a *fresh* shard in that
+        # window would have had it deleted as though it were the old one.
+        with federation.file_lock(shard.parent / f".lock-{ref.id}") as locked:
+            if not locked:
+                continue          # readers refuse it meanwhile; try again later
+            data = _read_shard_file(shard)
+            recorded = data.get("memory_dir") if data else None
+            if not isinstance(recorded, str):
+                continue
+            try:
+                if not _left_behind(recorded, ref, mine, memo):
+                    continue
+            except _Stalled as stall:
+                config.log_event(
+                    f"federation: {stall} did not answer; stopped dropping "
+                    f"shards of {ref.label}")
+                break
+            try:
+                shard.unlink()
+                dropped += 1
+            except OSError:
+                config.log_event(
+                    f"federation: could not drop stale shard {shard}")
+    if dropped:
+        config.log_event(
+            f"federation: dropped {dropped} shard(s) of {ref.label} left by an "
+            "earlier layout")
+    return dropped
+
+
 def drop_shard(root_id: str, cwd: str | os.PathLike[str] | None = None) -> bool:
     """Remove one root's shard for this project (used when it unregisters)."""
     p = shard_path(root_id, cwd)
@@ -269,6 +427,20 @@ def read_shards(cwd: str | os.PathLike[str] | None = None) -> list[dict]:
             continue
         if not isinstance(data.get("entries"), list):
             config.log_event(f"federation: ignoring shard {p} with no entry list")
+            continue
+        # The root's layout can change under a shard: switching mode moves its
+        # whole memory directory, and shards already published for other
+        # projects keep the old one — with absolute paths to match. Accepting
+        # them on root id alone served those stale paths to every instance
+        # until each project happened to republish, which for an old project
+        # may be never. Checked here so it self-heals rather than needing every
+        # shard hunted down at the moment of the change.
+        expected = str(ref.memory_dir(cwd))
+        if not _same_memory_dir(data.get("memory_dir"), expected):
+            config.log_event(
+                f"federation: ignoring shard {p} — it describes "
+                f"{data.get('memory_dir')}, but {ref.label} now keeps this "
+                f"project's memory in {expected}")
             continue
         data["label"] = ref.label
         # A root we cannot reach keeps its last published entries, flagged:
@@ -438,7 +610,8 @@ def render_block(
     return "\n".join(lines)
 
 
-def _external_supersessions(cwd: str | os.PathLike[str] | None = None) -> dict[str, str]:
+def _external_supersessions(cwd: str | os.PathLike[str] | None = None,
+                            records=None) -> dict[str, str]:
     """Local claims of the form "<root label>:<filename> is obsolete".
 
     Written by the distillation contradiction pass when the memory it
@@ -448,14 +621,42 @@ def _external_supersessions(cwd: str | os.PathLike[str] | None = None) -> dict[s
     """
     from foldcrumbs import store
 
+    # ``records`` lets a caller that has already read the local store hand it
+    # over. Re-reading it here doubled the Markdown parsed by every federated
+    # recall, and the foreign-scan timeout does not bound this pass.
+    if records is None:
+        records = store.iter_memories(cwd)
     out: dict[str, str] = {}
-    for rec in store.iter_memories(cwd):
+    for rec in records:
         if rec.status != "active":
             continue
         for claim in getattr(rec, "supersedes_external", None) or []:
             if ":" in claim:
                 out.setdefault(claim, rec.title)
     return out
+
+
+def _same_memory_dir(recorded: object, expected: str) -> bool:
+    """Whether a shard describes the directory this root actually uses.
+
+    String equality first, then filesystem identity. Paths are stored
+    unresolved on purpose, so a root reached through a symlink or an alternate
+    spelling yields a different string for the same directory — and comparing
+    text alone rejected its shards for good, since publishing through the alias
+    kept producing the same rejected value.
+
+    Anything that cannot be established counts as different: serving a shard
+    from a layout the root no longer uses is worse than hiding one until the
+    next publication.
+    """
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    if recorded == expected:
+        return True
+    same = federation._bounded(
+        lambda: os.path.samefile(recorded, expected),
+        federation._REGISTRY_PROBE_TIMEOUT)
+    return same is True
 
 
 def _type_rank(type_name: str, order: list[str]) -> int:

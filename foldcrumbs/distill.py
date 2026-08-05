@@ -239,7 +239,14 @@ def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
                     # lives on our own new memory and is resolved in the
                     # federated view, where both sides are visible. Their
                     # instance stays the only one that can retire their file.
-                    claim = f"{old.origin_root_id}:{name}"
+                    from foldcrumbs.schema import _clean_claim
+                    claim = _clean_claim(f"{old.origin_root_id}:{name}")
+                    if claim is None:
+                        # Unserializable (a comma in the filename): recording it
+                        # would produce a claim that vanishes on the next read.
+                        config.log_event(
+                            f"federation: cannot record a claim against {name}")
+                        continue
                     if claim not in rec.supersedes_external:
                         # Append: one new memory can obsolete several foreign
                         # ones, and assignment would keep only the last.

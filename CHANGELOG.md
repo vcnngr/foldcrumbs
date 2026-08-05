@@ -7,11 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-08-05
+
+Hardening of the federation released in 0.6.0. No new features: every change
+here closes a way the federated view could lose a memory, hide one, hang a
+recall, or write outside the state directory.
+
 ### Fixed
+
+- **Arbitrary file deletion through `forget --hard`.** A memory name was joined
+  onto the store directory without a containment check, so an absolute name
+  replaced the directory outright and `../` walked out of it. Every
+  filename-addressed operation now resolves inside the store or refuses.
+- **A departure could write outside the configured state directory.** The
+  registry path comes from the root's marker — a hand-editable file — and
+  taking a lock is itself a write, so a crafted marker had foldcrumbs create a
+  directory, a lock and a tombstone anywhere and unlink a file there. The
+  registration being withdrawn is now verified before the lock is taken, and
+  again under it.
+- **Paths compared by spelling.** A state directory reached through a symlink,
+  a bind mount, or an alternate spelling read as a *different* registry, which
+  in turn emptied federation, deleted freshly published shards, and reported a
+  split that did not exist. Registry and directory identity now come from the
+  filesystem, and `status` distinguishes a confirmed split from one it could
+  not reach.
+- **A moved root stayed invisible.** Publication skipped writing whenever the
+  entries matched, so a root whose layout changed without its memories
+  changing never refreshed the directory its shard names — and readers, which
+  refuse a shard describing a layout the root has left, hid it indefinitely.
+- **Legacy handoffs and Syncthing conflict copies read as memories.** They
+  parsed as an "Untitled" record carrying the whole file, and federation then
+  showed them to every other instance.
+- **Superseded and contested records could still be recalled.** A foreign
+  memory this store has declared obsolete is left out of federated search
+  unless explicitly asked for.
+- **Recall could hang or leak threads.** Foreign scans, availability probes and
+  marker reads are each bounded *and* gated: one blocked worker per root
+  rather than one per call, and an answer that arrives late is still used.
+- **The local store was read twice per federated recall.**
+- **Stale shards.** A mode change now drops the shards it invalidates across
+  every project, a departure takes its project shards with it, and neither
+  deletes a shard it cannot prove is stale.
 - CI lint pinned to a declared rule set. `ruff check` was inheriting whatever
   the newest release considered default, so 0.16 turned `main` red on code
   that had not changed — v0.5.0 fails it too. The rules the project actually
   enforces are now named in `pyproject.toml`.
+
+### Known limits
+
+- Federation remains machine-local: foreign stores are read from the local
+  filesystem, so instances on different hosts do not see each other.
+- Duplicate memories across federated instances are left in place. A read-only
+  foreign store cannot be deduplicated by the instance reading it.
 
 ## [0.6.0] — 2026-08-04
 

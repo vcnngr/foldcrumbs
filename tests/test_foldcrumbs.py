@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s tests
 """
 
 import contextlib
+import errno
 import json
 import os
 import subprocess
@@ -70,6 +71,10 @@ class TmpStore(unittest.TestCase):
         import importlib
         from foldcrumbs import config as _c
         importlib.reload(_c)
+        # Scratch dirs belong inside this sandbox. Several tests used
+        # `self._state.parent`, which is the *system* temp dir: the paths were
+        # then shared across tests and runs, and a leftover from an earlier one
+        # decided the outcome of a later assertion.
         # Fail loudly rather than quietly touching real data.
         assert str(Path.home()) not in str(_c.STATE_DIR), "test escaped its sandbox"
         assert str(Path.home()) not in str(_c.memory_dir()), "test escaped its sandbox"
@@ -106,6 +111,45 @@ class TestSchema(unittest.TestCase):
         r = MemoryRecord(title="x", content="y", type="fact", confidence=0.9)
         r.mark_superseded("other-id")
         self.assertEqual(r.compute_confidence(), 0.0)
+
+
+class TestRecordFieldOrder(unittest.TestCase):
+    """The constructor signature is a released API: append, never insert."""
+
+    # Exactly what v0.6.0 shipped, in order. A caller may pass these
+    # positionally, so slipping a new field in between binds their arguments
+    # to the wrong ones — silently, because the types happen to be compatible.
+    RELEASED = [
+        "title", "content", "type", "description", "id", "confidence",
+        "provenance", "status", "tags", "source", "superseded_by",
+        "validation_count", "contradiction_detected", "created_at",
+        "updated_at", "source_path", "created_at_missing", "origin_root",
+        "origin_root_id", "origin_path", "supersedes_external",
+    ]
+
+    def test_released_fields_keep_their_positions(self):
+        import dataclasses
+        names = [f.name for f in dataclasses.fields(MemoryRecord)]
+        self.assertEqual(names[:len(self.RELEASED)], self.RELEASED,
+                         "a field was inserted among the released ones")
+
+    def test_a_positional_call_still_binds_the_same_fields(self):
+        from datetime import datetime, timezone
+        when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        rec = MemoryRecord("T", "body", "fact", "d", "id-1", 0.9,
+                           "inferred", "active", ["a"], "src", None, 2,
+                           False, when, when, "f.md", False, "claude",
+                           "0123456789abcdef", "/abs/f.md",
+                           ["0123456789abcdef:x.md"])
+        self.assertEqual(rec.supersedes_external, ["0123456789abcdef:x.md"])
+        self.assertEqual(rec.origin_root, "claude")
+        self.assertIsNone(rec.contested_by)      # appended, so still default
+
+    def test_claims_survive_a_round_trip(self):
+        rec = MemoryRecord(title="T", content="body",
+                           supersedes_external=["0123456789abcdef:x.md"])
+        back = MemoryRecord.from_markdown(rec.to_markdown())
+        self.assertEqual(back.supersedes_external, ["0123456789abcdef:x.md"])
 
 
 class TestStore(TmpStore):
@@ -1430,10 +1474,39 @@ class TestFederationRegistry(_FederationEnv):
                          and any((self._state / "roots").glob("*.json")))
 
     def test_marker_creation_is_create_once_under_contention(self):
-        # Force every thread to be inside the link window together, so the
-        # test proves exclusion rather than happening to serialise.
+        # Contenders no longer meet inside os.link: marker creation now runs
+        # under the root's lock, which serialises them on purpose — a barrier
+        # forcing them into the link window together can never trip. What must
+        # still hold is the outcome: one marker, one id, adopted by everyone.
+        # The link-based create-once underneath is still the guarantee where
+        # the lock cannot be had, and
+        # test_marker_publish_failure_registers_nothing covers that path.
         import threading
         root = self._root(".claude-work")
+        root.mkdir(parents=True)
+        ids, lock = [], threading.Lock()
+
+        def worker():
+            got = self.federation.ensure_marker(root)
+            with lock:
+                ids.append(got["id"] if got else None)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(20)
+        self.assertEqual(len(ids), 6)
+        self.assertEqual(len(set(ids)), 1)
+        self.assertEqual(ids[0], self.federation.read_marker(root))
+
+    def test_publish_is_create_once_when_no_lock_serialises_it(self):
+        # Contention has to be exercised one layer below ensure_marker, where
+        # the create-once guarantee actually lives — and where it still has to
+        # hold on a filesystem that cannot lock at all. Here the barrier can
+        # trip, because _publish_marker takes no lock of its own.
+        import threading
+        root = self._root(".claude-peo")
         root.mkdir(parents=True)
         real_link, n = os.link, 6
         barrier = threading.Barrier(n)
@@ -1450,22 +1523,26 @@ class TestFederationRegistry(_FederationEnv):
             with lock:
                 outcomes.append("won")
 
-        ids = []
+        got = []
         os.link = racing_link
         try:
             def worker():
-                ids.append(self.federation.ensure_marker(root)["id"])
+                payload = self.federation._marker_payload(root, "config")
+                published = self.federation._publish_marker(
+                    root, payload, replace=False, exclusive=True)
+                with lock:
+                    got.append(published["id"] if published else None)
+
             threads = [threading.Thread(target=worker) for _ in range(n)]
             for t in threads:
                 t.start()
             for t in threads:
-                t.join()
+                t.join(20)
         finally:
             os.link = real_link
         self.assertEqual(outcomes.count("won"), 1)
         self.assertEqual(outcomes.count("lost"), n - 1)
-        self.assertEqual(len(set(ids)), 1)
-        self.assertEqual(ids[0], self.federation.read_marker(root))
+        self.assertEqual(len(set(got)), 1)   # the losers adopted the winner
 
     def test_shard_filename_mismatch_is_skipped(self):
         ref = self.federation.register(self._root(".claude-work"))
@@ -1737,6 +1814,1380 @@ class TestFederationRegistry(_FederationEnv):
         self.assertTrue(lockdir.exists())
         self.assertTrue((lockdir / "owner-newholder").is_file())
 
+    def test_removing_a_root_allows_its_mode_to_change(self):
+        # The conflict message says to remove and re-add. Removal keeps the
+        # marker, so re-adding used to read the old mode and raise the same
+        # conflict — the documented recovery could never work.
+        root = self._root(".claude-work")
+        first = self.federation.register(root, mode="config")
+        with self.assertRaises(self.federation.FederationConflict):
+            self.federation.register(root, mode="explicit")
+        self.assertTrue(self.federation.unregister(first.id))
+        again = self.federation.register(root, mode="explicit")
+        self.assertEqual(again.mode, "explicit")
+        self.assertEqual(again.id, first.id)      # identity survives
+        self.assertEqual(self.federation.read_marker_data(root)["mode"], "explicit")
+
+    def test_a_wiped_registry_does_not_license_a_mode_change(self):
+        # A missing shard is repairable, not a removal: ensure_registered()
+        # puts it back. Treating absence as consent would silently re-address
+        # every memory in a root nobody asked to remove.
+        root = self._root(".claude-work")
+        ref = self.federation.register(root, mode="config")
+        (self._state / "roots" / f"{ref.id}.json").unlink()   # registry wiped
+        with self.assertRaises(self.federation.FederationConflict):
+            self.federation.register(root, mode="explicit")
+        self.assertEqual(self.federation.read_marker_data(root)["mode"], "config")
+        self.federation.register(root, mode="config")         # repair first
+        self.federation.unregister(ref.id)
+        self.assertEqual(
+            self.federation.register(root, mode="explicit").mode, "explicit")
+
+    def test_an_aliased_state_dir_is_not_reported_as_a_split(self):
+        # Registration treats two spellings of one state directory as one
+        # registry and keeps each marker's original wording. Status compared
+        # text, so it announced a split federation with "invisible" roots in a
+        # setup that works — and told the user to go fix a consistent config.
+        import importlib
+        root = self._root(".claude")
+        self.federation.register(root)
+        self.assertIsNone(self.federation.state_dir_conflict())
+        alias = self._home / "state-by-another-name"
+        os.symlink(self._state, alias)
+        os.environ["ENGRAM_STATE_DIR"] = str(alias)
+        importlib.reload(self.config)
+        try:
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+            said = self.federation.state_dir_conflict()
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+        self.assertIsNone(
+            said, f"reported a split for one directory spelled twice: {said}")
+
+    def test_a_genuinely_different_state_dir_is_still_reported(self):
+        # The other half of the same rule: identity must not silence a real
+        # split, only a spelling difference.
+        import importlib
+        root = self._root(".claude")
+        self.federation.register(root)
+        elsewhere = self._home / "really-elsewhere"
+        elsewhere.mkdir(parents=True, exist_ok=True)
+        os.environ["ENGRAM_STATE_DIR"] = str(elsewhere)
+        importlib.reload(self.config)
+        try:
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+            said = self.federation.state_dir_conflict()
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+        self.assertIsNotNone(said, "a real split went unreported")
+
+    def test_a_registry_we_cannot_reach_is_not_reported_as_agreement(self):
+        # "Could not tell" is not "fine". Judging a split only on a *provable*
+        # difference silenced every real one behind an unreachable mount —
+        # exactly the case where the user sees memories missing and needs the
+        # status report to say why.
+        import importlib
+        root = self._root(".claude")
+        self.federation.register(root)
+        elsewhere = self._home / "unreachable-state"
+        elsewhere.mkdir(parents=True, exist_ok=True)
+        os.environ["ENGRAM_STATE_DIR"] = str(elsewhere)
+        importlib.reload(self.config)
+        real_stat = os.stat
+
+        def opaque(path, *a, **k):
+            if str(path) == str(self._state):
+                raise OSError(errno.EIO, "I/O error")
+            return real_stat(path, *a, **k)
+
+        os.stat = opaque
+        try:
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+            said = self.federation.state_dir_conflict()
+        finally:
+            os.stat = real_stat
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+        self.assertIsNotNone(
+            said, "a registry that could not be reached was reported as "
+                  "agreeing with this one")
+        self.assertIn(str(self._state), said)
+        # Not shown to be a different registry, so not told to go change the
+        # configuration over it: that instruction belongs to a proven split.
+        self.assertNotIn("set FOLDCRUMBS_STATE_DIR consistently", said,
+                         "gave advice the check never established")
+
+    def test_a_confirmed_split_does_not_bury_the_unreachable_ones(self):
+        # Reporting only what was proven hid the rest behind it. The proven
+        # split is the one the user can already see; the unreachable registry
+        # is the one they cannot, so burying it loses the useful half.
+        a = self.federation.register(self._root(".claude"))
+        b = self.federation.register(self._root(".claude-work"))
+        other = self._home / "other-state"
+        opaque = self._home / "opaque-state"
+        for d in (other, opaque):
+            d.mkdir(parents=True, exist_ok=True)
+        for ref, where in ((a, other), (b, opaque)):
+            shard = self._state / "roots" / f"{ref.id}.json"
+            data = json.loads(shard.read_text())
+            data["state_dir"] = str(where)
+            shard.write_text(json.dumps(data), encoding="utf-8")
+        real_stat = os.stat
+
+        def unreachable(path, *args, **kw):
+            if str(path) == str(opaque):
+                raise OSError(errno.EIO, "I/O error")
+            return real_stat(path, *args, **kw)
+
+        os.stat = unreachable
+        try:
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+            said = self.federation.state_dir_conflict()
+        finally:
+            os.stat = real_stat
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+        self.assertIsNotNone(said, "neither was reported")
+        self.assertIn(str(other), said, "the confirmed split went missing")
+        self.assertIn(str(opaque), said,
+                      "the unreachable registry was buried by the confirmed one")
+
+    def test_moving_the_state_dir_clears_the_split_warning(self):
+        # Re-registering wrote the shard into the new registry but left the
+        # marker naming the old one, so the warning stuck forever.
+        import importlib
+        root = self._root(".claude")
+        self.federation.register(root)
+        moved = self._home / "moved-state"
+        os.environ["ENGRAM_STATE_DIR"] = str(moved)
+        importlib.reload(self.config)
+        try:
+            self.assertIsNotNone(self.federation.state_dir_conflict())
+            self.federation.register(root)          # re-register where we are
+            self.assertIsNone(self.federation.state_dir_conflict())
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+
+    def test_a_failed_relocation_is_not_reported_as_success(self):
+        # Publishing the shard while the marker still names the old registry
+        # leaves state_dir_conflict() warning forever — the exact fault the
+        # refresh exists to clear — with register() claiming it worked.
+        import contextlib as _c
+        root = self._root(".claude")
+        self.federation.register(root)
+        marker = root / self.federation.ROOT_MARKER
+        data = json.loads(marker.read_text())
+        data["registry"] = "/elsewhere"
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        real = self.federation.file_lock
+
+        @_c.contextmanager
+        def no_marker_lock(path, allow_unsupported=False):
+            if path == self.federation.marker_lock_path(root):
+                yield False
+                return
+            with real(path, allow_unsupported=allow_unsupported) as held:
+                yield held
+
+        self.federation.file_lock = no_marker_lock
+        try:
+            self.assertIsNone(self.federation.register(root))
+        finally:
+            self.federation.file_lock = real
+        self.assertEqual(json.loads(marker.read_text())["registry"], "/elsewhere")
+
+    def test_a_refused_mode_change_mutates_nothing(self):
+        # A registration that is going to be refused must not have changed
+        # anything on the way there — the marker least of all, since that is
+        # what tells every other instance where this root's memory lives.
+        root = self._root(".claude-work")
+        ref = self.federation.register(root, mode="config")
+        marker = root / self.federation.ROOT_MARKER
+        before = marker.read_text()
+        shard_before = (self._state / "roots" / f"{ref.id}.json").read_text()
+        with self.assertRaises(self.federation.FederationConflict):
+            self.federation.register(root, mode="explicit")
+        self.assertEqual(marker.read_text(), before, "the marker was rewritten")
+        self.assertEqual((self._state / "roots" / f"{ref.id}.json").read_text(),
+                         shard_before, "the shard was rewritten")
+
+    def test_a_relocation_that_lands_elsewhere_is_refused(self):
+        # Another process can publish a marker naming a third registry while
+        # we replace ours. Publishing the shard then would leave the two
+        # disagreeing again — and report a move that did not happen.
+        root = self._root(".claude")
+        self.federation.register(root)
+        marker = root / self.federation.ROOT_MARKER
+        data = json.loads(marker.read_text())
+        data["registry"] = "/elsewhere"
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        real = self.federation._publish_marker
+
+        def lands_somewhere_else(path, payload, *, replace, exclusive):
+            real(path, dict(payload, registry="/a-third-place"),
+                 replace=True, exclusive=exclusive)
+            return self.federation.read_marker_data(path)
+
+        self.federation._publish_marker = lands_somewhere_else
+        try:
+            self.assertIsNone(self.federation.register(root))
+        finally:
+            self.federation._publish_marker = real
+        self.assertIsNotNone(self.federation.state_dir_conflict())
+
+    def test_registration_adopts_the_id_and_mode_that_landed(self):
+        # replace_marker returns whichever marker won, which need not be the
+        # one we sent. Keeping our own id addressed the shard under an
+        # identity nothing else uses; keeping our own mode pointed readers at
+        # a memory directory this root does not use.
+        root = self._root(".claude")
+        self.federation.register(root, mode="config")
+        real = self.federation._publish_marker
+        landed = "abcdef0123456789"
+
+        def someone_else_won(path, payload, *, replace, exclusive):
+            real(path, dict(payload, id=landed, mode="explicit"),
+                 replace=True, exclusive=exclusive)
+            return self.federation.read_marker_data(path)
+
+        marker = root / self.federation.ROOT_MARKER
+        data = json.loads(marker.read_text())
+        data["registry"] = "/elsewhere"          # force the refresh branch
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        self.federation._publish_marker = someone_else_won
+        try:
+            ref = self.federation.register(root)
+        finally:
+            self.federation._publish_marker = real
+        self.assertEqual(ref.id, landed)
+        self.assertEqual(ref.mode, "explicit")
+        shard = json.loads((self._state / "roots" / f"{landed}.json").read_text())
+        self.assertEqual(shard["mode"], "explicit")
+
+    def test_marker_replacement_is_locked_on_the_root_not_the_registry(self):
+        # Two processes pointed at different state dirs — which is what a
+        # relocation is — take different registry locks and exclude nobody
+        # while replacing the same marker. The lock has to live with the root.
+        import contextlib as _c
+        root = self._root(".claude")
+        self.federation.register(root)
+        taken = []
+        real = self.federation.file_lock
+
+        @_c.contextmanager
+        def record(path, allow_unsupported=False):
+            taken.append(Path(path))
+            with real(path, allow_unsupported=allow_unsupported) as held:
+                yield held
+
+        marker = root / self.federation.ROOT_MARKER
+        data = json.loads(marker.read_text())
+        data["registry"] = "/elsewhere"
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        self.federation.file_lock = record
+        try:
+            self.federation.register(root)
+        finally:
+            self.federation.file_lock = real
+        self.assertIn(self.federation.marker_lock_path(root), taken)
+        self.assertEqual(self.federation.marker_lock_path(root).parent, root)
+
+    def test_the_marker_cannot_change_between_marker_and_shard(self):
+        # Marker and shard were two steps under two different locks, so a
+        # concurrent replacement in between left the shard published under an
+        # identity that had already been superseded. The registration now
+        # holds the root's lock across both.
+        import contextlib as _c
+        import threading as _t
+        root = self._root(".claude")
+        self.federation.register(root)
+        real = self.federation.file_lock
+        intruder_done = _t.Event()
+
+        @_c.contextmanager
+        def watch(path, allow_unsupported=False):
+            with real(path, allow_unsupported=allow_unsupported) as held:
+                if held and path == self.federation.marker_lock_path(root):
+                    # Whatever tries to replace the marker now must wait for
+                    # this registration to finish, so it cannot land between
+                    # the marker write and the shard write.
+                    def intrude():
+                        with real(path) as got:
+                            intruder_done.set() if got else None
+                    t = _t.Thread(target=intrude, daemon=True)
+                    t.start()
+                    self.assertFalse(intruder_done.wait(0.3),
+                                     "the marker lock was not held throughout")
+                yield held
+
+        self.federation.file_lock = watch
+        try:
+            ref = self.federation.register(root)
+        finally:
+            self.federation.file_lock = real
+        self.assertIsNotNone(ref)
+        self.assertTrue(intruder_done.wait(5))   # released once we are done
+
+    def test_every_marker_replacement_revalidates_the_requested_mode(self):
+        # Three branches replace the marker, and each can get back a winner
+        # that is not the payload it sent. Two of them learned to re-check the
+        # requested mode one at a time; the clone branch had not, so a caller
+        # asking for 'config' could be handed a successful 'explicit'
+        # registration addressing a different layout.
+        import shutil
+        root = self._root(".claude-work")
+        first = self.federation.register(root, mode="config")
+        clone = self._root(".claude-copy")
+        shutil.copytree(root, clone)
+        real = self.federation._publish_marker
+
+        def wins_with_another_mode(path, payload, *, replace, exclusive):
+            real(path, dict(payload, mode="explicit"),
+                 replace=True, exclusive=exclusive)
+            return self.federation.read_marker_data(path)
+
+        self.federation._publish_marker = wins_with_another_mode
+        try:
+            with self.assertRaises(self.federation.FederationConflict):
+                self.federation.register(clone, mode="config")
+        finally:
+            self.federation._publish_marker = real
+        self.assertEqual(first.mode, "config")
+
+    def test_a_relocation_can_carry_an_allowed_mode_change(self):
+        # The two happen together when a removed root is re-added from an
+        # instance whose state dir has moved. Validating the mode during the
+        # relocation rejected that valid combination — after rewriting the
+        # marker, so the registration failed halfway through.
+        import importlib
+        root = self._root(".claude-work")
+        first = self.federation.register(root, mode="config")
+        self.federation.unregister(first.id)          # removal records intent
+        moved = self._home / "moved-state-3"
+        os.environ["ENGRAM_STATE_DIR"] = str(moved)
+        importlib.reload(self.config)
+        try:
+            ref = self.federation.register(root, mode="explicit")
+            self.assertIsNotNone(ref, "a valid relocation + mode change failed")
+            self.assertEqual(ref.mode, "explicit")
+            self.assertEqual(ref.id, first.id)
+            marker = json.loads((root / self.federation.ROOT_MARKER).read_text())
+            self.assertEqual(marker["registry"], str(self.config.STATE_DIR))
+            self.assertTrue((moved / "roots" / f"{ref.id}.json").is_file())
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+
+    def test_another_registry_cannot_re_address_a_live_root(self):
+        # The marker lives inside the root, so it is shared by every registry.
+        # Treating "not registered here" as licence to change the mode would
+        # re-address the memories of an instance elsewhere that still has the
+        # root live and knows nothing about it.
+        import importlib
+        root = self._root(".claude-work")
+        home = self.federation.register(root, mode="config")   # live here
+        elsewhere = self._home / "other-registry"
+        os.environ["ENGRAM_STATE_DIR"] = str(elsewhere)
+        importlib.reload(self.config)
+        try:
+            with self.assertRaises(self.federation.FederationConflict):
+                self.federation.register(root, mode="explicit")
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+        self.assertEqual(
+            self.federation.read_marker_data(root)["mode"], "config")
+        self.assertEqual(self.federation.get_root(home.id).mode, "config")
+
+    def test_a_refusal_leaves_a_retry_identical(self):
+        # The refusal comes before any mutation, so a second attempt sees the
+        # same state and gives the same answer — rather than a half-relocated
+        # root that behaves differently the next time round.
+        root = self._root(".claude-work")
+        self.federation.register(root, mode="config")
+        marker = root / self.federation.ROOT_MARKER
+        before = marker.read_text()
+        for _ in range(3):
+            with self.assertRaises(self.federation.FederationConflict):
+                self.federation.register(root, mode="explicit")
+            self.assertEqual(marker.read_text(), before)
+
+    def test_a_malformed_registry_field_refuses_instead_of_crashing(self):
+        # A hand-edited marker can hold anything there, and callers build a
+        # path from it. Fail closed: refuse the change, do not raise out of a
+        # registration halfway through.
+        root = self._root(".claude-work")
+        self.federation.register(root, mode="config")
+        marker = root / self.federation.ROOT_MARKER
+        for bogus in ([1, 2], 42, {"a": 1}, None, ""):
+            data = json.loads(marker.read_text())
+            data["registry"] = bogus
+            marker.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaises(self.federation.FederationConflict):
+                self.federation.register(root, mode="explicit")
+            self.assertIsNone(self.federation._removal_recorded("0" * 16, bogus))
+            # Malformed must not collapse into "absent": absent means this
+            # registry owns the root, which is exactly where a tombstone
+            # authorising the change would be looked for.
+            self.assertIsNone(
+                self.federation._home_registry({"registry": bogus}))
+        # A relative path is not identifiable either: consumers would resolve
+        # it against the caller's cwd, so consent would depend on where the
+        # command ran — and a project-local tombstone could authorise a change.
+        for relative in ("roots", "./state", "../elsewhere", "a/b"):
+            self.assertIsNone(
+                self.federation._home_registry({"registry": relative}),
+                relative)
+        self.assertEqual(
+            self.federation._home_registry(
+                {"registry": str(self.config.STATE_DIR)}),
+            str(self.config.STATE_DIR))
+        # And a well-formed one still works.
+        data = json.loads(marker.read_text())
+        data["registry"] = str(self.config.STATE_DIR)
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        self.assertIsNotNone(self.federation.register(root))
+        # A marker predating the field belongs to whoever reads it.
+        self.assertEqual(self.federation._home_registry({}),
+                         str(self.config.STATE_DIR))
+
+    def test_status_reports_a_malformed_registry_instead_of_crashing(self):
+        # The value goes into a set and a join: a list is unhashable, a dict
+        # untypeable. A status command must say what is wrong, not raise.
+        root = self._root(".claude")
+        self.federation.register(root)
+        marker = root / self.federation.ROOT_MARKER
+        for bogus in ([1, 2], {"a": 1}, 42, ""):
+            data = json.loads(marker.read_text())
+            data["registry"] = bogus
+            marker.write_text(json.dumps(data), encoding="utf-8")
+            msg = self.federation.state_dir_conflict()
+            self.assertIsNotNone(msg)
+            self.assertIn("unreadable registry field", msg)
+
+    def test_install_repairs_every_malformed_registry_value(self):
+        # The advice printed by status is "re-run install". A falsy malformed
+        # value read as absent to a plain truth test, so the repair never ran
+        # and the advice was a promise the code could not keep.
+        root = self._root(".claude")
+        self.federation.register(root)
+        marker = root / self.federation.ROOT_MARKER
+        for bogus in ("", 0, {}, [], [1, 2], 42):
+            data = json.loads(marker.read_text())
+            data["registry"] = bogus
+            marker.write_text(json.dumps(data), encoding="utf-8")
+            self.assertIsNotNone(self.federation.state_dir_conflict())
+            ref = self.federation.register(root)      # what install does
+            self.assertIsNotNone(ref, f"register failed for {bogus!r}")
+            self.assertEqual(json.loads(marker.read_text())["registry"],
+                             str(self.config.STATE_DIR),
+                             f"not repaired for {bogus!r}")
+            self.assertIsNone(self.federation.state_dir_conflict())
+
+    def test_an_unreachable_registry_refuses_instead_of_hanging(self):
+        # The marker can name a registry on a mount that stopped answering.
+        # `except OSError` does not bound a call that never returns, so the
+        # registration hung instead of giving the documented refusal.
+        import threading as _t
+        root = self._root(".claude-work")
+        self.federation.register(root, mode="config")
+        marker = root / self.federation.ROOT_MARKER
+        data = json.loads(marker.read_text())
+        data["registry"] = str(self._home / "gone")
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        release = _t.Event()
+        real_is_dir = Path.is_dir
+
+        def hangs(self_path):
+            if "gone" in str(self_path):
+                release.wait(30)
+            return real_is_dir(self_path)
+
+        probe = self.federation._REGISTRY_PROBE_TIMEOUT
+        self.federation._REGISTRY_PROBE_TIMEOUT = 0.1
+        Path.is_dir = hangs
+        try:
+            start = time.monotonic()
+            with self.assertRaises(self.federation.FederationConflict):
+                self.federation.register(root, mode="explicit")
+            elapsed = time.monotonic() - start
+        finally:
+            Path.is_dir = real_is_dir
+            self.federation._REGISTRY_PROBE_TIMEOUT = probe
+            release.set()
+        self.assertLess(elapsed, 3, "the registration waited on a dead mount")
+
+    def test_a_filesystem_without_flock_can_still_take_a_marker(self):
+        # The marker lock lives inside the root, which may sit on a share that
+        # honours hard links but refuses flock. Making that lock mandatory made
+        # registration impossible there — on roots that worked before the lock
+        # existed. Create-once still holds, so marker work proceeds.
+        import errno as _e
+        if self.federation.fcntl is None:
+            self.skipTest("no fcntl on this platform")
+        root = self._root(".claude-work")
+        root.mkdir(parents=True)
+        real_flock = self.federation.fcntl.flock
+
+        def never_locks(fd, op):
+            raise OSError(_e.ENOLCK, "no locks available")
+
+        self.federation.fcntl.flock = never_locks
+        try:
+            # The lock itself reports the degradation rather than refusing...
+            with self.federation.file_lock(
+                    self.federation.marker_lock_path(root),
+                    allow_unsupported=True) as held:
+                self.assertTrue(held, "a lock-less filesystem was refused")
+            # ...and callers that rely on create-once still get their marker.
+            marker = self.federation.ensure_marker(root)
+            self.assertIsNotNone(marker, "no marker on a lock-less filesystem")
+            self.assertTrue((root / self.federation.ROOT_MARKER).is_file())
+            # Without the opt-in, an unlockable path is still a refusal.
+            with self.federation.file_lock(
+                    self.federation.marker_lock_path(root)) as strict:
+                self.assertFalse(strict)
+        finally:
+            self.federation.fcntl.flock = real_flock
+
+    def test_without_locking_a_root_registers_but_is_not_rewritten(self):
+        # Proceeding unlocked would reopen the marker/shard race the root lock
+        # closed. Refusing outright would make lock-less shares unusable. So
+        # only what create-once already guarantees goes ahead: a first
+        # registration works, a rewrite waits for a filesystem that can lock.
+        #
+        # Simulated at the right seam — the *root* cannot lock, the registry
+        # (on the local state dir) still can, which is the real asymmetry.
+        import contextlib as _c
+        fresh = self._root(".claude-fresh")
+        existing = self._root(".claude-work")
+        first = self.federation.register(existing, mode="config")
+        self.federation.unregister(first.id)      # a mode change is now allowed
+        real = self.federation.file_lock
+        roots_dir = self.federation.roots_dir()
+
+        @_c.contextmanager
+        def root_cannot_lock(path, allow_unsupported=False):
+            if Path(path).parent != roots_dir:      # inside a root
+                yield self.federation.DEGRADED if allow_unsupported else False
+                return
+            with real(path, allow_unsupported=allow_unsupported) as held:
+                yield held
+
+        self.federation.file_lock = root_cannot_lock
+        try:
+            # Creating is safe: the atomic link gives create-once by itself.
+            self.assertIsNotNone(self.federation.register(fresh),
+                                 "a new root could not register")
+            # Rewriting is not, so it declines rather than racing.
+            self.assertIsNone(
+                self.federation.register(existing, mode="explicit"),
+                "a marker rewrite proceeded without exclusion")
+        finally:
+            self.federation.file_lock = real
+        self.assertEqual(
+            self.federation.read_marker_data(existing)["mode"], "config")
+
+    def test_no_rewrite_path_can_bypass_the_exclusion_gate(self):
+        # Four branches learned this rule one at a time, the fourth by being
+        # missed. The gate now lives at the single point every rewrite passes
+        # through, so a fifth cannot skip it — checked here directly rather
+        # than by enumerating branches that may not exist yet.
+        root = self._root(".claude-work")
+        root.mkdir(parents=True)
+        payload = self.federation._marker_payload(root, "config")
+        # Creating is allowed without exclusion: the atomic link is enough.
+        created = self.federation._publish_marker(
+            root, payload, replace=False, exclusive=False)
+        self.assertIsNotNone(created)
+        # Replacing is not, whoever asks.
+        self.assertIsNone(self.federation._publish_marker(
+            root, self.federation._marker_payload(root, "explicit"),
+            replace=True, exclusive=False))
+        self.assertEqual(
+            self.federation.read_marker_data(root)["mode"], "config")
+        # And still is with exclusion.
+        self.assertIsNotNone(self.federation._publish_marker(
+            root, self.federation._marker_payload(root, "explicit"),
+            replace=True, exclusive=True))
+
+    def test_the_exclusion_flag_cannot_be_omitted(self):
+        # A default would have made the gate opt-in, and the value anyone
+        # would leave out is the permissive one. Omitting it is a TypeError at
+        # the call, caught by any test that exercises the path — not a silent
+        # bypass discovered later.
+        root = self._root(".claude-work")
+        root.mkdir(parents=True)
+        payload = self.federation._marker_payload(root, "config")
+        with self.assertRaises(TypeError):
+            self.federation._publish_marker(root, payload, replace=True)
+        with self.assertRaises(TypeError):
+            self.federation._replace_marker_locked(root, payload)
+        with self.assertRaises(TypeError):
+            self.federation._ensure_marker_locked(root, "config")
+        with self.assertRaises(TypeError):
+            self.federation._register_with_marker(root, "config", None, None)
+
+    def test_relocation_and_mode_change_are_one_write(self):
+        # Two replacements left an intermediate marker naming the new registry
+        # with the old mode. On retry the consent tombstone was then looked for
+        # in the new registry — where it never was — so the valid change stayed
+        # refused for good. One write, or none.
+        import importlib
+        root = self._root(".claude-work")
+        first = self.federation.register(root, mode="config")
+        self.federation.unregister(first.id)        # consent, in this registry
+        moved = self._home / "moved-state-4"
+        os.environ["ENGRAM_STATE_DIR"] = str(moved)
+        importlib.reload(self.config)
+        writes = []
+        real = self.federation._publish_marker
+
+        def counting(path, payload, *, replace, exclusive):
+            if replace:
+                writes.append(json.loads(json.dumps(payload)))
+            return real(path, payload, replace=replace, exclusive=exclusive)
+
+        self.federation._publish_marker = counting
+        try:
+            ref = self.federation.register(root, mode="explicit")
+        finally:
+            self.federation._publish_marker = real
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+        self.assertIsNotNone(ref)
+        self.assertEqual(len(writes), 1, f"{len(writes)} marker writes, not one")
+        # The single write carries the final state, never a half-moved one.
+        self.assertEqual(writes[0]["mode"], "explicit")
+        self.assertEqual(writes[0]["registry"], str(moved))
+
+    def test_a_relocation_cannot_silently_change_an_agreed_mode(self):
+        # Asking for the mode a root already has is still asking. Skipping the
+        # check in that case let a process that won the replacement hand back a
+        # different mode, and the caller was told the registration succeeded.
+        import importlib
+        root = self._root(".claude-work")
+        self.federation.register(root, mode="config")
+        moved = self._home / "moved-state-5"
+        os.environ["ENGRAM_STATE_DIR"] = str(moved)
+        importlib.reload(self.config)
+        real = self.federation._publish_marker
+
+        def wins_with_another_mode(path, payload, *, replace, exclusive):
+            return real(path, dict(payload, mode="explicit"),
+                        replace=replace, exclusive=exclusive)
+
+        self.federation._publish_marker = wins_with_another_mode
+        try:
+            with self.assertRaises(self.federation.FederationConflict):
+                self.federation.register(root, mode="config")
+        finally:
+            self.federation._publish_marker = real
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+
+    def test_a_copy_registered_from_another_registry_gets_a_new_id(self):
+        # Clone detection ran after the relocation and looked only at the
+        # current registry: the copy's marker had already moved here, nothing
+        # prior was found, and both roots kept one identity — enough for later
+        # federation and supersession claims to conflate them.
+        import importlib
+        import shutil
+        original = self._root(".claude-work")
+        first = self.federation.register(original)      # lives in this registry
+        copy_root = self._root(".claude-copy")
+        shutil.copytree(original, copy_root)
+        elsewhere = self._home / "other-registry-2"
+        os.environ["ENGRAM_STATE_DIR"] = str(elsewhere)
+        importlib.reload(self.config)
+        try:
+            ref = self.federation.register(copy_root)
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+        self.assertIsNotNone(ref)
+        self.assertNotEqual(ref.id, first.id, "the copy kept the original's id")
+        self.assertEqual(self.federation.read_marker(original), first.id)
+
+    def test_a_copy_with_an_authorised_mode_change_completes(self):
+        # The clone branch writes the *recorded* mode by design, so validating
+        # the requested one there rejected a legitimate change — after the new
+        # id had been written. Mutating and then failing is the one outcome a
+        # registration must never have.
+        import shutil
+        original = self._root(".claude-work")
+        first = self.federation.register(original, mode="config")
+        copy_root = self._root(".claude-copy")
+        shutil.copytree(original, copy_root)
+        self.federation.unregister(first.id)      # consent for the change
+        ref = self.federation.register(copy_root, mode="explicit")
+        self.assertIsNotNone(ref, "a copy with an authorised change failed")
+        self.assertNotEqual(ref.id, first.id)     # still gets its own identity
+        self.assertEqual(ref.mode, "explicit")
+        self.assertEqual(
+            self.federation.read_marker_data(copy_root)["mode"], "explicit")
+        # The original is untouched by any of it.
+        self.assertEqual(self.federation.read_marker(original), first.id)
+        self.assertEqual(
+            self.federation.read_marker_data(original)["mode"], "config")
+
+    def test_a_copy_relocating_with_a_mode_change_writes_once(self):
+        # Three concerns, one marker. Written in sequence, whichever ran first
+        # mutated it and a failure later left the root half-changed — a new id
+        # carrying an old mode, or a registry the caller was told had not
+        # moved. All three now land in a single replacement, or none do.
+        import importlib
+        import shutil
+        original = self._root(".claude-work")
+        first = self.federation.register(original, mode="config")
+        copy_root = self._root(".claude-copy")
+        shutil.copytree(original, copy_root)
+        self.federation.unregister(first.id)         # consent for the change
+        elsewhere = self._home / "other-registry-3"
+        os.environ["ENGRAM_STATE_DIR"] = str(elsewhere)
+        importlib.reload(self.config)
+        writes = []
+        real = self.federation._publish_marker
+
+        def counting(path, payload, *, replace, exclusive):
+            if replace and Path(path) == copy_root:
+                writes.append(json.loads(json.dumps(payload)))
+            return real(path, payload, replace=replace, exclusive=exclusive)
+
+        self.federation._publish_marker = counting
+        try:
+            ref = self.federation.register(copy_root, mode="explicit")
+        finally:
+            self.federation._publish_marker = real
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+        self.assertIsNotNone(ref)
+        self.assertEqual(len(writes), 1, f"{len(writes)} marker writes, not one")
+        self.assertEqual(writes[0]["mode"], "explicit")
+        self.assertEqual(writes[0]["registry"], str(elsewhere))
+        self.assertNotEqual(writes[0]["id"], first.id)
+        self.assertEqual(self.federation.read_marker(original), first.id)
+
+    def test_a_failed_shard_write_is_completed_by_the_next_attempt(self):
+        # The marker lands before the shard, so a failure in between leaves the
+        # root moved but unlisted. Rolling the marker back would be another
+        # rewrite that can fail just as easily; the design recovers forwards
+        # instead — and that only holds if a retry actually converges, which is
+        # what this checks rather than assumes.
+        import importlib
+        root = self._root(".claude-work")
+        first = self.federation.register(root, mode="config")
+        self.federation.unregister(first.id)
+        moved = self._home / "moved-state-6"
+        os.environ["ENGRAM_STATE_DIR"] = str(moved)
+        importlib.reload(self.config)
+        real = self.federation._write_json
+
+        def shard_writes_fail(target, payload):
+            if target.suffix == ".json" and target.parent.name == "roots":
+                raise OSError("no space left on device")
+            return real(target, payload)
+
+        self.federation._write_json = shard_writes_fail
+        try:
+            self.assertIsNone(self.federation.register(root, mode="explicit"))
+            # The marker moved; the registry has nothing.
+            marker = self.federation.read_marker_data(root)
+            self.assertEqual(marker["registry"], str(self.config.STATE_DIR))
+            self.assertEqual(marker["mode"], "explicit")
+            self.assertEqual(list((moved / "roots").glob("*.json")), [])
+        finally:
+            self.federation._write_json = real
+        try:
+            # The retry needs no consent — the mode already reads as asked —
+            # and completes what was left.
+            ref = self.federation.register(root, mode="explicit")
+            self.assertIsNotNone(ref, "the retry could not finish the move")
+            self.assertEqual(ref.mode, "explicit")
+            self.assertEqual(ref.id, first.id)
+            self.assertTrue((moved / "roots" / f"{ref.id}.json").is_file())
+            self.assertIsNone(self.federation.state_dir_conflict())
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+
+    def test_clone_detection_cannot_hang_on_a_dead_old_path(self):
+        # The registry answered, but the root it names can live on a mount that
+        # stopped answering. Reading its marker and comparing inodes were
+        # synchronous: either could block a registration with the marker lock
+        # held. Both are bounded, and an unanswered probe fails closed.
+        import threading as _t
+        import shutil
+        original = self._root(".claude-work")
+        first = self.federation.register(original)
+        copy_root = self._root(".claude-copy")
+        shutil.copytree(original, copy_root)
+        release = _t.Event()
+        real_read = self.federation.read_marker
+
+        def hangs(path):
+            if Path(path) == original:
+                release.wait(30)
+            return real_read(path)
+
+        probe = self.federation._REGISTRY_PROBE_TIMEOUT
+        self.federation._REGISTRY_PROBE_TIMEOUT = 0.1
+        self.federation.read_marker = hangs
+        try:
+            start = time.monotonic()
+            verdict = self.federation._detect_clone(
+                first.id, copy_root, str(self.config.STATE_DIR))
+            elapsed = time.monotonic() - start
+        finally:
+            self.federation.read_marker = real_read
+            self.federation._REGISTRY_PROBE_TIMEOUT = probe
+            release.set()
+        self.assertIsNone(verdict, "an unanswered probe did not fail closed")
+        self.assertLess(elapsed, 3, "clone detection waited on a dead mount")
+
+    def test_a_copy_is_refused_while_the_original_is_mid_replacement(self):
+        # Publication unlinks before it links, and this check holds the copy's
+        # lock, not the original's. Reading that gap as "the original moved
+        # away" let the copy keep its id — and with it, its shards and its
+        # supersession claims.
+        import shutil
+        original = self._root(".claude-work")
+        first = self.federation.register(original)
+        copy_root = self._root(".claude-copy")
+        shutil.copytree(original, copy_root)
+        # The original is still there; its marker is momentarily absent.
+        (original / self.federation.ROOT_MARKER).unlink()
+        verdict = self.federation._detect_clone(
+            first.id, copy_root, str(self.config.STATE_DIR))
+        self.assertIsNone(verdict, "a gap in the original was read as a move")
+        self.assertIsNone(self.federation.register(copy_root))
+        # A genuinely vanished original is still a move, not an ambiguity.
+        shutil.rmtree(original)
+        self.assertIs(
+            self.federation._detect_clone(
+                first.id, copy_root, str(self.config.STATE_DIR)),
+            False)
+
+    def test_an_unanswered_directory_probe_is_not_a_move(self):
+        # _bounded returns None when the probe does not answer, and a plain
+        # truth test read that as "the original is gone" — the permissive
+        # branch. A hung mount then handed the copy the original's identity.
+        import shutil
+        import threading as _t
+        original = self._root(".claude-work")
+        first = self.federation.register(original)
+        copy_root = self._root(".claude-copy")
+        shutil.copytree(original, copy_root)
+        (original / self.federation.ROOT_MARKER).unlink()
+        release = _t.Event()
+        real_is_dir = Path.is_dir
+
+        def hangs(self_path):
+            if Path(self_path) == original:
+                release.wait(30)
+            return real_is_dir(self_path)
+
+        probe = self.federation._REGISTRY_PROBE_TIMEOUT
+        self.federation._REGISTRY_PROBE_TIMEOUT = 0.1
+        Path.is_dir = hangs
+        try:
+            verdict = self.federation._detect_clone(
+                first.id, copy_root, str(self.config.STATE_DIR))
+        finally:
+            Path.is_dir = real_is_dir
+            self.federation._REGISTRY_PROBE_TIMEOUT = probe
+            release.set()
+        self.assertIsNone(verdict, "an unanswered probe was read as a move")
+
+    def test_status_does_not_silently_relocate_a_root(self):
+        # ensure_registered() runs on every CLI command. Letting it relocate
+        # meant `foldcrumbs status` moved the root into whatever registry was
+        # configured — hiding the federation it came from and switching off the
+        # warning that would have explained it.
+        import importlib
+        root = self._root(".claude")
+        ref = self.federation.register(root)
+        before = json.loads((root / self.federation.ROOT_MARKER).read_text())
+        elsewhere = self._home / "another-registry"
+        os.environ["ENGRAM_STATE_DIR"] = str(elsewhere)
+        importlib.reload(self.config)
+        try:
+            self.assertIsNone(self.federation.ensure_registered(),
+                              "a repair relocated the root")
+            after = json.loads((root / self.federation.ROOT_MARKER).read_text())
+            self.assertEqual(after["registry"], before["registry"])
+            self.assertEqual(
+                list((elsewhere / "roots").glob("*.json")), [],
+                "a repair published into the other registry")
+            # The warning stays on, which is how the user learns of the split.
+            self.assertIsNotNone(self.federation.state_dir_conflict())
+            # An explicit registration still moves it.
+            moved = self.federation.register(root)
+            self.assertIsNotNone(moved)
+            self.assertEqual(moved.id, ref.id)
+            self.assertIsNone(self.federation.state_dir_conflict())
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+
+    def test_a_moved_root_stops_being_served_by_its_old_registry(self):
+        # Relocation used to publish only into the new registry, leaving the
+        # root live in the old one. Peers there kept serving its last published
+        # entries indefinitely — stale memories presented as current, with
+        # nothing to hint at it since the path and mode had not changed.
+        import importlib
+        root = self._root(".claude-work")
+        ref = self.federation.register(root)
+        old_registry = self.config.STATE_DIR
+        self.assertIn(ref.id, [r.id for r in self.federation.iter_roots()])
+        elsewhere = self._home / "new-registry"
+        os.environ["ENGRAM_STATE_DIR"] = str(elsewhere)
+        importlib.reload(self.config)
+        try:
+            moved = self.federation.register(root)      # explicit relocation
+            self.assertIsNotNone(moved)
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(old_registry)
+            importlib.reload(self.config)
+        # Immediately: the departure is recorded where it left.
+        self.assertTrue((old_registry / "roots" / f"{ref.id}.removed").is_file())
+        # And regardless, its old readers no longer serve it.
+        self.assertNotIn(ref.id, [r.id for r in self.federation.iter_roots()])
+
+    def test_an_unreachable_old_registry_still_stops_serving(self):
+        # The departure note cannot always be written — the old registry may be
+        # unreachable or read-only. The guarantee is on the reading side.
+        import importlib
+        root = self._root(".claude-work")
+        ref = self.federation.register(root)
+        old_registry = self.config.STATE_DIR
+        elsewhere = self._home / "new-registry-2"
+        os.environ["ENGRAM_STATE_DIR"] = str(elsewhere)
+        importlib.reload(self.config)
+        real = self.federation._leave_registry
+        self.federation._leave_registry = lambda *a, **k: None   # never lands
+        try:
+            self.assertIsNotNone(self.federation.register(root))
+        finally:
+            self.federation._leave_registry = real
+            os.environ["ENGRAM_STATE_DIR"] = str(old_registry)
+            importlib.reload(self.config)
+        self.assertTrue((old_registry / "roots" / f"{ref.id}.json").is_file())
+        self.assertNotIn(ref.id, [r.id for r in self.federation.iter_roots()],
+                         "the old registry kept serving a moved root")
+
+    def test_a_dead_old_registry_does_not_hang_the_relocation(self):
+        # "Best effort" describes the outcome, not the time. Every step of the
+        # departure note touches the registry being left, which can be a mount
+        # that stopped answering — an unbounded courtesy would hang the very
+        # relocation it exists to tidy up after.
+        import importlib
+        import threading as _t
+        root = self._root(".claude-work")
+        self.federation.register(root)
+        old_registry = self.config.STATE_DIR
+        elsewhere = self._home / "new-registry-3"
+        os.environ["ENGRAM_STATE_DIR"] = str(elsewhere)
+        importlib.reload(self.config)
+        release = _t.Event()
+        real_lock = self.federation.file_lock
+        import contextlib as _c
+
+        @_c.contextmanager
+        def hangs_on_the_old_registry(path, allow_unsupported=False):
+            if str(path).startswith(str(old_registry)):
+                release.wait(30)
+            with real_lock(path, allow_unsupported=allow_unsupported) as held:
+                yield held
+
+        probe = self.federation._REGISTRY_PROBE_TIMEOUT
+        self.federation._REGISTRY_PROBE_TIMEOUT = 0.1
+        self.federation.file_lock = hangs_on_the_old_registry
+        try:
+            start = time.monotonic()
+            ref = self.federation.register(root)
+            elapsed = time.monotonic() - start
+        finally:
+            self.federation.file_lock = real_lock
+            self.federation._REGISTRY_PROBE_TIMEOUT = probe
+            release.set()
+            os.environ["ENGRAM_STATE_DIR"] = str(old_registry)
+            importlib.reload(self.config)
+        self.assertIsNotNone(ref, "the relocation did not complete")
+        self.assertLess(elapsed, 5, "the relocation waited on a dead registry")
+
+    def test_a_late_departure_note_cannot_undo_a_later_return(self):
+        # The note runs on a thread the relocation stopped waiting for, so it
+        # can take the lock long afterwards — by then the root may have been
+        # registered back here, and acting on the old intent would tombstone a
+        # live registration.
+        root = self._root(".claude-work")
+        ref = self.federation.register(root)          # home is this registry
+        here = str(self.config.STATE_DIR)
+        # A departure note that arrives late, for a move that has since been
+        # reversed: the marker says this registry again.
+        self.federation._leave_registry(ref.id, here, root)
+        self.assertFalse(
+            (self.config.STATE_DIR / "roots" / f"{ref.id}.removed").is_file(),
+            "a stale note tombstoned a live registration")
+        self.assertTrue(
+            (self.config.STATE_DIR / "roots" / f"{ref.id}.json").is_file())
+        self.assertIn(ref.id, [r.id for r in self.federation.iter_roots()])
+
+    def test_a_late_note_ignores_a_path_that_holds_another_root(self):
+        # The thread carries the path it captured. By the time it runs, that
+        # path can hold a different root — one that lives in another registry.
+        # Validating position alone would read that stranger's marker, see it
+        # is away, and tombstone *our* root's live registration on its word.
+        root = self._root(".claude-work")
+        ref = self.federation.register(root)          # live in this registry
+        here = str(self.config.STATE_DIR)
+        shard = self.config.STATE_DIR / "roots" / f"{ref.id}.json"
+        self.assertTrue(shard.is_file())
+
+        # Another root takes over the directory, and it belongs elsewhere.
+        stranger = dict(self.federation.read_marker_data(root),
+                        id="abcdef0123456789", registry=str(self._home / "far"))
+        (root / self.federation.ROOT_MARKER).write_text(
+            json.dumps(stranger), encoding="utf-8")
+
+        self.federation._leave_registry(ref.id, here, root)
+        self.assertTrue(shard.is_file(),
+                        "a stranger's marker licensed removing our root")
+        self.assertFalse(
+            (self.config.STATE_DIR / "roots" / f"{ref.id}.removed").is_file())
+
+    def test_a_hung_root_is_probed_once_not_once_per_recall(self):
+        # iter_roots() runs on every recall. Probing each root's marker afresh
+        # cost a full timeout and an abandoned thread per call on a hung mount:
+        # the price grew with traffic, which is exactly backwards.
+        import threading as _t
+        root = self._root(".claude-work")
+        self.federation.register(root)
+        release = _t.Event()
+        probes, lock = [], _t.Lock()
+        real = self.federation.read_marker_data
+
+        def hangs(path):
+            if Path(path) == root:
+                with lock:
+                    probes.append(1)
+                release.wait(30)
+            return real(path)
+
+        probe_timeout = self.federation._REGISTRY_PROBE_TIMEOUT
+        self.federation._REGISTRY_PROBE_TIMEOUT = 0.05
+        self.federation.read_marker_data = hangs
+        try:
+            start = time.monotonic()
+            for _ in range(5):
+                self.federation.iter_roots()
+            elapsed = time.monotonic() - start
+        finally:
+            self.federation.read_marker_data = real
+            self.federation._REGISTRY_PROBE_TIMEOUT = probe_timeout
+            release.set()
+            self.federation._marker_probes.clear()
+        self.assertEqual(len(probes), 1, f"{len(probes)} probes for 5 recalls")
+        self.assertLess(elapsed, 1, "each recall paid the timeout again")
+
+    def test_a_second_caller_does_not_stack_a_probe_behind_the_first(self):
+        # The gate reserved the root only *after* releasing the lock, so a
+        # recall arriving while the first probe was still blocked found no
+        # entry and spawned one of its own — on a hung mount, one permanently
+        # blocked daemon per caller, which is what the gate exists to prevent.
+        import threading as _t
+        root = self._root(".claude-work")
+        self.federation.register(root)
+        entered, release = _t.Event(), _t.Event()
+        probes, lock = [], _t.Lock()
+        real = self.federation.read_marker_data
+
+        def blocks(path):
+            if Path(path) == root:
+                with lock:
+                    probes.append(1)
+                entered.set()
+                release.wait(30)
+            return real(path)
+
+        probe_timeout = self.federation._REGISTRY_PROBE_TIMEOUT
+        # Left at 30 for the whole test, deliberately. Lowering it once the
+        # first probe is running races the first caller's own read of it: that
+        # caller could time out early, publish a cache entry, and the second
+        # recall would then find one even without the reservation — the broken
+        # code would pass. Here nothing can publish while the probe blocks, so
+        # any entry the second caller sees was reserved before the worker ran.
+        self.federation._REGISTRY_PROBE_TIMEOUT = 30
+        self.federation.read_marker_data = blocks
+        first = _t.Thread(
+            target=lambda: self.federation._cached_home_registry(root),
+            daemon=True)
+        try:
+            first.start()
+            # Proves the interleaving instead of hoping for it: the first probe
+            # is demonstrably inside read_marker_data and still blocked there.
+            self.assertTrue(entered.wait(10), "first probe never started")
+            self.federation._cached_home_registry(root)     # the second recall
+        finally:
+            self.federation._REGISTRY_PROBE_TIMEOUT = probe_timeout
+            release.set()
+            first.join(10)
+            self.federation.read_marker_data = real
+            self.federation._marker_probes.clear()
+        self.assertEqual(len(probes), 1,
+                         f"{len(probes)} probe threads for one blocked root")
+
+    def test_an_answer_that_arrives_late_is_still_published(self):
+        # A read that misses the timeout still finishes eventually. Its answer
+        # was dropped on the floor, so the cache kept serving "could not tell"
+        # for the rest of the TTL even though the filesystem had replied.
+        import threading as _t
+        root = self._root(".claude-work")
+        self.federation.register(root)
+        release = _t.Event()
+        real = self.federation.read_marker_data
+
+        def slow(path):
+            if Path(path) == root:
+                release.wait(30)
+            return real(path)
+
+        expected = self.federation._home_registry(real(root) or {})
+        self.assertIsNotNone(expected, "root has no readable home registry")
+        probe_timeout = self.federation._REGISTRY_PROBE_TIMEOUT
+        self.federation._REGISTRY_PROBE_TIMEOUT = 0.05
+        self.federation.read_marker_data = slow
+        try:
+            self.assertIsNone(self.federation._cached_home_registry(root),
+                              "a timed-out probe reported an answer")
+            worker = self.federation._marker_probes[str(root)]["thread"]
+            release.set()
+            worker.join(10)
+            self.assertFalse(worker.is_alive(), "late probe never finished")
+            again = self.federation._cached_home_registry(root)
+        finally:
+            self.federation._REGISTRY_PROBE_TIMEOUT = probe_timeout
+            release.set()
+            self.federation.read_marker_data = real
+            self.federation._marker_probes.clear()
+        self.assertEqual(again, expected,
+                         "the late answer was dropped; cache still says None")
+
+    def test_a_readable_marker_is_not_re_probed_every_time(self):
+        root = self._root(".claude-work")
+        self.federation.register(root)
+        reads, real = [], self.federation.read_marker_data
+
+        def counting(path):
+            if Path(path) == root:
+                reads.append(1)
+            return real(path)
+
+        self.federation.read_marker_data = counting
+        try:
+            for _ in range(4):
+                self.federation.iter_roots()
+        finally:
+            self.federation.read_marker_data = real
+            self.federation._marker_probes.clear()
+        self.assertEqual(len(reads), 1, f"{len(reads)} reads for 4 recalls")
+
+    def test_departure_refuses_a_registry_that_does_not_register_us(self):
+        # The registry path comes from the marker — a file inside the root,
+        # hand-editable, not ours. A crafted one pointed this at any directory
+        # and had it create a lock and a tombstone there and unlink a JSON
+        # file, all outside the configured state directory.
+        ref = self.federation.register(self._root(".claude-work"))
+        outside = self._home / "not-a-registry"
+        (outside / "roots").mkdir(parents=True, exist_ok=True)
+        bait = outside / "roots" / f"{ref.id}.json"
+        # Shaped like a shard, but it does not say it registers this root's
+        # path — so it is not a registration this call may withdraw.
+        bait.write_text(json.dumps({"id": ref.id}), encoding="utf-8")
+        before = sorted(q.relative_to(outside) for q in outside.rglob("*"))
+        self.federation._leave_registry(ref.id, str(outside), ref.path)
+        self.assertTrue(bait.is_file(), "deleted a file outside the registry")
+        # Taking a lock is itself a write — file_lock creates the directory
+        # and the lock file — so validating only once inside it still built a
+        # tree in a directory this call had no business touching.
+        self.assertEqual(
+            sorted(q.relative_to(outside) for q in outside.rglob("*")), before,
+            "created files in a directory that does not register us")
+
+    def test_departure_leaves_no_trace_where_nothing_is_registered(self):
+        # The extreme of the same point: a marker naming a path that holds no
+        # registry at all must not bring one into being.
+        ref = self.federation.register(self._root(".claude-work"))
+        nowhere = self._home / "no-registry-here"
+        self.federation._leave_registry(ref.id, str(nowhere), ref.path)
+        self.assertFalse(nowhere.exists(),
+                         f"{nowhere} was created by a departure")
+
+    def test_an_aliased_state_dir_does_not_empty_federation(self):
+        # Registration treats two names for one state directory as one
+        # registry and leaves the marker's original spelling alone. Comparing
+        # text here then read *every* root as relocated: federation went from
+        # working to empty because the same directory was spelled differently.
+        import importlib
+        ref = self.federation.register(self._root(".claude-work"))
+        self.assertIn(ref.id, [r.id for r in self.federation.iter_roots()])
+        alias = self._home / "state-seen-through"
+        os.symlink(self._state, alias)
+        os.environ["ENGRAM_STATE_DIR"] = str(alias)
+        importlib.reload(self.config)
+        try:
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+            served = [r.id for r in self.federation.iter_roots()]
+            # End-to-end smoke check that registering under the aliased
+            # spelling still works. It does *not* exercise the marker-registry
+            # comparison in _register_with_marker: a root registered afresh
+            # writes the current spelling into its own marker, so that check
+            # sees them equal either way.
+            through_alias = self.federation.register(self._root(".claude-peo"))
+        finally:
+            os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+            importlib.reload(self.config)
+            self.federation._marker_probes.clear()
+            self.federation._registry_aliases.clear()
+        self.assertIn(ref.id, served,
+                      "the root vanished because the state dir was spelled "
+                      "another way")
+        self.assertIsNotNone(
+            through_alias,
+            "registering through the other spelling was refused")
+
+    def test_a_replacement_that_lands_under_the_other_spelling_is_accepted(self):
+        # The marker check after a replacement. Another process can win it,
+        # and during a relocation the two registries do not even share a lock,
+        # so what lands is read back rather than assumed. Read by spelling, a
+        # marker naming this very state directory under its other name was
+        # rejected and the registration thrown away.
+        ref = self.federation.register(self._root(".claude-work"))
+        alias = self._home / "state-other-name"
+        os.symlink(self._state, alias)
+        self.federation.unregister(ref.id)      # licenses the mode change
+        real = self.federation._publish_marker
+
+        def lands_aliased(root_path, payload, *, replace, exclusive):
+            won = real(root_path, payload, replace=replace, exclusive=exclusive)
+            # What the winner would have written from the other spelling.
+            return dict(won, registry=str(alias)) if won else won
+
+        self.federation._publish_marker = lands_aliased
+        try:
+            self.federation._registry_aliases.clear()
+            again = self.federation.register(self._root(".claude-work"),
+                                             mode="explicit")
+        finally:
+            self.federation._publish_marker = real
+            self.federation._registry_aliases.clear()
+        self.assertIsNotNone(
+            again, "a marker naming this registry's other spelling was "
+                   "rejected and the registration discarded")
+        self.assertEqual(again.id, ref.id)
+
+    def test_departure_refuses_an_alias_of_our_own_registry(self):
+        # Two spellings of one state directory read as a move away from
+        # ourselves, and the departure that followed tombstoned and deleted
+        # the shard the registration had just written.
+        ref = self.federation.register(self._root(".claude-work"))
+        shard = self._state / "roots" / f"{ref.id}.json"
+        self.assertTrue(shard.is_file(), "no shard to protect")
+        alias = self._home / "state-alias"
+        os.symlink(self._state, alias)
+        self.federation._leave_registry(ref.id, str(alias), ref.path)
+        self.assertTrue(shard.is_file(),
+                        "the departure deleted our own registration")
+        self.assertFalse((self._state / "roots" / f"{ref.id}.removed").is_file(),
+                         "tombstoned ourselves in our own registry")
+
+    def test_departure_takes_the_project_shards_with_it(self):
+        # Leaving removed only roots/<id>.json. A root that later returns
+        # clears its own tombstone, and every project shard left behind read
+        # as valid again — advertising memories changed or deleted since.
+        from foldcrumbs import index_shard
+        ref = self.federation.register(self._root(".claude-work"))
+        old_registry = self._home / "old-registry"
+        roots = old_registry / "roots"
+        roots.mkdir(parents=True, exist_ok=True)
+        (roots / f"{ref.id}.json").write_text(json.dumps(
+            {"id": ref.id, "path": str(ref.path), "mode": "config",
+             "label": ref.label}), encoding="utf-8")
+        left = []
+        for name in ("alpha", "beta"):
+            d = old_registry / "projects" / name / "roots"
+            d.mkdir(parents=True, exist_ok=True)
+            shard = d / f"{ref.id}.json"
+            shard.write_text(json.dumps(
+                {"root_id": ref.id, "version": index_shard.SHARD_VERSION,
+                 "label": ref.label, "memory_dir": str(ref.memory_dir(name)),
+                 "entries": [{"filename": "stale.md"}]}), encoding="utf-8")
+            left.append(shard)
+        self.federation._leave_registry(ref.id, str(old_registry), ref.path)
+        self.assertFalse((roots / f"{ref.id}.json").is_file(),
+                         "the root shard survived the departure")
+        self.assertFalse(any(s.is_file() for s in left),
+                         "project shards were left behind to come back to life")
+
+    def test_without_locking_a_corrupt_marker_is_left_alone(self):
+        # Replacing a corrupt marker is a rewrite like any other. Repairing it
+        # without exclusion is the same last-writer-wins race, so it waits for
+        # a filesystem that can lock rather than guessing.
+        import contextlib as _c
+        root = self._root(".claude-work")
+        root.mkdir(parents=True)
+        (root / self.federation.ROOT_MARKER).write_text("{ truncated",
+                                                        encoding="utf-8")
+        real = self.federation.file_lock
+        roots_dir = self.federation.roots_dir()
+
+        @_c.contextmanager
+        def root_cannot_lock(path, allow_unsupported=False):
+            if Path(path).parent != roots_dir:
+                yield self.federation.DEGRADED if allow_unsupported else False
+                return
+            with real(path, allow_unsupported=allow_unsupported) as held:
+                yield held
+
+        self.federation.file_lock = root_cannot_lock
+        try:
+            self.assertIsNone(self.federation.ensure_marker(root),
+                              "a corrupt marker was replaced without a lock")
+        finally:
+            self.federation.file_lock = real
+        self.assertEqual((root / self.federation.ROOT_MARKER).read_text(),
+                         "{ truncated")
+        # With locking available it is repaired as before.
+        self.assertIsNotNone(self.federation.ensure_marker(root))
+
+    def test_a_claim_that_cannot_round_trip_is_never_written(self):
+        # Claims share one comma-separated line, so a filename with a comma
+        # would be split into fragments matching nothing.
+        from foldcrumbs.schema import _clean_claim
+        rid = "0123456789abcdef"
+        self.assertIsNotNone(_clean_claim(f"{rid}:fact_ok.md"))
+        self.assertIsNone(_clean_claim(f"{rid}:fact,with,commas.md"))
+        self.assertIsNone(_clean_claim(f"{rid}:../escape.md"))
+        # POSIX allows a newline in a filename; it would split the frontmatter
+        # field across lines and the claim would be read back as fragments.
+        self.assertIsNone(_clean_claim(f"{rid}:fact_two\nlines.md"))
+        self.assertIsNone(_clean_claim(f"{rid}:fact_cr\rlines.md"))
+
     def test_mode_conflict_is_reported(self):
         root = self._root(".claude")
         self.federation.register(root)          # recorded as config
@@ -1821,6 +3272,7 @@ class TestIndexShards(_FederationEnv):
             d.mkdir(parents=True, exist_ok=True)
             (d / f"{ref.id}.json").write_text(json.dumps(
                 {"root_id": ref.id, "version": self.index_shard.SHARD_VERSION,
+                 "memory_dir": str(ref.memory_dir(self.proj)),
                  "entries": []}), encoding="utf-8")
         got = [s["root_id"] for s in self.index_shard.read_shards(self.proj)]
         self.assertEqual(got, [other.id])          # current one excluded
@@ -1834,6 +3286,7 @@ class TestIndexShards(_FederationEnv):
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{other.id}.json").write_text(json.dumps(
             {"root_id": other.id, "version": self.index_shard.SHARD_VERSION,
+             "memory_dir": str(other.memory_dir(self.proj)),
              "entries": [{"filename": "a.md"}]}), encoding="utf-8")
         shutil.rmtree(other.path)
         shards = self.index_shard.read_shards(self.proj)
@@ -1941,7 +3394,7 @@ class TestIndexShards(_FederationEnv):
         d.mkdir(parents=True, exist_ok=True)
         target = d / f"{other.id}.json"
         good = {"root_id": other.id, "version": self.index_shard.SHARD_VERSION,
-                "entries": []}
+                "memory_dir": str(other.memory_dir(self.proj)), "entries": []}
         for broken in (
             {k: v for k, v in good.items() if k != "version"},   # no version
             dict(good, version="1"),                             # not an int
@@ -2047,11 +3500,13 @@ class TestIndexShards(_FederationEnv):
         self.assertEqual({r["filename"] for r in rows}, {"bad.md", "good.md"})
 
     def test_availability_probe_is_time_bounded(self):
+        import threading as _t
         other = self.federation.register(self._root(".claude-work"))
         real = type(other).available
+        release = _t.Event()
 
         def hang(self_ref):
-            time.sleep(5)
+            release.wait(5)     # interruptible: nothing outlives the test
             return True
 
         type(other).available = hang
@@ -2059,6 +3514,7 @@ class TestIndexShards(_FederationEnv):
             start = time.monotonic()
             got = other.available_within(0.05)
         finally:
+            release.set()
             type(other).available = real
         self.assertIsNone(got)                       # no answer, not a guess
         self.assertLess(time.monotonic() - start, 2)  # and it did not hang
@@ -2146,9 +3602,9 @@ class TestIndexShards(_FederationEnv):
         real = self.federation.file_lock
 
         @_c.contextmanager
-        def record(path):
+        def record(path, allow_unsupported=False):
             taken.append(Path(path))
-            with real(path) as held:
+            with real(path, allow_unsupported=allow_unsupported) as held:
                 yield held
 
         self.federation.file_lock = record
@@ -2224,6 +3680,26 @@ class TestIndexShards(_FederationEnv):
             self.federation.fcntl.flock = real
         self.assertGreaterEqual(len(calls), 3)
 
+    def test_a_moved_root_republishes_even_with_unchanged_memories(self):
+        # Readers refuse a shard describing a layout the root has left. The
+        # publisher skipped writing whenever the entries matched, so a root
+        # that moved without its memories changing kept re-deciding it had
+        # nothing to say — and stayed invisible until someone edited a memory.
+        ref = self.federation.register(self._root(".claude"))
+        self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
+        target = self.index_shard.write_shard(self.proj)
+        published = json.loads(target.read_text())
+        # What an earlier layout left behind: same entries, other directory.
+        stale = dict(published,
+                     memory_dir=str(self._home / "where-it-used-to-live"))
+        target.write_text(json.dumps(stale), encoding="utf-8")
+        self.index_shard.write_shard(self.proj)
+        again = json.loads(target.read_text())
+        self.assertEqual(again["entries"], published["entries"],
+                         "the entries changed")
+        self.assertEqual(again["memory_dir"], published["memory_dir"],
+                         "the shard kept naming a directory this root left")
+
     def test_a_shard_already_matching_the_store_is_left_alone(self):
         ref = self.federation.register(self._root(".claude"))
         self._memory(ref, "A", "Body.", "2026-01-01T00:00:00+00:00")
@@ -2278,7 +3754,7 @@ class TestIndexShards(_FederationEnv):
         real = self.federation.file_lock
 
         @_c.contextmanager
-        def unlockable(path):
+        def unlockable(path, allow_unsupported=False):
             yield False
 
         self.federation.file_lock = unlockable
@@ -2337,6 +3813,27 @@ class TestFederatedSearch(_FederationEnv):
         self.store = store
         self.proj = self._home / "proj"
         self.proj.mkdir(parents=True, exist_ok=True)
+
+    def _drain_scans(self, release=None):
+        """Wake any fake-hung scan, wait for it, then clear the store's maps.
+
+        ``Event.set()`` only unblocks the worker: it can still be inside the
+        store appending results. Clearing the maps or restoring the patched
+        reader while it runs lets it race the next test — which is how a
+        timing test starts failing for reasons that have nothing to do with it.
+        """
+        if release is not None:
+            release.set()
+        with self.store._pending_lock:
+            threads = [v["thread"] for v in self.store._pending_scans.values()]
+            threads += [t for ts in self.store._stuck_roots.values() for t in ts]
+            threads += list(self.store._root_busy.values())
+        for t in threads:
+            t.join(10)
+        with self.store._pending_lock:
+            self.store._pending_scans.clear()
+            self.store._stuck_roots.clear()
+            self.store._root_busy.clear()
 
     def _write(self, ref, title, content, type_="fact"):
         from foldcrumbs.schema import MemoryRecord
@@ -2489,7 +3986,8 @@ class TestFederatedSearch(_FederationEnv):
         for ref in (one, two):
             (d / f"{ref.id}.json").write_text(json.dumps({
                 "root_id": ref.id, "version": index_shard.SHARD_VERSION,
-                "label": ref.label, "entries": [
+                "label": ref.label,
+                "memory_dir": str(ref.memory_dir(self.proj)), "entries": [
                     {"filename": target.filename(), "type": "fact",
                      "title": f"Deploy Mondays ({ref.id[:4]})",
                      "path": "/abs/x.md",
@@ -2517,7 +4015,8 @@ class TestFederatedSearch(_FederationEnv):
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{other.id}.json").write_text(json.dumps({
             "root_id": other.id, "version": index_shard.SHARD_VERSION,
-            "label": "claude-work", "entries": [
+            "label": "claude-work",
+            "memory_dir": str(other.memory_dir(self.proj)), "entries": [
                 {"filename": stale.filename(), "type": "fact",
                  "title": "Deploy on Mondays", "path": "/abs/x.md",
                  "created_at": "2026-01-01T00:00:00+00:00"}]}),
@@ -2552,6 +4051,1143 @@ class TestFederatedSearch(_FederationEnv):
             os.chdir(cwd)
         self.assertIn("from claude-work", seen["prompt"])
         self.assertIn("read-only", seen["prompt"])
+
+    def test_recall_hides_a_memory_this_store_declared_obsolete(self):
+        # The claim was resolved only in the injected block, so CLI/MCP recall
+        # could still hand back the very decision this store superseded.
+        from foldcrumbs.schema import MemoryRecord
+        self.federation.register(self._root(".claude"))
+        other = self.federation.register(self._root(".claude-work"))
+        stale = self._write(other, "Deploy on Mondays", "Deploys run Mondays only.")
+        claim = MemoryRecord(title="Deploys moved to Friday",
+                             content="Deploys run Fridays now.", type="fact")
+        claim.supersedes_external = [f"{other.id}:{stale.filename()}"]
+        self.store.write_memory(claim, self.proj)
+        titles = [h.title for h in self.store.search("deploys run", cwd=self.proj)]
+        self.assertIn("Deploys moved to Friday", titles)
+        self.assertNotIn("Deploy on Mondays", titles)
+        every = self.store.search("deploys run", cwd=self.proj,
+                                  include_contested=True)
+        contested = [h for h in every if h.title == "Deploy on Mondays"]
+        self.assertEqual(len(contested), 1)
+        self.assertEqual(contested[0].contested_by, "Deploys moved to Friday")
+
+    def test_a_slow_foreign_store_cannot_hang_recall(self):
+        # The probe only stats the root; the listing and the reads after it
+        # can block just as long on the same mount.
+        import threading as _t
+        other = self.federation.register(self._root(".claude-work"))
+        self._write(other, "Slow", "From a store that stalls.")
+        real = self.store.iter_memories_in
+        release = _t.Event()
+
+        def crawling(directory, max_files=None):
+            if str(directory).startswith(str(other.path)):
+                release.wait(5)      # interruptible: no thread outlives the test
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = crawling
+        timeout = self.store._FEDERATED_SCAN_TIMEOUT
+        self.store._FEDERATED_SCAN_TIMEOUT = 0.1
+        try:
+            start = time.monotonic()
+            got = list(self.store.iter_federated(self.proj))
+            elapsed = time.monotonic() - start
+        finally:
+            self._drain_scans(release)
+            self.store.iter_memories_in = real
+            self.store._FEDERATED_SCAN_TIMEOUT = timeout
+        self.assertLess(elapsed, 3)
+        self.assertEqual(got, [])   # nothing from it, but recall came back
+
+    def test_a_stuck_scan_is_not_restarted_on_every_recall(self):
+        # The thread blocked on a hung mount cannot be killed; starting
+        # another one per recall stacks them for as long as the mount is down.
+        import threading as _t
+        other = self.federation.register(self._root(".claude-work"))
+        self._write(other, "Slow", "From a store that stalls.")
+        real = self.store.iter_memories_in
+        starts, release = [], _t.Event()
+
+        def crawling(directory, max_files=None):
+            if str(directory).startswith(str(other.path)):
+                starts.append(1)
+                release.wait(5)
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = crawling
+        timeout = self.store._FEDERATED_SCAN_TIMEOUT
+        self.store._FEDERATED_SCAN_TIMEOUT = 0.1
+        try:
+            for _ in range(4):
+                list(self.store.iter_federated(self.proj))
+        finally:
+            self._drain_scans(release)
+            self.store.iter_memories_in = real
+            self.store._FEDERATED_SCAN_TIMEOUT = timeout
+        self.assertEqual(len(starts), 1, "a scan thread per recall")
+
+    def test_concurrent_recalls_start_one_scan_between_them(self):
+        # Check-then-act: two recalls both seeing no live worker each start
+        # their own, which is the leak the slot is meant to prevent.
+        import threading as _t
+        other = self.federation.register(self._root(".claude-work"))
+        self._write(other, "Slow", "From a store that stalls.")
+        real = self.store.iter_memories_in
+        starts, lock, release = [], _t.Lock(), _t.Event()
+
+        def crawling(directory, max_files=None):
+            if str(directory).startswith(str(other.path)):
+                with lock:
+                    starts.append(1)
+                release.wait(3)
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = crawling
+        timeout = self.store._FEDERATED_SCAN_TIMEOUT
+        self.store._FEDERATED_SCAN_TIMEOUT = 0.1
+        barrier = _t.Barrier(4)
+
+        def recall():
+            barrier.wait()
+            list(self.store.iter_federated(self.proj))
+
+        try:
+            threads = [_t.Thread(target=recall) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+        finally:
+            self._drain_scans(release)
+            self.store.iter_memories_in = real
+            self.store._FEDERATED_SCAN_TIMEOUT = timeout
+        self.assertEqual(len(starts), 1, "concurrent recalls each spawned a scan")
+
+    def test_concurrent_recalls_share_a_healthy_scan(self):
+        # Treating every live scan as stuck made the second caller return
+        # nothing from a root whose scan was perfectly fine.
+        import threading as _t
+        other = self.federation.register(self._root(".claude-work"))
+        self._write(other, "Shared", "Visible to both callers.")
+        real = self.store.iter_memories_in
+
+        def unhurried(directory, max_files=None):
+            if str(directory).startswith(str(other.path)):
+                time.sleep(0.2)          # slow, but well inside the timeout
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = unhurried
+        results, barrier = [], _t.Barrier(3)
+
+        def recall():
+            barrier.wait()
+            results.append([r.title for r in self.store.iter_federated(self.proj)])
+
+        try:
+            threads = [_t.Thread(target=recall) for _ in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+        finally:
+            self.store.iter_memories_in = real
+            self._drain_scans()
+        self.assertEqual(len(results), 3)
+        for got in results:
+            self.assertEqual(got, ["Shared"], "a concurrent caller lost the root")
+
+    def test_a_paused_recall_does_not_block_another(self):
+        # A yield inside the `with` suspends the generator while still holding
+        # the lock. Abandoning it is harmless — close() releases it — but a
+        # caller that merely consumes slowly holds it for the whole time, and
+        # every other recall, plus the scan thread's own appends, wait on it.
+        import threading as _t
+        other = self.federation.register(self._root(".claude-work"))
+        for i in range(3):
+            self._write(other, f"M{i}", f"Body {i}.")
+        paused = self.store.iter_federated(self.proj)
+        self.assertIsNotNone(next(paused))   # suspended mid-iteration, alive
+        done = _t.Event()
+
+        def second_recall():
+            list(self.store.iter_federated(self.proj))
+            done.set()
+
+        t = _t.Thread(target=second_recall, daemon=True)
+        t.start()
+        try:
+            self.assertTrue(done.wait(5), "a paused recall held the scan lock")
+        finally:
+            paused.close()
+
+    def test_a_hung_root_is_not_rescanned_once_per_project(self):
+        # The slot is per project so results never cross, but stuck-ness
+        # belongs to the root: without a root-level check, every project a
+        # long-lived process touches starts another unkillable thread.
+        from foldcrumbs.schema import MemoryRecord
+        other = self.federation.register(self._root(".claude-work"))
+        projects = [self._home / f"p{i}" for i in range(4)]
+        for proj in projects:
+            proj.mkdir(parents=True, exist_ok=True)
+            d = other.memory_dir(proj)
+            d.mkdir(parents=True, exist_ok=True)
+            rec = MemoryRecord(title="X", content="Body.")
+            (d / rec.filename()).write_text(rec.to_markdown(), encoding="utf-8")
+        import threading as _t
+        real = self.store.iter_memories_in
+        starts, release = [], _t.Event()
+
+        def hung(directory, max_files=None):
+            if str(directory).startswith(str(other.path)):
+                starts.append(1)
+                release.wait(5)
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = hung
+        timeout = self.store._FEDERATED_SCAN_TIMEOUT
+        self.store._FEDERATED_SCAN_TIMEOUT = 0.1
+        try:
+            for proj in projects:
+                list(self.store.iter_federated(proj))
+        finally:
+            self._drain_scans(release)
+            self.store.iter_memories_in = real
+            self.store._FEDERATED_SCAN_TIMEOUT = timeout
+        self.assertEqual(len(starts), 1, "a blocked thread per project")
+
+    def test_the_root_gate_remembers_every_blocked_worker(self):
+        # Two projects can time out on one hung mount at once. A single slot
+        # let the second overwrite the first, so the gate reopened as soon as
+        # the remembered thread died — while the forgotten one still hung.
+        import threading as _t
+        other = self.federation.register(self._root(".claude-work"))
+        self._write(other, "X", "Body.")
+        release = _t.Event()
+        still_hanging = _t.Thread(target=release.wait, daemon=True)
+        finished = _t.Thread(target=lambda: None)
+        still_hanging.start()
+        finished.start()
+        finished.join(2)
+        # Order matters: the live one was recorded first and must not be lost.
+        # Built with the same helper the code uses: a hand-spelled key stops
+        # matching the moment the gate's shape changes, and the test then
+        # passes without gating anything.
+        self.store._stuck_roots[self.store._gate_key(other)] = [
+            still_hanging, finished]
+        started = []
+        real = self.store.iter_memories_in
+
+        def counting(directory, max_files=None):
+            if str(directory).startswith(str(other.path)):
+                started.append(1)
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = counting
+        try:
+            self.assertEqual(list(self.store.iter_federated(self.proj)), [])
+            self.assertEqual(started, [], "started a scan while one was blocked")
+        finally:
+            self.store.iter_memories_in = real
+            release.set()
+            self.store._stuck_roots.clear()
+            self.store._pending_scans.clear()
+
+    def test_a_mode_change_reopens_the_gate_for_the_new_layout(self):
+        # A mode change leaves the root's id *and* its path untouched while
+        # moving its memory somewhere else entirely. The old layout's blocked
+        # worker therefore went on gating a directory it had never read, and
+        # the new layout stayed invisible for the life of the process.
+        import threading as _t
+        from foldcrumbs.schema import MemoryRecord
+        root = self._root(".claude-work")
+        config_ref = self.federation.register(root, mode="config")
+        release = _t.Event()
+        hung = _t.Thread(target=release.wait, daemon=True)
+        hung.start()
+        self.store._stuck_roots[self.store._gate_key(config_ref)] = [hung]
+
+        # The *same* path, in explicit mode: id and path both unchanged, only
+        # the memory directory moves. Registering elsewhere would have changed
+        # the path too, and the gate would have reopened for that reason alone
+        # — the test would then pass without testing anything.
+        rec = MemoryRecord(title="Moved", content="Body.", type="fact")
+        (root / rec.filename()).write_text(rec.to_markdown(), encoding="utf-8")
+        # The supported sequence: reinterpreting a root's mode in place is
+        # refused until the removal is on record.
+        self.federation.unregister(config_ref.id)
+        moved = self.federation.register(root, mode="explicit")
+        self.assertEqual(moved.id, config_ref.id, "re-add minted a new id")
+        self.assertEqual(moved.path, config_ref.path, "the path moved too")
+        try:
+            titles = [m.title
+                      for m in self.store.iter_federated(self.proj)]
+        finally:
+            release.set()
+            hung.join(10)
+            self._drain_scans()
+        self.assertIn("Moved", titles,
+                      "the new layout stayed gated by the old one's worker")
+
+    def test_concurrent_projects_share_one_worker_on_the_same_root(self):
+        # Each project needs its *own* results, so it cannot join another's
+        # scan — but it must not start a second thread against the same mount
+        # either. It waits for the root, then scans it.
+        import threading as _t
+        from foldcrumbs.schema import MemoryRecord
+        other = self.federation.register(self._root(".claude-work"))
+        projects = [self._home / f"c{i}" for i in range(4)]
+        for i, proj in enumerate(projects):
+            proj.mkdir(parents=True, exist_ok=True)
+            d = other.memory_dir(proj)
+            d.mkdir(parents=True, exist_ok=True)
+            rec = MemoryRecord(title=f"P{i}", content=f"Body {i}.")
+            (d / rec.filename()).write_text(rec.to_markdown(), encoding="utf-8")
+        real = self.store.iter_memories_in
+        live, peak, lock = 0, [0], _t.Lock()
+
+        def tracked(directory, max_files=None):
+            nonlocal live
+            if str(directory).startswith(str(other.path)):
+                with lock:
+                    live += 1
+                    peak[0] = max(peak[0], live)
+                time.sleep(0.15)
+                with lock:
+                    live -= 1
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = tracked
+        results, barrier = {}, _t.Barrier(len(projects))
+
+        def recall(i, proj):
+            barrier.wait()
+            results[i] = [r.title for r in self.store.iter_federated(proj)]
+
+        try:
+            threads = [_t.Thread(target=recall, args=(i, p))
+                       for i, p in enumerate(projects)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(20)
+        finally:
+            self.store.iter_memories_in = real
+            self._drain_scans()
+        self.assertEqual(peak[0], 1, "two scans ran against one root at once")
+        for i in range(len(projects)):
+            self.assertEqual(results.get(i), [f"P{i}"],
+                             "a project lost its own root")
+
+    def test_one_root_costs_at_most_one_timeout_in_total(self):
+        # Waiting for the root and scanning it are both part of what the root
+        # is allowed to cost. The doubling only shows when the root frees up
+        # *before* the deadline: the waiter then starts its own scan, and with
+        # a fresh budget that scan gets the full timeout all over again.
+        import threading as _t
+        from foldcrumbs.schema import MemoryRecord
+        other = self.federation.register(self._root(".claude-work"))
+        proj_b = self._home / "cost-b"
+        proj_b.mkdir(parents=True, exist_ok=True)
+        for proj in (self.proj, proj_b):
+            d = other.memory_dir(proj)
+            d.mkdir(parents=True, exist_ok=True)
+            rec = MemoryRecord(title="X", content="Body.")
+            (d / rec.filename()).write_text(rec.to_markdown(), encoding="utf-8")
+        dir_a = str(other.memory_dir(self.proj))
+        dir_b = str(other.memory_dir(proj_b))
+        real = self.store.iter_memories_in
+        holding, release = _t.Event(), _t.Event()
+
+        def paced(directory, max_files=None):
+            if str(directory) == dir_a:
+                holding.set()
+                time.sleep(0.25)      # frees the root before the deadline
+            elif str(directory) == dir_b:
+                # Interruptible: a bare sleep would leave this thread running
+                # long after the test, skewing whatever timing test runs next.
+                release.wait(30)      # then B's own scan hangs
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = paced
+        timeout = self.store._FEDERATED_SCAN_TIMEOUT
+        self.store._FEDERATED_SCAN_TIMEOUT = 0.4
+        try:
+            first = _t.Thread(
+                target=lambda: list(self.store.iter_federated(self.proj)),
+                daemon=True)
+            first.start()
+            self.assertTrue(holding.wait(2))
+            start_t = time.monotonic()
+            list(self.store.iter_federated(proj_b))
+            elapsed = time.monotonic() - start_t
+        finally:
+            self.store.iter_memories_in = real
+            self.store._FEDERATED_SCAN_TIMEOUT = timeout
+            self._drain_scans(release)
+        self.assertLess(elapsed, 0.4 * 1.4, "the root cost two full timeouts")
+
+    def test_a_capped_scan_says_what_it_left_out(self):
+        # A capped scan that stays quiet is indistinguishable from a store
+        # with no matches — the same silent-truncation trap the rendered
+        # block avoids.
+        from foldcrumbs.schema import MemoryRecord
+        other = self.federation.register(self._root(".claude-work"))
+        d = other.memory_dir(self.proj)
+        d.mkdir(parents=True, exist_ok=True)
+        cap = self.store._MAX_FEDERATED_SCAN
+        for i in range(cap + 7):
+            rec = MemoryRecord(title=f"M{i:04d}", content=f"Body {i}.")
+            (d / f"fact_m{i:04d}.md").write_text(rec.to_markdown(),
+                                                 encoding="utf-8")
+        logged = []
+        real_log = self.config.log_event
+        self.config.log_event = lambda m: logged.append(m)
+        try:
+            got = list(self.store.iter_federated(self.proj))
+        finally:
+            self.config.log_event = real_log
+            self._drain_scans()
+        self.assertLessEqual(len(got), cap)
+        self.assertTrue(any(f"only {cap} of {cap + 7}" in m for m in logged),
+                        f"no truncation warning in {logged}")
+
+    def test_finished_scans_are_reaped_from_every_project_slot(self):
+        # A scan that timed out and later completed leaves its records and a
+        # dead thread behind. Reaping only the requested slot means one such
+        # entry accumulates for every project the process ever timed out on.
+        import threading as _t
+        from foldcrumbs.schema import MemoryRecord
+        other = self.federation.register(self._root(".claude-work"))
+        projects = [self._home / f"reap{i}" for i in range(3)]
+        for proj in projects:
+            proj.mkdir(parents=True, exist_ok=True)
+            d = other.memory_dir(proj)
+            d.mkdir(parents=True, exist_ok=True)
+            rec = MemoryRecord(title="X", content="Body.")
+            (d / rec.filename()).write_text(rec.to_markdown(), encoding="utf-8")
+        real = self.store.iter_memories_in
+        release = _t.Event()
+
+        def slow(directory, max_files=None):
+            if str(directory).startswith(str(other.path)):
+                release.wait(10)
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = slow
+        timeout = self.store._FEDERATED_SCAN_TIMEOUT
+        self.store._FEDERATED_SCAN_TIMEOUT = 0.05
+        try:
+            list(self.store.iter_federated(projects[0]))   # times out
+            self.assertEqual(len(self.store._pending_scans), 1)
+            release.set()                                  # it finishes late
+            for t in list(self.store._pending_scans.values()):
+                t["thread"].join(5)
+            self.store._stuck_roots.clear()                # mount recovered
+            list(self.store.iter_federated(projects[1]))   # a different slot
+            self.assertEqual(len(self.store._pending_scans), 0,
+                             "a dead slot survived a later recall")
+        finally:
+            self.store.iter_memories_in = real
+            self.store._FEDERATED_SCAN_TIMEOUT = timeout
+            self._drain_scans(release)
+
+    def test_a_relocated_root_is_not_gated_by_its_old_path(self):
+        # Ids survive a move by design, so a gate keyed on the id alone kept
+        # skipping the root at its new, healthy path while the old path's
+        # worker stayed blocked. Driven through the real flow: seeding the gate
+        # by hand would only ever match the key format being tested.
+        import threading as _t
+        from foldcrumbs.schema import MemoryRecord
+        old_path = self._root(".claude-work")
+        other = self.federation.register(old_path)
+        d = other.memory_dir(self.proj)
+        d.mkdir(parents=True, exist_ok=True)
+        rec = MemoryRecord(title="Reachable", content="At the new path.")
+        (d / rec.filename()).write_text(rec.to_markdown(), encoding="utf-8")
+
+        real = self.store.iter_memories_in
+        release = _t.Event()
+
+        def hangs_at_old_path(directory, max_files=None):
+            if str(directory).startswith(str(old_path)):
+                release.wait(30)
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = hangs_at_old_path
+        timeout = self.store._FEDERATED_SCAN_TIMEOUT
+        self.store._FEDERATED_SCAN_TIMEOUT = 0.05
+        try:
+            self.assertEqual(list(self.store.iter_federated(self.proj)), [])
+            self.assertTrue(self.store._stuck_roots, "no gate was recorded")
+            # Now the root moves somewhere healthy, keeping its identity.
+            self.store.iter_memories_in = real
+            new_path = self._root(".claude-relocated")
+            old_path.rename(new_path)
+            moved = self.federation.register(new_path)
+            self.assertEqual(moved.id, other.id)
+            got = [r.title for r in self.store.iter_federated(self.proj)]
+        finally:
+            self.store.iter_memories_in = real
+            self.store._FEDERATED_SCAN_TIMEOUT = timeout
+            self._drain_scans(release)
+        self.assertEqual(got, ["Reachable"], "the old path's gate hid the move")
+
+    def test_one_blocked_thread_is_recorded_once(self):
+        # Several recalls for the same project share one scan and can all
+        # reach the deadline together. Appending blindly makes one blocked
+        # thread look like many, in the list and in what the log reports.
+        import threading as _t
+        other = self.federation.register(self._root(".claude-work"))
+        self._write(other, "Slow", "From a store that stalls.")
+        real = self.store.iter_memories_in
+        release = _t.Event()
+
+        def hangs(directory, max_files=None):
+            if str(directory).startswith(str(other.path)):
+                release.wait(30)
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = hangs
+        timeout = self.store._FEDERATED_SCAN_TIMEOUT
+        self.store._FEDERATED_SCAN_TIMEOUT = 0.1
+        barrier = _t.Barrier(4)
+
+        def recall():
+            barrier.wait()
+            list(self.store.iter_federated(self.proj))
+
+        try:
+            threads = [_t.Thread(target=recall) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+            recorded = [t for ts in self.store._stuck_roots.values() for t in ts]
+            self.assertEqual(len(recorded), 1, f"one thread recorded {len(recorded)}x")
+        finally:
+            self.store.iter_memories_in = real
+            self.store._FEDERATED_SCAN_TIMEOUT = timeout
+            self._drain_scans(release)
+
+    def test_a_claim_written_during_a_scan_is_honoured_by_the_joiner(self):
+        # The shared scan used to bake in the starting caller's claims. The
+        # joiner has to be *inside* the same in-flight scan for that to show:
+        # once it finishes, the slot is reaped and a later recall simply scans
+        # again with fresh claims.
+        import threading as _t
+        from foldcrumbs.schema import MemoryRecord
+        self.federation.register(self._root(".claude"))
+        other = self.federation.register(self._root(".claude-work"))
+        stale = self._write(other, "Deploy on Mondays", "Deploys run Mondays.")
+        real = self.store.iter_memories_in
+        scanning, proceed = _t.Event(), _t.Event()
+        starts, lock = [], _t.Lock()
+
+        def slow(directory, max_files=None):
+            if str(directory).startswith(str(other.path)):
+                with lock:
+                    starts.append(1)
+                scanning.set()
+                proceed.wait(5)
+            yield from real(directory, max_files=max_files)
+
+        # Observe the join instead of sleeping towards it: a sleep that runs
+        # short makes the second caller start its own scan, and the assertion
+        # below would then accuse correct code of not sharing.
+        attached = _t.Event()
+        joiner_name = "joiner-thread"
+
+        class WatchedScans(dict):
+            def get(self, key, default=None):
+                found = super().get(key, default)
+                if (found is not None
+                        and _t.current_thread().name == joiner_name):
+                    attached.set()
+                return found
+
+        self.store.iter_memories_in = slow
+        real_scans = self.store._pending_scans
+        self.store._pending_scans = WatchedScans(real_scans)
+        # The scan must stay in flight for the whole coordination window. At
+        # the default two seconds a loaded machine can time it out mid-test:
+        # the root then lands in the stuck gate, the joiner skips it, and
+        # correct code fails. The window is bounded by the waits below, so a
+        # generous ceiling here cannot make the test hang.
+        real_timeout = self.store._FEDERATED_SCAN_TIMEOUT
+        self.store._FEDERATED_SCAN_TIMEOUT = 30.0
+        first, joined = [], []
+        try:
+            a = _t.Thread(target=lambda: first.extend(
+                self.store.iter_federated(self.proj)), daemon=True)
+            a.start()
+            reached_scan = scanning.wait(2)
+            # Recorded while that scan is still running...
+            claim = MemoryRecord(title="Moved to Friday",
+                                 content="Deploys run Fridays now.")
+            claim.supersedes_external = [f"{other.id}:{stale.filename()}"]
+            self.store.write_memory(claim, self.proj)
+            # ...and this caller joins that same scan, not a new one.
+            b = _t.Thread(target=lambda: joined.extend(
+                self.store.iter_federated(self.proj)),
+                name=joiner_name, daemon=True)
+            b.start()
+            # Only one thing here is a scheduling accident: the first scan
+            # never starting at all. Past that point the first caller is
+            # provably still blocked — this test holds `proceed` — so a joiner
+            # that fails to attach is not late, it is not sharing, and that is
+            # a regression this test exists to catch. Skipping both cases alike
+            # would let the sharing path be removed without a single failure.
+            if not reached_scan:
+                proceed.set()
+                a.join(5)
+                b.join(5)
+                self.skipTest("the first scan never started on this run")
+            did_attach = attached.wait(5)
+            proceed.set()
+            a.join(5)
+            b.join(5)
+            self.assertTrue(
+                did_attach,
+                "the joiner did not attach while the scan was provably still "
+                "running: the shared-scan path is gone")
+        finally:
+            self.store.iter_memories_in = real
+            self.store._FEDERATED_SCAN_TIMEOUT = real_timeout
+            proceed.set()
+            self.store._pending_scans = real_scans
+            self._drain_scans()
+        # Proof the second caller *joined* rather than scanning on its own:
+        # a scan of its own would show up here as a second start, and the test
+        # would then prove nothing about sharing. Sleeps cannot establish this;
+        # the counter can.
+        self.assertEqual(len(starts), 1, "the second recall ran its own scan")
+        self.assertEqual([r.contested_by for r in joined],
+                         ["Moved to Friday"], "the joiner got a stale marking")
+        self.assertEqual([r.contested_by for r in first], [None])
+
+    def test_dead_entries_are_reaped_even_for_roots_no_longer_visited(self):
+        # Reaping inside the loop never reached an entry whose root had since
+        # become unavailable — those are skipped earlier — or been
+        # unregistered, which drops it from the loop entirely. Its dead thread
+        # and its records then stayed for the life of the process.
+        import shutil
+        import threading as _t
+        gone = self.federation.register(self._root(".claude-work"))
+        removed = self.federation.register(self._root(".claude-peo"))
+        finished = _t.Thread(target=lambda: None)
+        finished.start()
+        finished.join(2)
+        for ref in (gone, removed):
+            from foldcrumbs import index_shard
+            slot = (ref.id, str(ref.memory_dir(self.proj)),
+                    index_shard.project_key(self.proj))
+            self.store._pending_scans[slot] = {
+                "thread": finished, "results": [object()] * 3,
+                "timed_out": True}
+            self.store._stuck_roots[self.store._gate_key(ref)] = [finished]
+        shutil.rmtree(gone.path)                 # unavailable: skipped early
+        self.federation.unregister(removed.id)   # unregistered: never listed
+        list(self.store.iter_federated(self.proj))
+        self.assertEqual(self.store._pending_scans, {},
+                         "dead scans survived for roots the loop never reached")
+        self.assertEqual(self.store._stuck_roots, {})
+
+    def test_a_shard_from_an_old_layout_is_not_served(self):
+        # Changing a root's mode moves its whole memory directory. Shards
+        # already published for other projects keep the old one, with absolute
+        # paths to match, and were accepted on root id alone — serving stale
+        # paths until each project happened to republish, which for an old
+        # project may be never.
+        from foldcrumbs import index_shard
+        other = self.federation.register(self._root(".claude-work"),
+                                         mode="config")
+        d = index_shard.shards_dir(self.proj)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{other.id}.json").write_text(json.dumps({
+            "root_id": other.id, "version": index_shard.SHARD_VERSION,
+            "label": other.label,
+            "memory_dir": str(self._home / "somewhere-else"),
+            "entries": [{"filename": "a.md", "type": "fact", "title": "Old",
+                         "path": "/old/layout/a.md",
+                         "created_at": "2026-01-01T00:00:00+00:00"}]}),
+            encoding="utf-8")
+        self.assertEqual(index_shard.read_shards(self.proj), [],
+                         "a shard describing another layout was served")
+        # The same shard, describing where the root actually keeps this
+        # project's memory, is accepted.
+        data = json.loads((d / f"{other.id}.json").read_text())
+        data["memory_dir"] = str(other.memory_dir(self.proj))
+        (d / f"{other.id}.json").write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(len(index_shard.read_shards(self.proj)), 1)
+
+    def test_a_mode_change_clears_shards_of_every_project(self):
+        # Refusing a stale shard is permanent for a project that never opens
+        # again: it sits there rejected and logged forever. The change that
+        # invalidates them is the moment to drop them.
+        from foldcrumbs import index_shard
+        other = self.federation.register(self._root(".claude-work"),
+                                         mode="config")
+        projects = [self._home / f"drop{i}" for i in range(3)]
+        for proj in projects:
+            d = index_shard.shards_dir(proj)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"{other.id}.json").write_text(json.dumps({
+                "root_id": other.id, "version": index_shard.SHARD_VERSION,
+                "label": other.label,
+                "memory_dir": str(other.memory_dir(proj)),
+                "entries": []}), encoding="utf-8")
+        self.assertEqual(
+            len(list((self.config.STATE_DIR / "projects").glob(
+                f"*/roots/{other.id}.json"))), 3)
+        self.federation.unregister(other.id)          # consent for the change
+        moved = self.federation.register(self._root(".claude-work"),
+                                         mode="explicit")
+        self.assertEqual(moved.mode, "explicit")
+        # Every shard described the old config layout, so none survive.
+        self.assertEqual(
+            list((self.config.STATE_DIR / "projects").glob(
+                f"*/roots/{other.id}.json")), [],
+            "shards from the old layout were left to be refused forever")
+
+    def test_cleanup_does_not_delete_a_fresh_publication(self):
+        # Reading a shard then unlinking it is a check-then-act: a project
+        # publishing a fresh shard in that window had it deleted as though it
+        # were the old one. The cleanup takes the same lock write_shard does.
+        import contextlib as _c
+        from foldcrumbs import index_shard
+        other = self.federation.register(self._root(".claude-work"),
+                                         mode="config")
+        proj = self._home / "racing"
+        d = index_shard.shards_dir(proj)
+        d.mkdir(parents=True, exist_ok=True)
+        shard = d / f"{other.id}.json"
+        stale = {"root_id": other.id, "version": index_shard.SHARD_VERSION,
+                 "label": other.label,
+                 "memory_dir": str(self._home / "old-layout"), "entries": []}
+        shard.write_text(json.dumps(stale), encoding="utf-8")
+        real = self.federation.file_lock
+        fresh = dict(stale, memory_dir=str(other.memory_dir(proj)),
+                     entries=[{"filename": "new.md"}])
+
+        @_c.contextmanager
+        def publish_underneath(path, allow_unsupported=False):
+            with real(path, allow_unsupported=allow_unsupported) as held:
+                if held and path.name == f".lock-{other.id}":
+                    # What a concurrent publication would have written.
+                    shard.write_text(json.dumps(fresh), encoding="utf-8")
+                yield held
+
+        self.federation.file_lock = publish_underneath
+        try:
+            index_shard.drop_stale_shards(other)
+        finally:
+            self.federation.file_lock = real
+        self.assertTrue(shard.is_file(), "a fresh publication was deleted")
+        self.assertEqual(json.loads(shard.read_text())["entries"],
+                         [{"filename": "new.md"}])
+
+    def test_a_federated_recall_reads_the_local_store_once(self):
+        # search() scored the local store, then the federated pass resolved
+        # this store's claims by listing and parsing every local file again.
+        # Each recall paid for the local store twice, and the foreign-scan
+        # timeout does not bound that second pass.
+        from foldcrumbs.schema import MemoryRecord
+        self.federation.register(self._root(".claude-work"), mode="config")
+        for i in range(3):
+            self.store.write_memory(
+                MemoryRecord(title=f"local {i}", content=f"body {i}",
+                             type="fact"), cwd=str(self.proj))
+        reads, real = [], self.store.iter_memories
+
+        def counting(cwd=None):
+            reads.append(1)
+            return real(cwd)
+
+        self.store.iter_memories = counting
+        try:
+            self.store.search("local", cwd=str(self.proj), federated=True)
+        finally:
+            self.store.iter_memories = real
+        self.assertEqual(len(reads), 1,
+                         f"local store listed {len(reads)} times for one recall")
+
+    def test_cleanup_keeps_a_shard_published_through_an_alias(self):
+        # The reader learned to recognise aliases; the cleanup still judged by
+        # text, and there the verdict is an unlink. A shard freshly published
+        # under the root's real path was deleted as though it belonged to an
+        # abandoned layout.
+        from foldcrumbs import index_shard
+        real_root = self._home / "aliased-root"
+        (real_root / "projects").mkdir(parents=True, exist_ok=True)
+        alias = self._home / "cleanup-alias"
+        os.symlink(real_root, alias)
+        ref = self.federation.register(alias, mode="config")
+        proj = self._home / "aliased-project"
+        d = index_shard.shards_dir(proj)
+        d.mkdir(parents=True, exist_ok=True)
+        shard = d / f"{ref.id}.json"
+        # Same directory as ref.memory_dir(proj), spelled through the real path.
+        through_real = Path(str(ref.memory_dir(proj)).replace(
+            str(alias), str(real_root), 1))
+        through_real.mkdir(parents=True, exist_ok=True)
+        shard.write_text(json.dumps(
+            {"root_id": ref.id, "version": index_shard.SHARD_VERSION,
+             "label": ref.label, "memory_dir": str(through_real),
+             "entries": [{"filename": "kept.md"}]}), encoding="utf-8")
+        index_shard.drop_stale_shards(ref)
+        self.assertTrue(shard.is_file(),
+                        "a shard published through the root's real path was "
+                        "deleted as stale")
+
+        # A directory that is genuinely outside the root is still dropped.
+        elsewhere = self._home / "somewhere-else" / "memory"
+        elsewhere.mkdir(parents=True, exist_ok=True)
+        shard.write_text(json.dumps(
+            {"root_id": ref.id, "version": index_shard.SHARD_VERSION,
+             "label": ref.label, "memory_dir": str(elsewhere),
+             "entries": []}), encoding="utf-8")
+        index_shard.drop_stale_shards(ref)
+        self.assertFalse(shard.is_file(), "a truly stale shard survived")
+
+    def test_cleanup_drops_what_is_gone_but_not_what_it_cannot_read(self):
+        # These two are not the same fact. A directory that is *gone* proves
+        # the layout is dead; one the filesystem declines to describe — on a
+        # stalled mount, unreadable — proves nothing, and treating it as gone
+        # would let a slow disk look like a deletion and delete real shards.
+        from foldcrumbs import index_shard
+        ref = self.federation.register(self._root(".claude-work"),
+                                       mode="config")
+        d = index_shard.shards_dir(self._home / "judged")
+        d.mkdir(parents=True, exist_ok=True)
+        shard = d / f"{ref.id}.json"
+
+        def put(memory_dir):
+            shard.write_text(json.dumps(
+                {"root_id": ref.id, "version": index_shard.SHARD_VERSION,
+                 "label": ref.label, "memory_dir": str(memory_dir),
+                 "entries": []}), encoding="utf-8")
+
+        put(self._home / "never-existed" / "memory")
+        index_shard.drop_stale_shards(ref)
+        self.assertFalse(shard.is_file(),
+                         "a shard for a directory that is gone was kept")
+
+        opaque = self._home / "unreadable"
+        gone_quiet = opaque / "memory"
+        gone_quiet.mkdir(parents=True, exist_ok=True)
+        put(gone_quiet)
+        # Only this subtree refuses to be described — the root itself must
+        # still answer, or the shard would survive for the wrong reason.
+        real_stat = os.stat
+
+        def opaque_stat(path, *a, **k):
+            if str(path).startswith(str(opaque)):
+                raise OSError(errno.EIO, "I/O error")
+            return real_stat(path, *a, **k)
+
+        os.stat = opaque_stat
+        try:
+            index_shard.drop_stale_shards(ref)
+        finally:
+            os.stat = real_stat
+        self.assertTrue(shard.is_file(),
+                        "a shard was deleted on an answer nobody gave")
+
+    def test_cleanup_keeps_a_shard_whose_probe_never_answered(self):
+        # A probe that runs out of time is the same non-answer as an
+        # unreadable directory, and must not be read as "gone" either — a
+        # stalled mount would otherwise delete every shard published under it.
+        import threading as _t
+        from foldcrumbs import index_shard
+        ref = self.federation.register(self._root(".claude-work"),
+                                       mode="config")
+        d = index_shard.shards_dir(self._home / "timed-out")
+        d.mkdir(parents=True, exist_ok=True)
+        shard = d / f"{ref.id}.json"
+        stalled = self._home / "stalled"
+        (stalled / "memory").mkdir(parents=True, exist_ok=True)
+        shard.write_text(json.dumps(
+            {"root_id": ref.id, "version": index_shard.SHARD_VERSION,
+             "label": ref.label, "memory_dir": str(stalled / "memory"),
+             "entries": []}), encoding="utf-8")
+        release = _t.Event()
+        real_stat = os.stat
+
+        def hangs(path, *a, **k):
+            if str(path).startswith(str(stalled)):
+                release.wait(30)
+            return real_stat(path, *a, **k)
+
+        probe_timeout = self.federation._REGISTRY_PROBE_TIMEOUT
+        self.federation._REGISTRY_PROBE_TIMEOUT = 0.05
+        os.stat = hangs
+        try:
+            index_shard.drop_stale_shards(ref)
+        finally:
+            os.stat = real_stat
+            self.federation._REGISTRY_PROBE_TIMEOUT = probe_timeout
+            release.set()
+        self.assertTrue(shard.is_file(),
+                        "a shard was deleted because a probe timed out")
+
+    def test_a_stalled_mount_costs_the_cleanup_one_timeout_not_one_each(self):
+        # Every probe is bounded, but the bound is per call. Judging each shard
+        # on its own paid that bound again for every project of the root and
+        # left another unkillable os.stat thread behind, so a single stalled
+        # mount cost N seconds and N threads instead of one.
+        import threading as _t
+        from foldcrumbs import index_shard
+        ref = self.federation.register(self._root(".claude-work"),
+                                       mode="config")
+        stalled = self._home / "stalled-mount"
+        (stalled / "memory").mkdir(parents=True, exist_ok=True)
+        shards = []
+        for i in range(5):
+            d = index_shard.shards_dir(self._home / f"p{i}")
+            d.mkdir(parents=True, exist_ok=True)
+            shard = d / f"{ref.id}.json"
+            # A *distinct* directory each, all under the one hung mount: with
+            # a shared path the per-path memo alone would hide the cost, and
+            # the test would not be measuring the end-on-first-stall at all.
+            shard.write_text(json.dumps(
+                {"root_id": ref.id, "version": index_shard.SHARD_VERSION,
+                 "label": ref.label,
+                 "memory_dir": str(stalled / f"m{i}" / "memory"),
+                 "entries": []}), encoding="utf-8")
+            shards.append(shard)
+        release = _t.Event()
+        hung, lock = [], _t.Lock()
+        real_stat = os.stat
+
+        def hangs(path, *a, **k):
+            if str(path).startswith(str(stalled)):
+                with lock:
+                    hung.append(1)
+                release.wait(30)
+            return real_stat(path, *a, **k)
+
+        probe_timeout = self.federation._REGISTRY_PROBE_TIMEOUT
+        self.federation._REGISTRY_PROBE_TIMEOUT = 0.2
+        os.stat = hangs
+        try:
+            start = time.monotonic()
+            index_shard.drop_stale_shards(ref)
+            elapsed = time.monotonic() - start
+        finally:
+            os.stat = real_stat
+            self.federation._REGISTRY_PROBE_TIMEOUT = probe_timeout
+            release.set()
+        self.assertEqual(len(hung), 1,
+                         f"{len(hung)} blocked probes for {len(shards)} shards")
+        self.assertLess(elapsed, 0.2 * len(shards),
+                        "the cleanup paid the timeout once per shard")
+        self.assertTrue(all(s.is_file() for s in shards),
+                        "shards were dropped on an answer nobody gave")
+
+    def test_the_root_describes_itself_once_per_cleanup(self):
+        # Judging each shard on its own re-read the root's identity every time.
+        # That read is a bounded probe: on a slow root it cost its timeout once
+        # per project, and this is the guard that stops it — separate from
+        # ending the sweep when some *other* path stalls.
+        from foldcrumbs import index_shard
+        ref = self.federation.register(self._root(".claude-work"),
+                                       mode="config")
+        shards = []
+        for i in range(5):
+            d = index_shard.shards_dir(self._home / f"q{i}")
+            d.mkdir(parents=True, exist_ok=True)
+            shard = d / f"{ref.id}.json"
+            # Outside the root, so every one is nominated and reaches the
+            # filesystem check — the root answers normally throughout.
+            shard.write_text(json.dumps(
+                {"root_id": ref.id, "version": index_shard.SHARD_VERSION,
+                 "label": ref.label,
+                 "memory_dir": str(self._home / f"gone{i}" / "memory"),
+                 "entries": []}), encoding="utf-8")
+            shards.append(shard)
+        looked, real_stat = [], os.stat
+
+        def counting(path, *a, **k):
+            if str(path) == str(ref.path):
+                looked.append(1)
+            return real_stat(path, *a, **k)
+
+        os.stat = counting
+        try:
+            index_shard.drop_stale_shards(ref)
+        finally:
+            os.stat = real_stat
+        self.assertEqual(len(looked), 1,
+                         f"the root described itself {len(looked)} times for "
+                         f"{len(shards)} shards")
+        self.assertFalse(any(s.is_file() for s in shards),
+                         "the stale shards were not dropped")
+
+    def test_departure_cleanup_spares_a_root_that_has_come_back(self):
+        # The departure runs on a thread the relocation stopped waiting for,
+        # so it can reach this cleanup long afterwards — by which time the
+        # root may have returned to that registry and republished there.
+        # Deleting then would destroy a *fresh* shard, not a left-behind one.
+        import contextlib as _c
+        from foldcrumbs import index_shard
+        ref = self.federation.register(self._root(".claude-work"))
+        left = self._home / "left-registry"
+        (left / "roots").mkdir(parents=True, exist_ok=True)
+        d = left / "projects" / "alpha" / "roots"
+        d.mkdir(parents=True, exist_ok=True)
+        shard = d / f"{ref.id}.json"
+
+        def put(entries):
+            shard.write_text(json.dumps(
+                {"root_id": ref.id, "version": index_shard.SHARD_VERSION,
+                 "label": ref.label, "memory_dir": str(ref.memory_dir("alpha")),
+                 "entries": entries}), encoding="utf-8")
+
+        put([{"filename": "before-the-move.md"}])
+        real = self.federation.file_lock
+
+        @_c.contextmanager
+        def returns_underneath(path, allow_unsupported=False):
+            with real(path, allow_unsupported=allow_unsupported) as held:
+                if held and path.name == f".lock-{ref.id}":
+                    # Proves the interleaving rather than hoping for it: the
+                    # return lands while the cleanup holds the shard lock,
+                    # which is the only window where it could be destroyed.
+                    (left / "roots" / f"{ref.id}.json").write_text(json.dumps(
+                        {"id": ref.id, "path": str(ref.path), "mode": "config",
+                         "label": ref.label}), encoding="utf-8")
+                    put([{"filename": "republished.md"}])
+                yield held
+
+        self.federation.file_lock = returns_underneath
+        try:
+            dropped = index_shard.drop_root_shards_in(left, ref.id)
+        finally:
+            self.federation.file_lock = real
+        self.assertTrue(shard.is_file(), "deleted a fresh republication")
+        self.assertEqual(json.loads(shard.read_text())["entries"],
+                         [{"filename": "republished.md"}])
+        self.assertEqual(dropped, 0)
+
+    def test_a_shard_written_through_an_alias_is_still_served(self):
+        # Paths are stored unresolved on purpose, so a root reached through a
+        # symlink yields a different string for the same directory. Comparing
+        # text alone rejected its shards for good: publishing through the alias
+        # kept producing the same rejected value.
+        from foldcrumbs import index_shard
+        real_root = self._home / "real-root"
+        (real_root / "projects").mkdir(parents=True, exist_ok=True)
+        alias = self._home / "alias-root"
+        os.symlink(real_root, alias)
+        ref = self.federation.register(alias)          # registered via alias
+        d = index_shard.shards_dir(self.proj)
+        d.mkdir(parents=True, exist_ok=True)
+        # A shard recorded through the *real* path: same directory, other name.
+        via_real = str(real_root / "projects"
+                       / self.config.encode_cwd(self.proj) / "memory")
+        via_real_path = Path(via_real)
+        via_real_path.mkdir(parents=True, exist_ok=True)
+        self.assertNotEqual(via_real, str(ref.memory_dir(self.proj)))
+        (d / f"{ref.id}.json").write_text(json.dumps({
+            "root_id": ref.id, "version": index_shard.SHARD_VERSION,
+            "label": ref.label, "memory_dir": via_real,
+            "entries": [{"filename": "a.md", "type": "fact", "title": "A",
+                         "path": f"{via_real}/a.md",
+                         "created_at": "2026-01-01T00:00:00+00:00"}]}),
+            encoding="utf-8")
+        # It is the same directory, so it is served.
+        self.assertEqual(len(index_shard.read_shards(self.proj)), 1,
+                         "an alias of the same directory was rejected")
+        # A genuinely different directory still is not.
+        (d / f"{ref.id}.json").write_text(json.dumps({
+            "root_id": ref.id, "version": index_shard.SHARD_VERSION,
+            "label": ref.label,
+            "memory_dir": str(self._home / "somewhere-else"),
+            "entries": []}), encoding="utf-8")
+        self.assertEqual(index_shard.read_shards(self.proj), [])
+
+    def test_a_scan_is_never_reused_across_projects(self):
+        # Keyed on the root alone, a recall for another project would join an
+        # in-flight scan and be handed the wrong project's memories.
+        import threading as _t
+        from foldcrumbs.schema import MemoryRecord
+        other = self.federation.register(self._root(".claude-work"))
+        proj_b = self._home / "proj-b"
+        proj_b.mkdir(parents=True, exist_ok=True)
+        for proj, title in ((self.proj, "Belongs to A"), (proj_b, "Belongs to B")):
+            d = other.memory_dir(proj)
+            d.mkdir(parents=True, exist_ok=True)
+            rec = MemoryRecord(title=title, content=f"Memory of {title}.")
+            (d / rec.filename()).write_text(rec.to_markdown(), encoding="utf-8")
+
+        # Sequentially the slot is already cleared, so the bug only shows with
+        # A's scan still in flight — which is exactly when B would join it.
+        real = self.store.iter_memories_in
+        started = _t.Event()
+
+        def slow_for_a(directory, max_files=None):
+            if str(directory) == str(other.memory_dir(self.proj)):
+                started.set()
+                time.sleep(0.6)
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = slow_for_a
+        out_a = []
+        try:
+            t = _t.Thread(target=lambda: out_a.extend(
+                r.title for r in self.store.iter_federated(self.proj)))
+            t.start()
+            self.assertTrue(started.wait(2))
+            b = [r.title for r in self.store.iter_federated(proj_b)]
+            t.join(5)
+        finally:
+            self.store.iter_memories_in = real
+            self._drain_scans()
+        self.assertEqual(b, ["Belongs to B"], "joined another project's scan")
+        self.assertEqual(out_a, ["Belongs to A"])
+
+    def test_an_explicit_root_does_not_leak_claims_between_projects(self):
+        # An explicit root serves every cwd from one fixed directory, so two
+        # projects share a memory dir. Their claims are not shared, and it is
+        # the claims that decide which records come back marked obsolete.
+        import threading as _t
+        from foldcrumbs.schema import MemoryRecord
+        pinned = self._home / "pinned-store"
+        pinned.mkdir(parents=True, exist_ok=True)
+        other = self.federation.register(pinned, mode="explicit")
+        theirs = MemoryRecord(title="Deploy on Mondays", content="Mondays only.")
+        (pinned / theirs.filename()).write_text(theirs.to_markdown(),
+                                                encoding="utf-8")
+        proj_b = self._home / "proj-b2"
+        proj_b.mkdir(parents=True, exist_ok=True)
+        claim = MemoryRecord(title="Moved to Friday", content="Fridays now.")
+        claim.supersedes_external = [f"{other.id}:{theirs.filename()}"]
+        self.store.write_memory(claim, self.proj)   # only project A claims it
+
+        real = self.store.iter_memories_in
+        started = _t.Event()
+
+        def slow(directory, max_files=None):
+            if str(directory) == str(pinned) and not started.is_set():
+                started.set()
+                time.sleep(0.6)
+            yield from real(directory, max_files=max_files)
+
+        self.store.iter_memories_in = slow
+        marks_a = []
+        try:
+            t = _t.Thread(target=lambda: marks_a.extend(
+                r.contested_by for r in self.store.iter_federated(self.proj)))
+            t.start()
+            self.assertTrue(started.wait(2))
+            b = list(self.store.iter_federated(proj_b))
+            t.join(5)
+        finally:
+            self.store.iter_memories_in = real
+            self._drain_scans()
+        self.assertEqual(marks_a, ["Moved to Friday"])
+        self.assertEqual([r.contested_by for r in b], [None])
 
     def test_iter_memories_stays_local(self):
         # The write paths are all built on it; federating it would let a
