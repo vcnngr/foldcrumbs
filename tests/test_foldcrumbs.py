@@ -144,6 +144,7 @@ class TestRecordFieldOrder(unittest.TestCase):
         self.assertEqual(rec.supersedes_external, ["0123456789abcdef:x.md"])
         self.assertEqual(rec.origin_root, "claude")
         self.assertIsNone(rec.contested_by)      # appended, so still default
+        self.assertFalse(rec.id_missing)         # appended after it
 
     def test_claims_survive_a_round_trip(self):
         rec = MemoryRecord(title="T", content="body",
@@ -190,6 +191,424 @@ class TestStore(TmpStore):
         b = MemoryRecord(title="", content="two", type="fact")
         self.assertEqual(a.title, "Untitled")
         self.assertNotEqual(a.filename(), b.filename())
+
+
+class TestRecallReinforcement(TmpStore):
+    """A memory that keeps being needed should separate itself from its peers."""
+
+    def _put(self, title, body):
+        rec = MemoryRecord(title=title, content=body, type="fact")
+        store.write_memory(rec)
+        return rec
+
+    def test_a_recall_records_what_it_returned(self):
+        from foldcrumbs import recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        self.assertEqual(recalls.counts(), {})
+        hits = store.search("lockfile", federated=False)
+        self.assertEqual([m.title for m in hits], ["Lockfile"])
+        self.assertEqual(recalls.counts().get(rec.id), 1)
+        store.search("lockfile", federated=False)
+        self.assertEqual(recalls.counts().get(rec.id), 2)
+
+    def test_only_what_was_returned_is_reinforced(self):
+        # Counting candidates instead of results would reinforce the whole
+        # store on every search, which is the same as reinforcing nothing.
+        from foldcrumbs import recalls
+        wanted = self._put("Lockfile", "The lockfile is committed.")
+        other = self._put("Timezone", "All timestamps are UTC.")
+        store.search("lockfile", federated=False)
+        counted = recalls.counts()
+        self.assertEqual(counted.get(wanted.id), 1)
+        self.assertIsNone(counted.get(other.id),
+                          "a memory nobody asked for was reinforced")
+
+    def test_use_separates_equals_without_outranking_relevance(self):
+        from foldcrumbs import recalls
+        # Two memories the query matches equally well.
+        used = self._put("Deploy notes A", "Deploy runs on Tuesday.")
+        unused = self._put("Deploy notes B", "Deploy runs on Tuesday.")
+        recalls.reinforce([used.id] * 10)
+        hits = store.search("deploy runs", federated=False)
+        self.assertEqual([m.filename() for m in hits],
+                         [used.filename(), unused.filename()],
+                         "the well-used memory did not come first")
+        # And a strong match still beats a heavily-used weak one.
+        exact = self._put("Rollback", "Rollback is one command: make undo.")
+        recalls.reinforce([used.id] * 50)
+        hits = store.search("rollback is one command", federated=False)
+        self.assertEqual(hits[0].filename(), exact.filename(),
+                         "use outranked a better match")
+
+    def test_a_better_match_always_wins_however_used_the_other_is(self):
+        # Folding the bonus into the score let a near match times its bonus
+        # overtake an exact one — 0.9613 x 1.1 beats 1.0 — so a memory could
+        # be outranked by a worse answer that simply got asked for more.
+        from foldcrumbs import recalls
+        # 1.0000 against 0.9655 — close enough that a 10% bonus overtook it,
+        # far enough that one genuinely answers the question better.
+        exact = self._put("Deploy exact", "deploy runs tuesday at nine")
+        near = self._put("Deploy near", "deploy always runs on a tuesday morning")
+        recalls.reinforce([near.id] * 100)
+        hits = store.search("deploy runs tuesday", federated=False)
+        self.assertEqual(len(hits), 2, "the fixture stopped matching both")
+        self.assertEqual(hits[0].filename(), exact.filename(),
+                         "a heavily-used near match outranked the exact one")
+
+    def test_an_arbitrary_tiebreak_does_not_compound(self):
+        # Equally-relevant memories are cut by the limit on filename order.
+        # Reinforcing only the winner turned that coin flip into a permanent
+        # lead — exposure compounding into rank, reflecting nothing but having
+        # sorted first.
+        from foldcrumbs import recalls
+        a = self._put("Deploy A", "Deploy runs on Tuesday.")
+        b = self._put("Deploy B", "Deploy runs on Tuesday.")
+        for _ in range(5):
+            store.search("deploy runs on tuesday", limit=1, federated=False)
+        counted = recalls.counts()
+        self.assertEqual(counted.get(a.filename()), counted.get(b.filename()),
+                         f"the tiebreak compounded: {counted}")
+
+    def test_a_memory_that_leaves_any_way_loses_its_count(self):
+        # forget is not the only exit: supersede, the contradiction pass and
+        # prune all retire a memory. Cleaning up at each call site is a rule
+        # to remember four times and forget the fifth.
+        from foldcrumbs import recalls
+        old = self._put("Deadline", "Ship on Friday.")
+        store.search("deadline ship", federated=False)
+        self.assertIn(old.id, recalls.counts())
+        new = self._put("Deadline moved", "Ship on Monday instead.")
+        self.assertTrue(store.supersede(old.filename(), new.filename()))
+        store.search("deadline ship", federated=False)
+        self.assertNotIn(old.id, recalls.counts(),
+                         "a superseded memory kept its count")
+
+    def test_a_store_that_could_not_be_read_keeps_its_counts(self):
+        # A caller that cannot vouch for its listing passes None. An unreadable
+        # directory yields the same empty list as an empty store, and treating
+        # the two alike would erase every count ever earned.
+        from foldcrumbs import recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        store.search("lockfile", federated=False)
+        self.assertIn(rec.id, recalls.counts())
+        recalls.reinforce([], cwd=None, known=None)
+        self.assertIn(rec.id, recalls.counts(),
+                      "an unvouched listing erased the counts")
+
+    def test_a_file_that_will_not_open_does_not_cost_the_others_their_counts(self):
+        # End-to-end, through search() itself. The directory exists, so a
+        # guard that only checked is_dir() called the listing complete — while
+        # the memory that would not open was missing from it, and every count
+        # belonging to a memory unreadable at that instant was erased.
+        from foldcrumbs import recalls
+        kept = self._put("Lockfile", "The lockfile is committed.")
+        other = self._put("Timezone", "All timestamps are UTC.")
+        store.search("lockfile", federated=False)
+        store.search("timestamps utc", federated=False)
+        before = recalls.counts()
+        self.assertEqual(sorted(before), sorted([kept.id, other.id]))
+
+        unreadable = Path(self.dir) / kept.filename()
+        real_read = Path.read_text
+
+        def refuses(self_path, *args, **kw):
+            if Path(self_path) == unreadable:
+                raise OSError(errno.EACCES, "permission denied")
+            return real_read(self_path, *args, **kw)
+
+        Path.read_text = refuses
+        try:
+            hits = store.search("timestamps utc", federated=False)
+        finally:
+            Path.read_text = real_read
+        self.assertEqual([m.title for m in hits], ["Timezone"],
+                         "the readable memory stopped being found")
+        self.assertIn(kept.id, recalls.counts(),
+                      "a momentarily unreadable memory lost its count")
+
+    def test_the_scan_streams_rather_than_building_a_list(self):
+        # The federated scan runs this on a thread it stops waiting for and
+        # keeps whatever arrived before the deadline. Reading the whole
+        # directory before yielding anything turns every timeout into an empty
+        # result — a slow store stops contributing instead of contributing
+        # less.
+        for i in range(6):
+            self._put(f"Memory {i}", f"Body {i}.")
+        seen = []
+        for rec in store.iter_memories_in(Path(self.dir)):
+            seen.append(rec.title)
+            if len(seen) == 2:
+                break          # what a deadline does
+        self.assertEqual(len(seen), 2,
+                         "the scan read past the point the caller stopped")
+
+    def test_an_abandoned_scan_never_calls_itself_complete(self):
+        # Completeness starts False and is earned by reaching the end, so a
+        # reader that gave up cannot mistake its partial view for the store.
+        for i in range(4):
+            self._put(f"Memory {i}", f"Body {i}.")
+        report: dict = {}
+        gen = store.iter_memories_in(Path(self.dir), report=report)
+        next(gen)
+        self.assertFalse(report.get("complete"),
+                         "a scan called itself complete before finishing")
+        gen.close()
+        self.assertFalse(report.get("complete"),
+                         "an abandoned scan reported completeness")
+        _, complete = store.scan_store(Path(self.dir))
+        self.assertTrue(complete, "a scan read to the end was not complete")
+
+    def test_a_truncated_scan_is_not_complete(self):
+        for i in range(5):
+            self._put(f"Memory {i}", f"Body {i}.")
+        records, complete = store.scan_store(Path(self.dir), max_files=2)
+        self.assertEqual(len(records), 2)
+        self.assertFalse(complete, "a capped scan claimed to be the whole store")
+
+    def test_a_file_that_parses_to_nothing_does_not_make_a_scan_incomplete(self):
+        # Only *unreadable* means incomplete. A file that opened has been
+        # accounted for, however little it turned out to hold — and calling
+        # that incomplete would stop the store from ever reconciling counts,
+        # since from_markdown is tolerant enough that such files are common.
+        self._put("Lockfile", "The lockfile is committed.")
+        (Path(self.dir) / "not_a_memory.md").write_text(
+            "just some prose someone dropped here", encoding="utf-8")
+        records, complete = store.scan_store(Path(self.dir))
+        self.assertIn("Lockfile", [m.title for m in records])
+        self.assertTrue(complete, "a readable file was counted as unreadable")
+
+    def test_a_file_that_is_not_text_does_not_blind_the_store(self):
+        # UnicodeDecodeError is a ValueError, not an OSError. Splitting the
+        # read from the parse let it escape the handler and abort the scan, so
+        # a single junk file anywhere in the memory directory stopped recall
+        # from finding anything at all.
+        kept = self._put("Lockfile", "The lockfile is committed.")
+        (Path(self.dir) / "binary.md").write_bytes(b"\xff\xfe\x00garbage\x80")
+        records, complete = store.scan_store(Path(self.dir))
+        self.assertIn(kept.title, [m.title for m in records],
+                      "one undecodable file hid the whole store")
+        self.assertTrue(complete,
+                        "a file that was read counted as unreadable, which "
+                        "switches reconciliation off for good")
+        hits = store.search("lockfile committed", federated=False)
+        self.assertEqual([m.title for m in hits], ["Lockfile"])
+
+    def test_a_different_memory_on_the_same_file_starts_from_nothing(self):
+        # Filenames are type + title, so a different memory can land on the
+        # same file: "Deadline: ship Friday" becoming "Deadline: ship Monday"
+        # scores below the dedup threshold and simply overwrites it. Keyed by
+        # filename the new memory inherited a rank it never earned; keyed by
+        # id it cannot, and the stale entry leaves at the next reconciliation.
+        from foldcrumbs import recalls
+        first = self._put("Deadline", "Ship on Friday.")
+        for _ in range(7):
+            store.search("deadline ship friday", federated=False)
+        self.assertGreater(recalls.counts().get(first.id, 0), 1)
+        replacement = MemoryRecord(title="Deadline",
+                                   content="Ship on Monday instead, plans changed.",
+                                   type="fact")
+        self.assertEqual(replacement.filename(), first.filename(),
+                         "the fixture no longer collides on the filename")
+        store.write_memory(replacement)
+        store.search("deadline ship monday", federated=False)
+        counted = recalls.counts()
+        self.assertEqual(counted.get(replacement.id), 1,
+                         "the new memory inherited the old one's rank")
+        self.assertNotIn(first.id, counted,
+                         "the replaced memory's weight was left behind")
+
+    def test_rewriting_the_same_memory_keeps_its_count(self):
+        # The other half: touching a memory must not cost it its history.
+        from foldcrumbs import recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        for _ in range(3):
+            store.search("lockfile committed", federated=False)
+        before = recalls.counts().get(rec.id)
+        rec.content = "The lockfile is committed, always."
+        store.write_memory(rec)
+        self.assertEqual(recalls.counts().get(rec.id), before,
+                         "editing a memory reset its own history")
+
+    def test_a_read_only_consumer_writes_nothing(self):
+        # A machine sharing the store over Syncthing while another does the
+        # writing. Recall still works there; writing is what is switched off,
+        # and a count is no exception — otherwise every recall churns a synced
+        # file and invites conflicts.
+        from foldcrumbs import config as _config, recalls
+        self._put("Lockfile", "The lockfile is committed.")
+        marker = _config.STATE_DIR / "no-distill"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", encoding="utf-8")
+        try:
+            hits = store.search("lockfile committed", federated=False)
+        finally:
+            marker.unlink()
+        self.assertEqual([m.title for m in hits], ["Lockfile"],
+                         "recall stopped working on a read-only consumer")
+        self.assertFalse((Path(self.dir) / recalls.SIDECAR).exists(),
+                         "a read-only consumer wrote to the shared store")
+
+    def test_reinforcement_does_not_wait_on_a_held_lock(self):
+        # This runs on the read path. The default five-second wait is right
+        # for a registration and absurd for a count nobody needs: a contended
+        # sidecar would have held up every recall behind it.
+        from foldcrumbs import federation, recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        waits = []
+        real = federation.file_lock
+
+        def noting(path, allow_unsupported=False, wait=None):
+            if path.name == ".lock-recalls":
+                waits.append(wait)
+            return real(path, allow_unsupported=allow_unsupported, wait=wait)
+
+        federation.file_lock = noting
+        try:
+            store.search("lockfile committed", federated=False)
+        finally:
+            federation.file_lock = real
+        self.assertTrue(waits, "the sidecar was written without a lock")
+        self.assertLess(waits[0], 1.0,
+                        f"a recall would wait {waits[0]}s on a busy sidecar")
+        self.assertGreater(recalls.counts().get(rec.id, 0), 0)
+
+    def test_a_lost_lock_cannot_transfer_a_rank(self):
+        # Clearing the old count when a file is taken over was tried first,
+        # and it is a write that can fail: one lost lock silently handed the
+        # new memory the old one's rank. Keyed by id there is nothing to
+        # clear — the new record simply has no history, whatever the lock did.
+        from foldcrumbs import federation, recalls
+        first = self._put("Deadline", "Ship on Friday.")
+        for _ in range(7):
+            store.search("deadline ship friday", federated=False)
+        self.assertGreater(recalls.counts().get(first.id, 0), 1)
+
+        @contextlib.contextmanager
+        def never_granted(path, allow_unsupported=False, wait=None):
+            yield False           # every sidecar write fails from here on
+
+        real = federation.file_lock
+        federation.file_lock = never_granted
+        try:
+            replacement = MemoryRecord(
+                title="Deadline", content="Ship on Monday instead, plans changed.",
+                type="fact")
+            self.assertEqual(replacement.filename(), first.filename(),
+                             "the fixture no longer collides on the filename")
+            store.write_memory(replacement)
+        finally:
+            federation.file_lock = real
+        hits = store.search("deadline ship monday", federated=False)
+        self.assertEqual(hits[0].id, replacement.id)
+        self.assertEqual(recalls.counts().get(replacement.id), 1,
+                         "the replacement started with a rank it never earned")
+
+    def test_a_memory_written_before_ids_is_not_counted(self):
+        # Such a file gets a fresh uuid on every load, so a count would be
+        # filed under a key that never comes back: it could never accumulate,
+        # and each recall would add an entry and reconcile away the last —
+        # churning a file that may well be synced between machines.
+        from foldcrumbs import recalls
+        legacy = Path(self.dir) / "fact_legacy.md"
+        legacy.write_text(
+            "---\nname: Legacy\ndescription: hook\ntype: fact\n---\n\n"
+            "Written before ids were serialized.\n", encoding="utf-8")
+        first = [m for m in store.load_all() if m.title == "Legacy"][0]
+        second = [m for m in store.load_all() if m.title == "Legacy"][0]
+        self.assertTrue(first.id_missing)
+        self.assertNotEqual(first.id, second.id,
+                            "the fixture no longer models an id-less memory")
+        for _ in range(4):
+            hits = store.search("legacy written before", federated=False)
+            self.assertEqual([m.title for m in hits], ["Legacy"],
+                             "an id-less memory stopped being recalled")
+        self.assertEqual(recalls.counts(), {},
+                         "an id that changes on every read was counted anyway")
+
+    def test_an_empty_store_is_an_answer_and_clears_the_counts(self):
+        # The other half: when the store really has nothing active, no count
+        # belongs to anything. Refusing to act on an empty answer — or bailing
+        # out because this recall had nothing to add — left the weight behind.
+        from foldcrumbs import recalls
+        recalls.reinforce(["fact_ghost.md"] * 4)
+        self.assertEqual(recalls.counts(), {"fact_ghost.md": 4})
+        self.assertEqual(store.search("anything at all", federated=False), [])
+        self.assertEqual(recalls.counts(), {},
+                         "a weight survived a store with nothing in it")
+
+    def test_a_reused_filename_does_not_inherit_the_old_weight(self):
+        # Filenames are type + slug, so a new memory with the same title lands
+        # on the same file. Inheriting the retired memory's count would hand a
+        # brand-new memory a rank it never earned.
+        from foldcrumbs import recalls
+        first = self._put("Deadline", "Ship on Friday.")
+        for _ in range(6):
+            store.search("deadline ship friday", federated=False)
+        self.assertGreater(recalls.counts().get(first.id, 0), 1)
+        replacement = self._put("Deadline moved", "Ship on Monday instead.")
+        self.assertTrue(store.supersede(first.filename(),
+                                        replacement.filename()))
+        # Same title, so the same file — retired and rewritten with no recall
+        # in between, which is exactly when a leftover weight is inherited.
+        again = self._put("Deadline", "Ship on Wednesday now.")
+        self.assertEqual(again.filename(), first.filename(),
+                         "the fixture no longer reuses the filename")
+        store.search("deadline ship wednesday", federated=False)
+        self.assertEqual(recalls.counts().get(again.id), 1,
+                         "the new memory inherited the old one's weight")
+
+    def test_a_zero_limit_reinforces_nothing(self):
+        # search() returns nothing, so nothing was used. Reading the cutoff
+        # from scored[limit - 1] made that scored[-1] — the *worst* match —
+        # and reinforced candidates no caller ever saw.
+        from foldcrumbs import recalls
+        self._put("Lockfile", "The lockfile is committed.")
+        self.assertEqual(store.search("lockfile", limit=0, federated=False), [])
+        self.assertEqual(recalls.counts(), {},
+                         "a recall that returned nothing reinforced something")
+
+    def test_the_count_never_drags_in_what_did_not_match(self):
+        from foldcrumbs import recalls
+        rec = self._put("Unrelated", "Nothing to do with the question.")
+        recalls.reinforce([rec.id] * 100)
+        hits = store.search("kubernetes ingress annotations", federated=False)
+        self.assertEqual([m.title for m in hits], [],
+                         "reinforcement pulled in a memory that did not match")
+
+    def test_forgetting_a_memory_forgets_its_count(self):
+        from foldcrumbs import recalls
+        rec = self._put("Lockfile", "The lockfile is committed.")
+        store.search("lockfile", federated=False)
+        self.assertIn(rec.id, recalls.counts())
+        store.forget(rec.filename())
+        self.assertNotIn(rec.id, recalls.counts(),
+                         "the count outlived the memory it described")
+
+    def test_the_sidecar_is_not_read_as_a_memory(self):
+        from foldcrumbs import recalls
+        self._put("Lockfile", "The lockfile is committed.")
+        store.search("lockfile", federated=False)
+        self.assertTrue((Path(self.dir) / recalls.SIDECAR).is_file())
+        titles = [m.title for m in store.load_all()]
+        self.assertEqual(titles, ["Lockfile"],
+                         f"the sidecar leaked into the store: {titles}")
+
+    def test_recall_survives_a_store_that_cannot_be_written(self):
+        # Reinforcement is advisory. A read-only store must still answer.
+        from foldcrumbs import recalls
+        self._put("Lockfile", "The lockfile is committed.")
+        real = recalls._write
+
+        def refuses(target, data):
+            raise OSError(errno.EROFS, "read-only file system")
+
+        recalls._write = refuses
+        try:
+            hits = store.search("lockfile", federated=False)
+        finally:
+            recalls._write = real
+        self.assertEqual([m.title for m in hits], ["Lockfile"],
+                         "a failed count cost the caller its answer")
 
 
 class TestDistill(unittest.TestCase):
@@ -4798,17 +5217,21 @@ class TestFederatedSearch(_FederationEnv):
             self.store.write_memory(
                 MemoryRecord(title=f"local {i}", content=f"body {i}",
                              type="fact"), cwd=str(self.proj))
-        reads, real = [], self.store.iter_memories
+        # Counted at the one place that touches the directory, so the test
+        # keeps measuring listings even if the callers above it change.
+        reads, real = [], self.store.scan_store
+        local_dir = self.store.config.memory_dir(str(self.proj))
 
-        def counting(cwd=None):
-            reads.append(1)
-            return real(cwd)
+        def counting(directory, max_files=None):
+            if Path(directory) == local_dir:
+                reads.append(1)
+            return real(directory, max_files)
 
-        self.store.iter_memories = counting
+        self.store.scan_store = counting
         try:
             self.store.search("local", cwd=str(self.proj), federated=True)
         finally:
-            self.store.iter_memories = real
+            self.store.scan_store = real
         self.assertEqual(len(reads), 1,
                          f"local store listed {len(reads)} times for one recall")
 

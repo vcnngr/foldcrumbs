@@ -137,7 +137,7 @@ _CONTENDED_ERRNOS = frozenset(
 
 
 @contextlib.contextmanager
-def _mkdir_lock(lockdir: Path):
+def _mkdir_lock(lockdir: Path, wait: float | None = None):
     """Portable mutual exclusion for platforms without ``fcntl``.
 
     ``mkdir`` is atomic and fails if the directory exists, which is all an
@@ -159,7 +159,8 @@ def _mkdir_lock(lockdir: Path):
     A holder killed mid-mutation therefore leaves the lock behind. That is a
     manual cleanup, and the log says exactly which directory to remove.
     """
-    deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+    deadline = time.monotonic() + (
+        _LOCK_WAIT_SECONDS if wait is None else wait)
     owner_name = f"owner-{uuid.uuid4().hex}"
     owner = lockdir / owner_name
     held = False
@@ -229,7 +230,8 @@ def _mkdir_lock(lockdir: Path):
 
 
 @contextlib.contextmanager
-def file_lock(lock_path: Path, allow_unsupported: bool = False):
+def file_lock(lock_path: Path, allow_unsupported: bool = False,
+              wait: float | None = None):
     """Exclusive lock on one path, bounded in time. Yields True while held.
 
     Scoped deliberately: callers pass the narrowest path that covers what
@@ -254,7 +256,8 @@ def file_lock(lock_path: Path, allow_unsupported: bool = False):
             config.log_event(f"federation: cannot open lock {lock_path}")
             yield False
             return
-        deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+        deadline = time.monotonic() + (
+        _LOCK_WAIT_SECONDS if wait is None else wait)
         while True:
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -304,7 +307,7 @@ def file_lock(lock_path: Path, allow_unsupported: bool = False):
             fh.close()
         return
 
-    with _mkdir_lock(Path(str(lock_path) + ".d")) as held:
+    with _mkdir_lock(Path(str(lock_path) + ".d"), wait) as held:
         if not held:
             config.log_event(f"federation: could not lock {lock_path}; not mutating")
         yield held
