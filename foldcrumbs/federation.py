@@ -1137,6 +1137,7 @@ def register(
     label: str | None = None,
     *,
     relocate: bool = True,
+    unique_label: bool = False,
 ) -> RootRef | None:
     """Register a root so other instances can see it. Idempotent.
 
@@ -1152,7 +1153,22 @@ def register(
     with _registry_lock() as locked:
         if not locked:
             return None
-        return _register_locked(root_path, mode, label, relocate=relocate)
+        return _register_locked(root_path, mode, label, relocate=relocate,
+                                unique_label=unique_label)
+
+
+def _label_taken(label: str, root_path: Path) -> RootRef | None:
+    """A registered root already answering to this label, other than this one.
+
+    Read under the registry lock by ``_register_locked`` — that is the whole
+    point. Checking before calling register is a check-then-act: two processes
+    both find the name free and both take it, and the result is a name that
+    identifies nothing.
+    """
+    for ref in iter_roots():
+        if ref.label == label and _same_path(ref.path, root_path) is not True:
+            return ref
+    return None
 
 
 def _register_locked(
@@ -1161,6 +1177,7 @@ def _register_locked(
     label: str | None,
     *,
     relocate: bool,
+    unique_label: bool = False,
 ) -> RootRef | None:
     explicit_path = root_path is not None
     root_path = root_path if explicit_path else current_root_path()
@@ -1173,6 +1190,14 @@ def _register_locked(
     want_mode = mode or ("config" if explicit_path else current_mode())
     if want_mode not in VALID_MODES:
         raise FederationConflict(f"unknown root mode {want_mode!r}")
+
+    if unique_label:
+        wanted = label or _label_for(root_path)
+        clash = _label_taken(wanted, root_path)
+        if clash is not None:
+            raise FederationConflict(
+                f"a root called {wanted!r} is already registered at "
+                f"{clash.path} ({clash.id})")
 
     try:
         root_path.mkdir(parents=True, exist_ok=True)

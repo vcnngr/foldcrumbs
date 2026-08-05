@@ -4725,10 +4725,27 @@ class TestProfiles(_FederationEnv):
         self.assertTrue((first.path).is_dir(),
                         "an ambiguous name unregistered something anyway")
 
-    def test_a_name_already_taken_is_refused(self):
-        self.profiles.add("councillor")
-        with self.assertRaises(ValueError):
-            self.profiles.add("councillor")
+    def test_a_name_another_root_already_holds_is_refused(self):
+        # Under the registry lock, not before it: asking first would be a
+        # check-then-act — two processes both find the name free, both take
+        # it, and it then identifies nothing.
+        first = self.profiles.add("councillor")
+        elsewhere = self._home / "another-councillor"
+        elsewhere.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(self.federation.FederationConflict):
+            self.profiles.add("councillor", path=elsewhere)
+        self.assertEqual(
+            [p["path"] for p in self.profiles.listing()
+             if p["name"] == "councillor"], [str(first.path)],
+            "a second root took a name that was already in use")
+
+    def test_re_adding_the_same_profile_is_idempotent(self):
+        # Same name, same directory: that is the profile being registered
+        # again, not a second one claiming its name.
+        first = self.profiles.add("councillor")
+        again = self.profiles.add("councillor")
+        self.assertIsNotNone(again)
+        self.assertEqual(again.id, first.id)
 
     def test_the_env_line_survives_an_awkward_path(self):
         # A memory directory can hold a space, a quote, a dollar sign. A line

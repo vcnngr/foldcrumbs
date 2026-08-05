@@ -88,10 +88,6 @@ def add(name: str, kind: str = DEDICATED, path: str | os.PathLike[str] | None = 
         raise ValueError(f"not a profile shape: {kind}")
     if not name or "/" in name or os.sep in name or name.startswith("."):
         raise ValueError(f"not usable as a profile name: {name!r}")
-    if _matching(name):
-        raise ValueError(
-            f"a profile called {name!r} is already registered — remove it "
-            "first, or choose another name")
     if path is None:
         if kind == SHARED:
             raise ValueError(
@@ -100,7 +96,11 @@ def add(name: str, kind: str = DEDICATED, path: str | os.PathLike[str] | None = 
         target.mkdir(parents=True, exist_ok=True)
     else:
         target = Path(os.path.abspath(os.path.expanduser(str(path))))
-    return federation.register(target, mode=_MODE_FOR[kind], label=name)
+    # ``unique_label`` rather than a check here: registration already holds the
+    # registry lock, and asking first would be a check-then-act — two processes
+    # both find the name free, both take it, and it then identifies nothing.
+    return federation.register(target, mode=_MODE_FOR[kind], label=name,
+                               unique_label=True)
 
 
 def listing() -> list[dict]:
