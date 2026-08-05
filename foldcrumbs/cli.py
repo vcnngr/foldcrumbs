@@ -23,6 +23,36 @@ from .profile import format_context_block
 from .schema import VALID_TYPES, MemoryRecord
 
 
+def parse_expiry(value: str):
+    """Parse ``--expires``: an ISO date/datetime or a relative ``Nd`` offset.
+
+    A bare date means "true until the END of that day" — a deadline of
+    September 1st is still true on September 1st. Relative offsets (``30d``,
+    ``2w``, ``6m``) count from now, same end-of-day rule for the bare forms.
+    Raises ValueError with the offending value so argparse can report it.
+    """
+    from datetime import datetime, timedelta, timezone
+    v = value.strip().lower()
+    units = {"d": 1, "w": 7, "m": 30}
+    if len(v) >= 2 and v[-1] in units and v[:-1].isdigit():
+        delta = timedelta(days=int(v[:-1]) * units[v[-1]])
+        when = datetime.now(timezone.utc) + delta
+        return datetime(when.year, when.month, when.day,
+                        23, 59, 59, tzinfo=timezone.utc)
+    # Explicit date or datetime. A bare date is midnight, which would make the
+    # memory expire as the day BEGINS — move it to the day's end instead.
+    try:
+        dt = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise ValueError(f"not a date I can parse: {value!r} "
+                         "(try 2026-09-01, 2026-09-01T12:00 or 30d)")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if value.strip().count(":") == 0 and len(value.strip()) <= 10:
+        dt = dt.replace(hour=23, minute=59, second=59)
+    return dt
+
+
 def _cmd_remember(args: argparse.Namespace) -> int:
     rec = MemoryRecord(
         title=args.title or args.text[:80],
@@ -33,6 +63,12 @@ def _cmd_remember(args: argparse.Namespace) -> int:
         source="cli",
         tags=args.tag or [],
     )
+    if args.expires:
+        try:
+            rec.expires_at = parse_expiry(args.expires)
+        except ValueError as exc:
+            print(f"refused: {exc}")
+            return 1
     action, path = store.upsert(rec)
     store.rebuild_index()
     print(f"{action}: {path}")
@@ -203,8 +239,10 @@ def _cmd_decay(args: argparse.Namespace) -> int:
     if not res["candidates"]:
         print("nothing has decayed below the trust threshold.")
         return 0
+    lapsed = set(res["expired"])
     for name, conf in sorted(res["candidates"].items()):
-        print(f"  {name}  (trust {conf})")
+        why = "expired" if name in lapsed else f"trust {conf}"
+        print(f"  {name}  ({why})")
     if res["applied"]:
         print(f"archived {len(res['archived'])} memory(ies). "
               "Files kept — `foldcrumbs restore <file>` brings one back.")
@@ -330,9 +368,18 @@ def _cmd_supersede(args: argparse.Namespace) -> int:
 def _cmd_status(_: argparse.Namespace) -> int:
     mems = store.load_all()
     active = [m for m in mems if m.status == "active"]
+    expired = [m for m in active if m.is_expired]
     print(f"memory dir : {config.memory_dir()}")
     print(f"index      : {config.index_path()}")
     print(f"memories   : {len(active)} active / {len(mems)} total")
+    if expired:
+        print(f"expired    : {len(expired)} — invisible, awaiting `foldcrumbs decay`")
+    upcoming = sorted((m for m in active
+                       if m.expires_at is not None and not m.is_expired),
+                      key=lambda m: m.expires_at)
+    if upcoming:
+        nxt = upcoming[0]
+        print(f"next expiry: {nxt.filename()} on {nxt.expires_at.date().isoformat()}")
     backend = config.llm_backend()
     if backend == "claude-cli":
         print(f"LLM backend: claude-cli ({config.claude_bin()})")
@@ -616,6 +663,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--title", default="")
     r.add_argument("--confidence", type=float, default=0.85)
     r.add_argument("--tag", action="append")
+    r.add_argument("--expires", default="",
+                   help="true until this date: ISO (2026-09-01) or relative (30d, 2w, 6m)")
     r.set_defaults(func=_cmd_remember)
 
     rc = sub.add_parser("recall", help="search the store")

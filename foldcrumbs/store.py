@@ -386,7 +386,7 @@ def iter_federated(cwd: str | os.PathLike[str] | None = None,
                         f"federation: reading only {_MAX_FEDERATED_SCAN} of "
                         f"{total} files in {ref.label}")
                 for rec in iter_memories_in(d, max_files=_MAX_FEDERATED_SCAN):
-                    if rec.status != "active":
+                    if not _visible(rec):
                         continue
                     name = rec.source_path or rec.filename()
                     rec.origin_root = ref.label
@@ -552,7 +552,7 @@ def find_duplicate(
     best: MemoryRecord | None = None
     best_score = threshold
     for existing in iter_memories(cwd):
-        if existing.status != "active" or existing.type != rec.type:
+        if not _visible(existing) or existing.type != rec.type:
             continue
         score = _similarity(rec, existing)
         if score >= best_score:
@@ -600,7 +600,7 @@ def find_conflict_candidates(
     if federated:
         pool = itertools.chain(pool, iter_federated(cwd))
     for m in pool:
-        if m.status != "active" or m.id == rec.id:
+        if not _visible(m) or m.id == rec.id:
             continue
         if _similarity(rec, m) >= _DEDUP_THRESHOLD:
             continue
@@ -916,7 +916,7 @@ def search(
         candidates = itertools.chain(candidates, iter_federated(cwd, local=local))
     lexical: list[tuple[float, str, MemoryRecord]] = []
     for m in candidates:
-        if m.status != "active":
+        if not _visible(m):
             continue
         if m.contested_by and not include_contested:
             continue
@@ -1027,6 +1027,19 @@ def _read_local(
     return scan_store(config.memory_dir(cwd))
 
 
+def _visible(rec: MemoryRecord) -> bool:
+    """Whether a record competes for attention right now.
+
+    Active on disk, and not past its ``expires_at``. Every read path — recall,
+    the index, federation, dedup, the contradiction pass — gates on this one
+    predicate, so an expired memory is consistently invisible the same way an
+    archived one is, without anyone having to touch its file. Expiry is a
+    visibility decision only: ``decay`` is the sweep that archives, and the
+    user removing or moving the date is the explicit revival.
+    """
+    return rec.status == "active" and not rec.is_expired
+
+
 def _countable(rec: MemoryRecord) -> bool:
     """Whether a recall of this record can be counted at all.
 
@@ -1041,7 +1054,7 @@ def _countable(rec: MemoryRecord) -> bool:
 
 
 def _active_names(local: list[MemoryRecord]) -> set[str]:
-    return {m.id for m in local if m.status == "active" and _countable(m)}
+    return {m.id for m in local if _visible(m) and _countable(m)}
 
 
 def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
@@ -1053,7 +1066,7 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
     and the file diff-stable for Syncthing.
     """
     d = _ensure_dir(cwd)
-    mems = [m for m in iter_memories(cwd) if m.status == "active"]
+    mems = [m for m in iter_memories(cwd) if _visible(m)]
 
     grouped: dict[str, list[MemoryRecord]] = {}
     for m in mems:
