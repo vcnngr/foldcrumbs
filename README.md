@@ -4,6 +4,8 @@
 [![PyPI](https://img.shields.io/pypi/v/foldcrumbs.svg)](https://pypi.org/project/foldcrumbs/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+**English** · [Italiano](README.it.md) · [中文](README.zh.md)
+
 Persistent cross-session memory for coding agents — **no Docker, no vector DB, no external service**.
 
 `/clear` and compaction wipe Claude Code's knowledge every session. foldcrumbs keeps a small
@@ -67,6 +69,19 @@ deliberately different shape:
 The original work here is the architecture: grep-based recall, the file store + index, the
 anti-rot monitor, the merge-safe installer, the hooks and CLI. See **Credits** for the parts
 adapted from memanto.
+
+## Quick start
+
+Thirty seconds from zero to a working store:
+
+```bash
+pip install foldcrumbs
+cd your-project
+foldcrumbs install          # wires Claude Code hooks + slash commands
+```
+
+That's it. The next Claude Code session starts with an empty but live store,
+and memories begin accumulating as you work. Verify with `foldcrumbs status`.
 
 ## Install
 
@@ -141,14 +156,54 @@ python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
+python3 -m foldcrumbs decay                          # archive low-trust memories (dry-run; --apply writes)
+python3 -m foldcrumbs restore fact_old.md            # bring an archived memory back
 python3 -m foldcrumbs import --from ~/.claude/projects/<slug>/memory --apply
+
+python3 -m foldcrumbs profile list                   # every registered profile
+python3 -m foldcrumbs profile add kimi --kind dedicated
+python3 -m foldcrumbs profile env kimi               # the one env line that selects it
 ```
+
+`decay` archives — it never deletes. A memory whose trust has fallen below the
+threshold (0.3) **and** has gone 30 days without being touched is moved to
+`status: archived`; it leaves the index and recall but stays on disk. `restore
+<name>` brings it back whole, and `prune --apply` is still the separate,
+explicit act that removes files for good. Dry-run by default.
+
+### Profiles — one store per agent
+
+A **profile** is a registered memory root with a name and a shape:
+
+- **dedicated** — one memory directory shared by every project; what a
+  long-running agent (a CI bot, a review agent) wants;
+- **shared** — one memory directory *per project* under a config dir; how an
+  interactive assistant like Claude Code works (honours `CLAUDE_CONFIG_DIR`).
+
+```bash
+foldcrumbs profile add kimi-review --kind dedicated            # one dir, all projects
+foldcrumbs profile add work   --kind shared --path ~/.claude-work
+foldcrumbs profile env kimi-review
+# → export FOLDCRUMBS_DIR=/Users/you/.foldcrumbs/profiles/kimi-review
+```
+
+There is no `profile use`. Which store a process reads is decided by its
+environment **before it starts** — a CLI cannot reach back into the shell that
+launched it. So `profile env` prints the one line that does work, and you put
+it wherever the agent's process is born (a shell rc file, a worker's env, a
+Hermes profile's `.env`). Point a process at a dedicated profile and it gets a
+read-only federated view of every shared store registered on the machine.
+
+`profile import --agent hermes --apply` registers one profile per agent of a
+multi-agent runtime, so each gets a memory of its own (dry-run by default).
+`profile remove` unregisters without touching the memories.
 
 ## Curating the store
 
-Every memory has a status: **active** → (**superseded** | **deleted**) → *file removed*.
+Every memory has a status: **active** → (**superseded** | **deleted** | **archived**) → *file removed*.
 Only active memories appear in `MEMORY.md` and recall. Non-active files stay on disk —
-auditable and recoverable — until `foldcrumbs prune --apply` removes them for real.
+auditable and recoverable (`restore` revives an archived one) — until `foldcrumbs prune --apply`
+removes them for real.
 
 Three ways a memory stops being true:
 
@@ -180,6 +235,15 @@ Example: an old decision "PyPI publishing is deferred" is auto-superseded when a
 new fact "published to PyPI" is distilled. Fail-soft (no LLM → nothing changes);
 disable with `FOLDCRUMBS_NO_AUTO_SUPERSEDE=1`. Superseded events are logged to
 `~/.foldcrumbs/foldcrumbs.log`.
+
+**It fades on its own — `decay`.** A memory nobody trusts and nobody touches
+is not wrong, it is just old. `foldcrumbs decay` finds active memories whose
+confidence has dropped below 0.3 **and** that have gone 30 days without being
+written or validated, and moves them to `status: archived`. Archived memories
+leave the index, recall and the federated shards — other instances stop being
+shown them — but the file stays on disk. `foldcrumbs restore <name>` brings one
+back. The sweep is explicit and dry-run by default; it is never a side effect
+of a recall, so reading can never silently change what the store holds.
 
 ## Several instances, one project: federation
 
@@ -354,6 +418,9 @@ MCP-speaking tool by registering the command above.
 - **Phase 2 ✓** — Codex + OpenCode on the same store via a stdlib MCP server + installers.
 - **Phase 2.5 ✓** — federation: several CLI instances share a read-only view of one
   project without merging their stores.
+- **Phase 2.7 ✓** — memory engineering: recall reinforcement and freshness in the
+  ranking, a decay pass that archives, named profiles (one store per agent), and
+  `/remember` `/recall` `/forget` `/foldcrumbs` slash commands.
 - **Phase 3** — embeddings + open vector DB only if scale outgrows grep; document ingest via OCR.
 
 Release history: [CHANGELOG.md](CHANGELOG.md).
