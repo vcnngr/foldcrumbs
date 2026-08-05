@@ -853,6 +853,22 @@ class TestDecay(TmpStore):
         self.assertTrue(rec.created_at_missing)
         self.assertIn("preference_undated.md", audit.decay()["candidates"])
 
+    def test_a_stale_update_date_cannot_age_out_a_new_memory(self):
+        # An imported or hand-edited file can carry an updated_at older than
+        # its creation date. Preferring updated_at outright would archive a
+        # memory that was in fact just written, so the age comes from the
+        # newest date on the file, not the first one that happens to be there.
+        from datetime import datetime, timezone
+        from foldcrumbs import audit
+        rec = self._undated(
+            "preference_undated.md",
+            "created_at: {}\nupdated_at: 2020-01-01T00:00:00+00:00\n".format(
+                datetime.now(timezone.utc).isoformat()))
+        self.assertLess(rec.compute_confidence(), audit.STALE_CONF)
+        self.assertEqual(audit.decay()["candidates"], {},
+                         "a memory written today was archived on an old "
+                         "updated_at")
+
     def test_a_trusted_memory_is_never_archived(self):
         from foldcrumbs import audit
         keep = MemoryRecord(title="Live rule", content="Still true today.",

@@ -116,18 +116,21 @@ def _has_decayed(m) -> bool:
         return False
     from datetime import datetime, timezone
 
-    # The most recent date the file actually carries. Both attributes default
-    # to "now" when absent, so asking for the value is not enough — a legacy
-    # memory holding only created_at would look untouched a second ago and
-    # never decay, while one holding only an old updated_at would age out on a
-    # date nobody recorded.
-    touched = None
-    if not getattr(m, "updated_at_missing", False):
-        touched = getattr(m, "updated_at", None)
-    if touched is None and not getattr(m, "created_at_missing", False):
-        touched = getattr(m, "created_at", None)
-    if touched is None:
+    # The most recent date the file actually carries — the newest, not the
+    # first one that happens to be there. Both attributes default to "now"
+    # when absent, so asking for the value is not enough: a legacy memory
+    # holding only created_at would look untouched a second ago and never
+    # decay. And preferring updated_at outright is wrong too, because an
+    # imported or hand-edited file can carry one older than its creation date,
+    # which would archive a memory that was just written.
+    dates = []
+    if not getattr(m, "updated_at_missing", False) and m.updated_at is not None:
+        dates.append(m.updated_at)
+    if not getattr(m, "created_at_missing", False) and m.created_at is not None:
+        dates.append(m.created_at)
+    if not dates:
         return False
+    touched = max(dates)
     try:
         age = (datetime.now(timezone.utc) - touched).days
     except TypeError:
