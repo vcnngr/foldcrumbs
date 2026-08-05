@@ -127,7 +127,7 @@ agent 子进程。
 | 变量 | 默认值 | 含义 |
 |-----|---------|---------|
 | `FOLDCRUMBS_LLM_ENDPOINT` | `http://localhost:8081` | OpenAI 兼容端点（MLX 服务器） |
-| `FOLDCRUMBS_LLM_MODEL` | `gemma-4-26b-a4b` | 模型名称 |
+| `FOLDCRUMBS_LLM_MODEL` | `gemma-4-26b-a4b-it` | 模型名称 |
 | `FOLDCRUMBS_LLM_API_KEY` | – | 可选 bearer token |
 | `FOLDCRUMBS_CONTEXT_BUDGET` | `200000` | 监控器使用的上下文窗口大小（token） |
 | `FOLDCRUMBS_CONTEXT_PCT` | `0.45` | 触发检查点 + 提醒的比例 |

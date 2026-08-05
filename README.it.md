@@ -134,7 +134,7 @@ in Claude Code è richiamabile in Codex e OpenCode.
 | var | default | significato |
 |-----|---------|-------------|
 | `FOLDCRUMBS_LLM_ENDPOINT` | `http://localhost:8081` | endpoint compatibile OpenAI (server MLX) |
-| `FOLDCRUMBS_LLM_MODEL` | `gemma-4-26b-a4b` | nome del modello |
+| `FOLDCRUMBS_LLM_MODEL` | `gemma-4-26b-a4b-it` | nome del modello |
 | `FOLDCRUMBS_LLM_API_KEY` | – | bearer token opzionale |
 | `FOLDCRUMBS_CONTEXT_BUDGET` | `200000` | dimensione finestra di contesto (token) per il monitor |
 | `FOLDCRUMBS_CONTEXT_PCT` | `0.45` | frazione a cui fare checkpoint + suggerimento |

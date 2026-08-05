@@ -132,7 +132,7 @@ recalled in Codex and OpenCode.
 | var | default | meaning |
 |-----|---------|---------|
 | `FOLDCRUMBS_LLM_ENDPOINT` | `http://localhost:8081` | OpenAI-compatible endpoint (MLX server) |
-| `FOLDCRUMBS_LLM_MODEL` | `gemma-4-26b-a4b` | model name |
+| `FOLDCRUMBS_LLM_MODEL` | `gemma-4-26b-a4b-it` | model name |
 | `FOLDCRUMBS_LLM_API_KEY` | – | optional bearer token |
 | `FOLDCRUMBS_CONTEXT_BUDGET` | `200000` | context window size (tokens) for the monitor |
 | `FOLDCRUMBS_CONTEXT_PCT` | `0.45` | fraction at which to checkpoint + nudge |
