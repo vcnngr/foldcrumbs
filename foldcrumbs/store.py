@@ -144,6 +144,12 @@ def _reap_locked() -> None:
 # answering the question better than the other.
 _RANK_PRECISION = 2
 
+# How the two secondary signals share the tiebreak. Freshness leads because it
+# applies to every memory from the moment it is written, while a recall count
+# starts at zero and says nothing until the memory has been needed a few times.
+_FRESHNESS_SHARE = 0.6
+_REINFORCEMENT_SHARE = 0.4
+
 _DEDUP_THRESHOLD = 0.85  # title+content similarity above which two memories match
 
 
@@ -858,13 +864,11 @@ def search(
         else:
             score = SequenceMatcher(None, q, hay).ratio()
         if score >= 0.22:
-            reinforcement = recalls.strength(
-                0 if not _countable(m) else recalled.get(m.id, 0))
-            scored.append((score, reinforcement, m))
-    # Relevance decides the order; use only separates memories that matched
-    # *equally well*. Folding reinforcement into the score itself let a near
-    # match times its bonus overtake an exact one — 0.9613 x 1.1 beats 1.0 —
-    # so the bonus is a later key, never part of the number being compared.
+            scored.append((score, _tiebreak(m, recalled), m))
+    # Relevance decides the order; recency and use only separate memories
+    # that matched *equally well*. Folding either into the score itself let a
+    # near match times its bonus overtake an exact one — 0.9613 x 1.1 beats
+    # 1.0 — so they are a later key, never part of the number compared.
     # Comparable means equal to two decimals: finer than that is noise from a
     # fuzzy ratio, not a real difference in how well something matched.
     # Ties then break by locality (a local memory is the one this instance can
@@ -881,6 +885,21 @@ def search(
     recalls.reinforce(_reinforceable(scored, top, limit), cwd,
                       known=_active_names(local) if complete else None)
     return top
+
+
+def _tiebreak(rec: MemoryRecord, recalled: dict[str, int]) -> float:
+    """How to order two memories the query matched equally well.
+
+    Neither signal answers the question better than the other did — that was
+    already decided. These say which of two equal answers to put first: the
+    more recent one, and the one that has actually been needed. Both are
+    confined to the tiebreak on purpose, so no amount of either can promote a
+    worse match.
+    """
+    reinforcement = recalls.strength(
+        0 if not _countable(rec) else recalled.get(rec.id, 0))
+    return (_FRESHNESS_SHARE * recalls.freshness(rec)
+            + _REINFORCEMENT_SHARE * reinforcement)
 
 
 def _reinforceable(scored: list, top: list[MemoryRecord], limit: int) -> list[str]:

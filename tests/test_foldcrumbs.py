@@ -611,6 +611,81 @@ class TestRecallReinforcement(TmpStore):
                          "a failed count cost the caller its answer")
 
 
+class TestFreshnessRanking(TmpStore):
+    """Between two equally relevant answers, the more recent one goes first."""
+
+    def _put(self, title, body, days_old=0):
+        from datetime import datetime, timedelta, timezone
+        rec = MemoryRecord(title=title, content=body, type="fact")
+        if days_old:
+            rec.created_at = (datetime.now(timezone.utc)
+                              - timedelta(days=days_old))
+        store.write_memory(rec)
+        return rec
+
+    def test_the_more_recent_of_two_equal_answers_comes_first(self):
+        # Named so the filename tiebreak, which runs last, would put the old
+        # one first: otherwise the test passes without freshness doing
+        # anything at all.
+        old = self._put("Deploy alpha", "Deploy runs on Tuesday.", days_old=400)
+        new = self._put("Deploy zulu", "Deploy runs on Tuesday.")
+        self.assertLess(old.filename(), new.filename(),
+                        "the fixture no longer contradicts alphabetical order")
+        hits = store.search("deploy runs on tuesday", federated=False)
+        self.assertEqual([m.id for m in hits], [new.id, old.id],
+                         "the year-old memory was shown first")
+
+    def test_recency_never_outranks_a_better_match(self):
+        # Age is a weak signal — a decision from last year can be exactly the
+        # answer — so it must not promote a worse match, however fresh.
+        exact = self._put("Deploy exact", "deploy runs tuesday at nine",
+                          days_old=400)
+        near = self._put("Deploy near", "deploy always runs on a tuesday morning")
+        hits = store.search("deploy runs tuesday", federated=False)
+        self.assertEqual({m.id for m in hits}, {exact.id, near.id},
+                         "the fixture stopped matching both")
+        self.assertEqual(hits[0].id, exact.id,
+                         "a fresher near match outranked the exact one")
+
+    def test_a_memory_with_no_date_is_neither_fresh_nor_stale(self):
+        # Reading a missing date as the epoch would bury every memory written
+        # before dates were serialized — the opposite of not knowing.
+        from foldcrumbs import recalls
+        undated = Path(self.dir) / "fact_undated.md"
+        undated.write_text(
+            "---\nname: Undated\ndescription: hook\ntype: fact\n---\n\n"
+            "Deploy runs on Tuesday.\n", encoding="utf-8")
+        rec = [m for m in store.load_all() if m.title == "Undated"][0]
+        self.assertTrue(rec.created_at_missing)
+        self.assertEqual(recalls.freshness(rec), 0.5)
+        ancient = self._put("Deploy ancient", "Deploy runs on Tuesday.",
+                            days_old=3000)
+        self.assertLess(recalls.freshness(ancient), 0.5)
+        hits = store.search("deploy runs on tuesday", federated=False)
+        self.assertEqual([m.title for m in hits[:2]],
+                         ["Undated", "Deploy ancient"],
+                         "an undated memory was treated as ancient")
+
+    def test_a_clock_skew_does_not_bury_a_memory(self):
+        # A memory dated in the future is a wrong clock somewhere, not a
+        # reason to rank it last.
+        from foldcrumbs import recalls
+        future = self._put("Deploy future", "Deploy runs on Tuesday.",
+                           days_old=-30)
+        self.assertEqual(recalls.freshness(future), 1.0)
+
+    def test_use_still_separates_two_memories_of_the_same_age(self):
+        # Freshness leads the tiebreak but does not own it: written together,
+        # the one that has actually been needed goes first.
+        from foldcrumbs import recalls
+        a = self._put("Deploy A", "Deploy runs on Tuesday.")
+        b = self._put("Deploy B", "Deploy runs on Tuesday.")
+        recalls.reinforce([b.id] * 10)
+        hits = store.search("deploy runs on tuesday", federated=False)
+        self.assertEqual([m.id for m in hits], [b.id, a.id],
+                         "use stopped separating memories of the same age")
+
+
 class TestDistill(unittest.TestCase):
     def test_parser_tolerates_fences(self):
         text = '```json\n[{"type":"decision","title":"x","content":"c","confidence":0.9}]\n```'

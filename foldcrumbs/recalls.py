@@ -75,6 +75,37 @@ def strength(count: int) -> float:
     return min(max(count, 0) / _SATURATION, 1.0)
 
 
+# Half weight at two months old. Age is a weak signal — a decision from last
+# year can be exactly the answer — so this decays gently and, like
+# reinforcement, only separates memories that already matched equally well.
+_HALF_LIFE_DAYS = 60.0
+
+
+def freshness(rec) -> float:
+    """How recent a memory is, as a 0..1 weight.
+
+    Age already costs *confidence* for preferences and observations, which is
+    about how much to trust a memory. This is a different question — which of
+    two equally relevant memories to show first — so it applies to every type
+    and never removes anything from the results.
+
+    A memory with no recorded date is treated as neither fresh nor stale.
+    Reading a missing date as the epoch would bury every memory written before
+    dates were serialized, which is the opposite of not knowing.
+    """
+    if getattr(rec, "created_at_missing", False):
+        return 0.5
+    created = getattr(rec, "created_at", None)
+    if created is None:
+        return 0.5
+    from datetime import datetime, timezone
+
+    days = (datetime.now(timezone.utc) - created).days
+    if days < 0:
+        return 1.0          # a clock skew is not a reason to bury a memory
+    return 1.0 / (1.0 + days / _HALF_LIFE_DAYS)
+
+
 def reinforce(ids: list[str], cwd: str | os.PathLike[str] | None = None,
               known: set[str] | None = None) -> None:
     """Record that these memories were returned by a recall.
