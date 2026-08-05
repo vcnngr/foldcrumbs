@@ -139,9 +139,25 @@ recalled in Codex and OpenCode.
 | `FOLDCRUMBS_MIN_CONFIDENCE` | `0.7` | write gate floor |
 | `FOLDCRUMBS_NO_AUTO_SUPERSEDE` | – | set to disable the contradiction pass at distill time |
 | `FOLDCRUMBS_DIR` | derived from cwd | override the memory directory |
+| `FOLDCRUMBS_SEMANTIC` | off | set to `1` to add an optional embedding channel to recall |
+| `FOLDCRUMBS_EMBEDDING_ENDPOINT` | `FOLDCRUMBS_LLM_ENDPOINT` | OpenAI-compatible `/v1/embeddings` server |
+| `FOLDCRUMBS_EMBEDDING_MODEL` | `FOLDCRUMBS_LLM_MODEL` | embedding model name |
+| `FOLDCRUMBS_EMBEDDING_TIMEOUT` | `10` | seconds; a slow server falls back to lexical recall |
 
 Swap the LLM for a remote gateway or OpenRouter by changing `FOLDCRUMBS_LLM_ENDPOINT` — recall is
 unaffected.
+
+### Optional semantic recall (off by default)
+
+Recall is lexical — substring, word overlap, fuzzy — and stays exactly that unless you opt in with
+`FOLDCRUMBS_SEMANTIC=1`. With it on, recall also asks an OpenAI-compatible `/v1/embeddings`
+endpoint (the same servers that serve distillation: MLX, Ollama, llama.cpp, LM Studio) and takes
+the **better** of the two relevance signals, with the semantic one capped below a perfect word
+match — so a vector can rescue a paraphrase the words miss, but can never outrank what the words
+already matched exactly. Nothing new to install: the call is stdlib `urllib`, vectors are cached
+machine-locally (not in the synced store), and a missing or dead endpoint is a silent fallback to
+lexical recall — never blocking, never an error. Two gates, both yours: no switch → no requests;
+no answer → no change.
 
 ## CLI
 

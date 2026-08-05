@@ -19,6 +19,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from . import config
+from . import embeddings
 from . import recalls
 from .schema import MemoryRecord
 
@@ -149,6 +150,21 @@ _RANK_PRECISION = 2
 # starts at zero and says nothing until the memory has been needed a few times.
 _FRESHNESS_SHARE = 0.6
 _REINFORCEMENT_SHARE = 0.4
+
+# Ceiling for the optional semantic signal, as a fraction of a perfect match.
+# Deliberately below 1.0: a strong lexical match (exact substring = 1.0) can
+# never be overtaken by a vector similarity, however high — the semantic score
+# is an additional relevance signal that rescues candidates the words miss
+# (paraphrases, zero word overlap), not a new owner of the ranking. Two stores
+# holding the same memory must still agree on the order, and a signal whose
+# value depends on which model happens to be installed cannot outrank one that
+# doesn't.
+_SEMANTIC_CAP = 0.8
+
+# Minimum relevance a candidate needs to enter recall. Named (not a literal in
+# search) because the optional semantic channel reuses it: a paraphrase rescued
+# by the vector similarity still has to clear the same bar as a word match.
+_RECALL_THRESHOLD = 0.22
 
 _DEDUP_THRESHOLD = 0.85  # title+content similarity above which two memories match
 
@@ -872,6 +888,11 @@ def search(
     A foreign memory this store has declared obsolete is left out unless
     ``include_contested``: recall feeds answers, and returning a record whose
     replacement is already recorded here is worse than returning nothing.
+
+    With ``FOLDCRUMBS_SEMANTIC=1`` an optional embedding channel joins the
+    lexical score (best-of, capped below a perfect word match — see
+    ``_SEMANTIC_CAP``); without the flag, or when the embedding endpoint does
+    not answer, results are purely lexical and identical to before.
     """
     import re
 
@@ -893,6 +914,7 @@ def search(
     candidates: Iterator[MemoryRecord] = iter(local)
     if federated:
         candidates = itertools.chain(candidates, iter_federated(cwd, local=local))
+    lexical: list[tuple[float, str, MemoryRecord]] = []
     for m in candidates:
         if m.status != "active":
             continue
@@ -910,7 +932,33 @@ def search(
             score = overlap * 0.9 + SequenceMatcher(None, q, hay).ratio() * 0.1
         else:
             score = SequenceMatcher(None, q, hay).ratio()
-        if score >= 0.22:
+        lexical.append((score, hay, m))
+
+    # Optional second relevance channel (FOLDCRUMBS_SEMANTIC=1 + an embedding
+    # endpoint that answers; either gate missing and this is a no-op). One
+    # batched call covers the query and every candidate; haystacks are cached
+    # machine-locally, so a warm store costs no network at all. embed() is
+    # all-or-nothing: a partial answer would mix two scales, so any failure
+    # returns None and recall stays purely lexical — silently, never blocking.
+    sem_scores: list[float] | None = None
+    if lexical and config.SEMANTIC:
+        vectors = embeddings.embed([q] + [h for _, h, _ in lexical])
+        if vectors is not None:
+            qvec = vectors[0]
+            sem_scores = [embeddings.cosine(qvec, v) for v in vectors[1:]]
+
+    for i, (lex, _, m) in enumerate(lexical):
+        score = lex
+        if sem_scores is not None:
+            # Relevance is the best of two independent evidence channels, but
+            # the semantic one is capped below a perfect lexical match: no
+            # vector similarity can outrank what the words already matched
+            # exactly, and it rescues paraphrases the lexical pass could not
+            # see at all (they would never have reached the threshold below).
+            capped = max(0.0, sem_scores[i]) * _SEMANTIC_CAP
+            if capped > score:
+                score = capped
+        if score >= _RECALL_THRESHOLD:
             scored.append((score, _tiebreak(m, recalled), m))
     # Relevance decides the order; recency and use only separate memories
     # that matched *equally well*. Folding either into the score itself let a
