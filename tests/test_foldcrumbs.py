@@ -4630,6 +4630,96 @@ class TestIndexShards(_FederationEnv):
         self.assertIsNone(self.index_shard.write_shard(self.proj))
 
 
+class TestProfiles(_FederationEnv):
+    """One identity per agent or node, on top of the roots that already exist."""
+
+    def setUp(self):
+        super().setUp()
+        from foldcrumbs import profiles
+        self.profiles = profiles
+
+    def test_a_dedicated_profile_keeps_one_store_for_every_project(self):
+        ref = self.profiles.add("councillor")
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref.mode, "explicit")
+        a = ref.memory_dir(self._home / "projA")
+        b = ref.memory_dir(self._home / "projB")
+        self.assertEqual(a, b,
+                         "a dedicated profile split its memory by project")
+
+    def test_a_shared_profile_keeps_memory_per_project(self):
+        other = self._root(".claude-work")
+        ref = self.profiles.add("assistant", self.profiles.SHARED, other)
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref.mode, "config")
+        a = ref.memory_dir(self._home / "projA")
+        b = ref.memory_dir(self._home / "projB")
+        self.assertNotEqual(a, b,
+                            "a shared profile merged two projects' memory")
+
+    def test_a_shared_profile_will_not_guess_its_directory(self):
+        # That directory belongs to someone else; picking one would be a
+        # decision dressed up as a default.
+        with self.assertRaises(ValueError):
+            self.profiles.add("assistant", self.profiles.SHARED)
+
+    def test_a_name_that_would_escape_its_directory_is_refused(self):
+        for bad in ("../elsewhere", "with/slash", ".hidden", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                self.profiles.add(bad)
+
+    def test_env_names_the_variable_that_matches_the_shape(self):
+        self.profiles.add("councillor")
+        self.profiles.add("assistant", self.profiles.SHARED,
+                          self._root(".claude-work"))
+        self.assertIn("FOLDCRUMBS_DIR", self.profiles.env_line("councillor"))
+        self.assertIn("CLAUDE_CONFIG_DIR", self.profiles.env_line("assistant"))
+        self.assertIsNone(self.profiles.env_line("nobody"))
+
+    def test_the_env_line_actually_selects_that_store(self):
+        # The command exists because a CLI cannot change its parent's
+        # environment. The least it can do is print a line that works.
+        import importlib
+        from foldcrumbs import config as _config, store
+        ref = self.profiles.add("councillor")
+        line = self.profiles.env_line("councillor")
+        var, _, value = line[len("export "):].partition("=")
+        os.environ[var] = value.strip('"')
+        try:
+            importlib.reload(_config)
+            self.assertEqual(_config.memory_dir(self._home / "anywhere"),
+                             ref.memory_dir(self._home / "anywhere"))
+            store.write_memory(MemoryRecord(title="Mine", content="Body.",
+                                            type="fact"))
+            self.assertTrue((ref.memory_dir() / "fact_mine.md").is_file(),
+                            "the printed line did not select that store")
+        finally:
+            os.environ.pop(var, None)
+            importlib.reload(_config)
+
+    def test_roots_registered_before_profiles_are_listed_too(self):
+        # They are the same thing. Hiding them would suggest a second
+        # registry that does not exist.
+        ref = self.federation.register(self._root(".claude-work"),
+                                       mode="config")
+        listed = {p["name"]: p for p in self.profiles.listing()}
+        self.assertIn(ref.label, listed)
+        self.assertEqual(listed[ref.label]["kind"], self.profiles.SHARED,
+                         "a config root was not described as a shared profile")
+
+    def test_removing_a_profile_leaves_its_memories_alone(self):
+        ref = self.profiles.add("councillor")
+        (ref.path / "fact_kept.md").write_text(
+            "---\nname: Kept\ntype: fact\n---\n\nBody.\n", encoding="utf-8")
+        self.assertTrue(self.profiles.remove("councillor"))
+        self.assertNotIn("councillor",
+                         [p["name"] for p in self.profiles.listing()])
+        self.assertTrue((ref.path / "fact_kept.md").is_file(),
+                        "removing a profile deleted its memories")
+        self.assertFalse(self.profiles.remove("councillor"),
+                         "removing an unknown profile reported success")
+
+
 class TestFederatedSearch(_FederationEnv):
     """Federated recall: the path OpenCode and Codex depend on."""
 

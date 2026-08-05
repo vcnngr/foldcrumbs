@@ -56,17 +56,18 @@ what stale looks like (`STALE_CONF`); it just reports it.
 - an archived memory leaves the index and the shards, so other instances stop
   being shown it
 
-### D — Profiles
+### D — Profiles *(done)*
 
-hermes runs one profile per agent/node, each with its own identity. Roots
-already support this shape (`--mode explicit` = one fixed memory directory,
-`--mode config` = per-project under the root); what is missing is a name and a
-command, not a mechanism.
+`foldcrumbs profile add|list|env|remove`. A profile is a registered root with
+a name and a shape: **dedicated** (one memory directory, every project — what
+a long-running agent wants) or **shared** (per project under a config dir —
+how an interactive assistant works). Both shapes already existed; this gave
+them a vocabulary.
 
-- `foldcrumbs profile add|list|use <name>`
-- dedicated and global coexist: the choice is per-root, not per-installation
-- the federated index already keeps whose-is-what, so profiles need no new
-  storage format
+There is no `profile use`. Which store a process reads is decided by its
+environment before it starts, and a CLI cannot reach back into the shell that
+launched it — so `profile env` prints the one line that does work, and a test
+proves that line selects that store.
 
 ### E — Dashboard
 

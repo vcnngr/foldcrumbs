@@ -18,7 +18,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config, distill, federation, install, llm, store
+from . import config, distill, federation, install, llm, profiles, store
 from .profile import format_context_block
 from .schema import VALID_TYPES, MemoryRecord
 
@@ -116,6 +116,55 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
         print("hint: run `foldcrumbs index` to rebuild, or `foldcrumbs doctor` after a distill.")
     if a["pollution"]:
         print("hint: run `foldcrumbs prune` (dry-run) then `foldcrumbs prune --apply`.")
+    return 0
+
+
+def _cmd_profile(args: argparse.Namespace) -> int:
+    action = getattr(args, "action", None) or "list"
+
+    if action == "add":
+        try:
+            ref = profiles.add(args.name, args.kind, args.path)
+        except (ValueError, federation.FederationConflict) as exc:
+            print(f"refused: {exc}")
+            return 1
+        if ref is None:
+            print("could not register that profile (unwritable, or a "
+                  "conflicting root is already there)")
+            return 1
+        print(f"profile {ref.label} ({args.kind}) → {ref.path}")
+        line = profiles.env_line(ref.label)
+        if line:
+            print(f"to use it: {line}")
+        return 0
+
+    if action == "env":
+        line = profiles.env_line(args.name)
+        if line is None:
+            print(f"no profile named {args.name!r}")
+            return 1
+        print(line)
+        return 0
+
+    if action == "remove":
+        if not profiles.remove(args.name):
+            print(f"no profile named {args.name!r}")
+            return 1
+        print(f"removed profile {args.name} — its memories are untouched")
+        return 0
+
+    rows = profiles.listing()
+    if not rows:
+        print("no profiles registered (run `foldcrumbs profile add <name>`)")
+        return 0
+    for r in rows:
+        marks = []
+        if r["current"]:
+            marks.append("this instance")
+        if r["in_use"]:
+            marks.append("in use here")
+        suffix = f"  [{', '.join(marks)}]" if marks else ""
+        print(f"  {r['name']:<20} {r['kind']:<10} {r['path']}{suffix}")
     return 0
 
 
@@ -622,6 +671,28 @@ def build_parser() -> argparse.ArgumentParser:
     rs = sub.add_parser("restore", help="bring an archived memory back")
     rs.add_argument("name", help="filename of the archived memory")
     rs.set_defaults(func=_cmd_restore)
+
+    pf = sub.add_parser("profile", help="named memory profiles (one per agent "
+                                       "or node)")
+    pf_sub = pf.add_subparsers(dest="action")
+    pf_sub.add_parser("list", help="show every profile (default)")
+    pf_add = pf_sub.add_parser("add", help="register a profile")
+    pf_add.add_argument("name", help="what to call it")
+    pf_add.add_argument("--kind", choices=[profiles.DEDICATED,
+                                           profiles.SHARED],
+                        default=profiles.DEDICATED,
+                        help="'dedicated' keeps one memory dir for every "
+                             "project; 'shared' keeps memory per project "
+                             "under a config dir")
+    pf_add.add_argument("--path", help="where its memory lives (required for "
+                                       "a shared profile)")
+    pf_env = pf_sub.add_parser("env", help="print the environment line that "
+                                          "makes a process use it")
+    pf_env.add_argument("name")
+    pf_rm = pf_sub.add_parser("remove", help="unregister a profile; its "
+                                            "memories are untouched")
+    pf_rm.add_argument("name")
+    pf.set_defaults(func=_cmd_profile)
 
     ins = sub.add_parser("install", help="wire foldcrumbs into a coding agent")
     ins.add_argument("--agent", choices=["claude", "codex", "opencode"], default="claude")
