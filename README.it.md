@@ -167,8 +167,20 @@ entrambi tuoi: nessuno switch → nessuna richiesta; nessuna risposta → nessun
 `foldcrumbs dashboard` rende l'intero store come **una singola pagina HTML autocontenuta** — CSS
 inline, niente script, nessun riferimento `http(s)`, quindi si apre offline e non telefona mai a
 casa. Ogni numero è calcolato live dallo store dalle stesse funzioni che usa la CLI; niente è
-inventato, e ogni riga che nomina una memoria linka il file reale su disco. Pannelli: stato dello
-store, cosa archivierebbe la passata di decay, catene superseded, root federate (età shard,
+inventato, e ogni riga che nomina una memoria linka il file reale su disco.
+
+**Per progetto, generata al volo.** Come ogni altro comando, la dashboard legge lo store del
+progetto da cui la lanci (`foldcrumbs dashboard` dentro il progetto A mostra la memoria del
+progetto A). Niente è servito da un server né messo in cache: ogni esecuzione calcola la pagina
+da ciò che lo store contiene in quel momento. Come leggere ogni pannello — hero, badge di salute,
+griglia bento — è una guida a parte: [docs/dashboard.it.md](docs/dashboard.it.md)
+([English](docs/dashboard.md), [中文](docs/dashboard.zh.md)).
+
+La pagina si apre su un **hero live**: memorie totali, attive e richiamate, root federate, e un
+battito il cui tempo deriva dall'attività di recall reale dello store — uno store molto usato
+pulsa più veloce di uno dormiente (animazione CSS, sempre senza script), più un badge di salute
+(current / needs a sweep / attention) calcolato da decay, expiry e conflicts. Sotto, una griglia
+bento: cosa archivierebbe la passata di decay, catene superseded, root federate (età shard,
 voci), rinforzo del recall, ultime memorie, istogramma di fiducia, anti-rot (budget, età handoff,
 canale semantico) — più i pannelli **Expiry** e **Conflicts** che appaiono automaticamente quando
 quelle feature hanno qualcosa da mostrare. `--json` stampa i dati sottostanti invece della pagina,

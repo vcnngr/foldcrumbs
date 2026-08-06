@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dashboard v2** — the page is no longer a wall of equal boxes: it opens on
+  a live hero (totals, federated roots, a health badge, and a heartbeat whose
+  tempo is derived from the store's real recall activity), followed by an
+  asymmetric bento grid with per-panel status colouring. Still one
+  self-contained HTML file: CSS animation only, no scripts, no external refs.
+  Docs now state explicitly that the dashboard is per-project and generated on
+  the fly (EN/IT/ZH), and a dedicated reading guide ships in three languages
+  (`docs/dashboard.md`, `docs/dashboard.it.md`, `docs/dashboard.zh.md`).
+
 ## [0.7.0] — 2026-08-06
 
 Memory engineering: the pipeline is complete. Four capabilities on top of

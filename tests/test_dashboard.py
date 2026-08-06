@@ -133,6 +133,61 @@ class TestRender(TmpStore):
         self.assertIn("foldcrumbs", page.lower())
 
 
+class TestPulseAndHealth(TmpStore):
+    """The v2 hero: pulse tempo and health badge derive from real data."""
+
+    def _data(self):
+        return dashboard.collect()
+
+    def test_pulse_is_deterministic(self):
+        self.assertEqual(dashboard._pulse_seconds(self._data()),
+                         dashboard._pulse_seconds(self._data()))
+
+    def test_pulse_bounds(self):
+        # Whatever the store holds, the tempo stays inside a sane window.
+        beat = dashboard._pulse_seconds(self._data())
+        self.assertGreaterEqual(beat, 1.6)
+        self.assertLessEqual(beat, 6.0)
+
+    def test_pulse_quickens_with_recalls(self):
+        rec = MemoryRecord(title="Lockfile", content="The lockfile is committed.",
+                           type="fact")
+        store.write_memory(rec)
+        slow = dashboard._pulse_seconds(dashboard.collect())
+        store.search("lockfile", federated=False)
+        store.search("lockfile", federated=False)
+        store.search("lockfile", federated=False)
+        fast = dashboard._pulse_seconds(dashboard.collect())
+        self.assertLessEqual(fast, slow,
+                             "more recalls must not slow the heartbeat")
+
+    def test_health_current_on_a_clean_store(self):
+        cls, txt = dashboard._health(self._data())
+        self.assertEqual(cls, "ok")
+
+    def test_health_warns_when_decay_has_candidates(self):
+        from datetime import datetime, timedelta, timezone
+        stale = MemoryRecord(title="Old rule", content="Nobody follows this.",
+                             type="fact", confidence=0.1, provenance="inferred")
+        stale.created_at = datetime.now(timezone.utc) - timedelta(days=60)
+        stale.updated_at = stale.created_at
+        store.write_memory(stale)
+        cls, _ = dashboard._health(dashboard.collect())
+        self.assertEqual(cls, "warn")
+
+    def test_hero_and_pulse_render_in_the_page(self):
+        rec = MemoryRecord(title="Lockfile", content="The lockfile is committed.",
+                           type="fact")
+        store.write_memory(rec)
+        page = dashboard.render(dashboard.collect())
+        self.assertIn('class="panel hero"', page)
+        self.assertIn('class="pulse"', page)
+        self.assertIn("--beat:", page)
+        # Still self-contained after the redesign.
+        self.assertNotIn("<script", page)
+        self.assertNotIn("https://", page)
+
+
 class TestCliDashboard(TmpStore):
     def _put(self, title, body, type_="fact"):
         rec = MemoryRecord(title=title, content=body, type=type_)
