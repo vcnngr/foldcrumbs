@@ -462,6 +462,19 @@ foldcrumbs 改编自 [memanto](https://github.com/moorcheh-ai/memanto) 的一些
 重新实现；没有使用 Moorcheh 检索引擎。完整声明见 [LICENSE](LICENSE)。感谢 memanto
 的作者以 MIT 协议发布它。
 
+## LLM 贡献者
+
+foldcrumbs 由一名人类指挥多个大语言模型共同构建，每个模型承担不同的角色。Git 归因
+于 Claude 系列模型（它们的工具会写入 `Co-authored-by` trailer）；团队其余成员在此
+致谢：
+
+| 模型 | 贡献 |
+|--|--|
+| Claude Opus 4.8 · Opus 5 · Fable 5 | 代码，0.1 → 0.6.1：存储、蒸馏、hook、联邦 |
+| Qwen 3.8 Max | 代码，0.7.0：语义召回、过期机制、对账队列、仪表盘、发布 |
+| GPT-5.5 · GPT-5.6-sol | 代码审查与红队测试 |
+| Kimi K3 | 开发循环的独立审查者（对每个实现给出 GREEN/RED 裁决） |
+
 ## 许可证
 
 MIT — 见 [LICENSE](LICENSE)。

@@ -487,6 +487,19 @@ rendering idea. These are reimplemented here against a file store; the Moorcheh 
 is not used. Full notice in [LICENSE](LICENSE). Thanks to the memanto authors for releasing it
 under MIT.
 
+## LLM contributors
+
+foldcrumbs was built by a human directing several large language models, each with a distinct
+role. Git attributes the Claude models (their tooling writes the `Co-authored-by` trailers);
+the rest of the team is credited here:
+
+| Model | Contribution |
+|--|--|
+| Claude Opus 4.8 · Opus 5 · Fable 5 | code, 0.1 → 0.6.1: store, distillation, hooks, federation |
+| Qwen 3.8 Max | code, 0.7.0: semantic recall, expiry, reconciliation queue, dashboard, release |
+| GPT-5.5 · GPT-5.6-sol | code review and red-teaming |
+| Kimi K3 | independent reviewer of the development loop (GREEN/RED verdict on every implementation) |
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
