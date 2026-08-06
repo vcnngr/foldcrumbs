@@ -134,9 +134,35 @@ agent 子进程。
 | `FOLDCRUMBS_MIN_CONFIDENCE` | `0.7` | 写入门槛下限 |
 | `FOLDCRUMBS_NO_AUTO_SUPERSEDE` | – | 设置后禁用蒸馏时的矛盾检查 |
 | `FOLDCRUMBS_DIR` | 由 cwd 推导 | 覆盖记忆目录 |
+| `FOLDCRUMBS_SEMANTIC` | off | 设为 `1` 为召回添加可选的 embedding 通道 |
+| `FOLDCRUMBS_EMBEDDING_ENDPOINT` | `FOLDCRUMBS_LLM_ENDPOINT` | OpenAI 兼容的 `/v1/embeddings` 服务器 |
+| `FOLDCRUMBS_EMBEDDING_MODEL` | `FOLDCRUMBS_LLM_MODEL` | embedding 模型名称 |
+| `FOLDCRUMBS_EMBEDDING_TIMEOUT` | `10` | 秒；服务器缓慢时回退到词法召回 |
 
 通过修改 `FOLDCRUMBS_LLM_ENDPOINT` 把 LLM 换成远程网关或 OpenRouter — 召回
 不受影响。
+
+### 可选语义召回（默认关闭）
+
+召回是词法的 — 子串、词重叠、模糊匹配 — 除非你用 `FOLDCRUMBS_SEMANTIC=1` 显式
+开启，否则它就一直如此。开启后，召回还会查询一个 OpenAI 兼容的 `/v1/embeddings`
+端点（与提供蒸馏服务的同一批服务器：MLX、Ollama、llama.cpp、LM Studio），并取
+两个相关性信号中**更好**的一个，其中语义信号被限制在完美的词匹配之下 — 因此
+向量可以挽救词法看不到的同义转述，但永远无法超越词法已经精确匹配的内容。
+无需安装任何新东西：调用是标准库 `urllib`，向量缓存在本机（不在同步的存储里），
+端点缺失或宕机时静默回退到词法召回 — 从不阻塞，从不报错。两道闸门，都由你
+掌握：不开关 → 不发请求；无响应 → 不改变。
+
+## 仪表盘
+
+`foldcrumbs dashboard` 把整个存储渲染为**一个自包含的 HTML 页面** — 内联 CSS、
+无脚本、无任何 `http(s)` 引用，因此可以离线打开，也绝不会向外发送任何请求。每个
+数字都由 CLI 使用的同一批函数从存储实时计算；没有任何虚构，凡是列出记忆的行都
+链接到磁盘上的真实文件。面板包括：存储状态、decay 清扫将会归档的内容、被取代
+链、联邦根（shard 时效、条目数）、召回强化、最新记忆、信任度直方图、抗腐化
+（预算、handoff 时效、语义通道）— 另有 **Expiry** 与 **Conflicts** 面板，一旦
+这些功能有内容可显示就自动出现。`--json` 打印底层数据而不是页面，`--out` 把
+页面写到指定路径，`--no-open` 不打开浏览器。
 
 ## CLI
 
@@ -150,6 +176,7 @@ python3 -m foldcrumbs distill transcript.txt    # 蒸馏持久记忆（LLM）
 python3 -m foldcrumbs checkpoint transcript.txt # 写入一份恢复用交接（LLM）
 python3 -m foldcrumbs handoff                   # 打印当前交接
 python3 -m foldcrumbs answer "how does recall work?"
+python3 -m foldcrumbs dashboard                    # 一个自包含的 HTML 页面（--json、--no-open）
 python3 -m foldcrumbs forget fact_wrong.md --apply   # 软删除（--hard 直接删除文件）
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # 对账队列（含糊的对、主张）

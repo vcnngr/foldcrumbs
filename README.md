@@ -159,6 +159,18 @@ machine-locally (not in the synced store), and a missing or dead endpoint is a s
 lexical recall — never blocking, never an error. Two gates, both yours: no switch → no requests;
 no answer → no change.
 
+## Dashboard
+
+`foldcrumbs dashboard` renders the whole store as **one self-contained HTML page** — inline CSS,
+no scripts, no `http(s)` references, so it opens offline and never phones home. Every number is
+computed live from the store by the same functions the CLI uses; nothing is invented, and every
+row that names a memory links to the actual file on disk. Panels: store status, what the decay
+sweep would archive, superseded chains, federated roots (shard age, entries), recall
+reinforcement, latest memories, trust histogram, anti-rot (budget, handoff age, semantic channel)
+— plus **Expiry** and **Conflicts** panels that appear automatically once those features have
+something to show. `--json` prints the underlying data instead of the page, `--out` writes it to
+a path, `--no-open` skips the browser.
+
 ## CLI
 
 ```bash
@@ -171,6 +183,7 @@ python3 -m foldcrumbs distill transcript.txt    # distil durable memories (LLM)
 python3 -m foldcrumbs checkpoint transcript.txt # write a resume handoff (LLM)
 python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
+python3 -m foldcrumbs dashboard                    # one self-contained HTML page (--json, --no-open)
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # reconciliation queue (ambiguous pairs, claims)

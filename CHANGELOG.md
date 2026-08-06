@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dashboard** (`foldcrumbs dashboard`) — one self-contained HTML page over
+  the live store: inline CSS, no scripts, no `http(s)` references, opens
+  offline and never phones home. Every panel is computed by the same
+  functions the CLI uses — store status, what the decay sweep would archive,
+  superseded chains, federated roots (shard age, entries), recall
+  reinforcement, latest memories, trust histogram, anti-rot — and memory
+  names link to the actual files on disk. Expiry and Conflicts panels appear
+  automatically when those features have something to show. `--json` prints
+  the data instead of the page; `--out` writes it to a path; `--no-open`
+  skips the browser.
 - **Reconciliation queue** (`foldcrumbs conflicts`) — the contradiction pass has
   three verdicts now: supersede, coexist, flag. An unsure or garbled LLM answer
   no longer collapses into a silent "no"; the pair is recorded in a
