@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-06
+
+Memory engineering: the pipeline is complete. Four capabilities on top of
+0.6.x — an optional semantic recall channel that never blocks, memories with
+a date they stop being true on, a reconciliation queue that surfaces
+ambiguity instead of guessing, and a self-contained dashboard that renders
+all of it from live store data.
+
 ### Added
 
 - **Dashboard** (`foldcrumbs dashboard`) — one self-contained HTML page over
