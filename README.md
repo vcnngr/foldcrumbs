@@ -164,6 +164,7 @@ no answer → no change.
 ```bash
 python3 -m foldcrumbs status
 python3 -m foldcrumbs remember "Recall is grep, no vector DB" --type decision --tag arch
+python3 -m foldcrumbs remember "Trial license covers staging" --expires 2026-09-01   # or --expires 30d
 python3 -m foldcrumbs recall "vector db" --type decision --tag arch   # filters, repeatable
 python3 -m foldcrumbs index
 python3 -m foldcrumbs distill transcript.txt    # distil durable memories (LLM)
@@ -186,6 +187,17 @@ threshold (0.3) **and** has gone 30 days without being touched is moved to
 `status: archived`; it leaves the index and recall but stays on disk. `restore
 <name>` brings it back whole, and `prune --apply` is still the separate,
 explicit act that removes files for good. Dry-run by default.
+
+Some truths have a date on them — a trial that ends, a deferral "until
+September", a deadline. `remember --expires <date>` stamps that on the memory
+(`2026-09-01`, `2026-09-01T12:00`, or relative `30d`/`2w`/`6m`; a bare date
+means the end of that day). Past it, the memory becomes invisible everywhere
+an archived one is — index, recall, federation, dedup — while the file stays
+untouched on disk. `decay` is then the sweep that archives it (and labels it
+`(expired)`), `status` shows what has lapsed and what expires next, and
+removing or moving the date in the file is how you say it still holds. Only
+explicit user intent sets an expiry: distillation never guesses a date, so no
+memory ever gets a silent timer it didn't ask for.
 
 ### Profiles — one store per agent
 

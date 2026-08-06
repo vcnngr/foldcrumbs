@@ -44,8 +44,9 @@ def audit(cwd=None) -> dict:
     linked = _index_links(cwd)
     mems = list(store.iter_memories(cwd))
     active = [m for m in mems if m.status == "active"]
+    visible = [m for m in active if not m.is_expired]
     on_disk = {_name(m) for m in mems}
-    active_names = {_name(m) for m in active}
+    active_names = {_name(m) for m in visible}
     return {
         "dead_links": sorted(t for t in linked if t not in on_disk),
         # Linked, and the file is right there — but the memory behind it has
@@ -60,7 +61,12 @@ def audit(cwd=None) -> dict:
                             if _is_hard_artifact(m.title) or _is_hard_artifact(m.content)),
         "stale": sorted(_name(m) for m in active
                         if m.compute_confidence() < STALE_CONF),
+        # Active on disk but past their expires_at: invisible everywhere an
+        # archived memory is, file untouched. The sweep archives them; until
+        # then this list is the user's view of what has lapsed.
+        "expired": sorted(_name(m) for m in active if m.is_expired),
         "active": len(active),
+        "visible": len(visible),
         "total": len(mems),
     }
 
@@ -92,7 +98,7 @@ def prune_artifacts(cwd=None) -> list[str]:
     removed = [
         _name(m)
         for m in list(store.iter_memories(cwd))
-        if m.status == "active" and (_is_hard_artifact(m.title) or _is_hard_artifact(m.content))
+        if store._visible(m) and (_is_hard_artifact(m.title) or _is_hard_artifact(m.content))
     ]
     removed = [n for n in removed if _delete(n, cwd)]
     if removed:
@@ -152,6 +158,11 @@ def decay(cwd=None, apply: bool = False) -> dict:
     it: a store where nothing ever leaves ends up competing with itself, every
     stale entry taking up the retrieval space of something current.
 
+    Also archives memories past their ``expires_at``. Expiry already hides
+    them from index and recall the moment the date passes; the sweep is what
+    turns that into a durable state, and it is the only automatic writer here —
+    still explicit, still dry-run by default.
+
     Archived, never deleted. A memory that decayed out of relevance is not a
     memory that was wrong, and ``foldcrumbs restore`` brings it back whole.
     ``prune --apply`` is still the way to remove files for good, and it is
@@ -163,8 +174,15 @@ def decay(cwd=None, apply: bool = False) -> dict:
     candidates = {
         _name(m): round(m.compute_confidence(), 2)
         for m in store.iter_memories(cwd)
-        if m.status == "active" and _has_decayed(m)
+        if m.status == "active" and (m.is_expired or _has_decayed(m))
     }
+    # Which of the candidates lapsed on their date rather than on trust — the
+    # CLI says so, so a user knows which ones to re-date instead of re-trust.
+    expired = [
+        _name(m)
+        for m in store.iter_memories(cwd)
+        if m.status == "active" and m.is_expired and _name(m) in candidates
+    ]
     archived: list[str] = []
     if apply:
         try:
@@ -179,7 +197,8 @@ def decay(cwd=None, apply: bool = False) -> dict:
             # the real backstop for a sweep interrupted outright.
             if archived:
                 store.rebuild_index(cwd)
-    return {"candidates": candidates, "archived": archived, "applied": apply}
+    return {"candidates": candidates, "archived": archived, "applied": apply,
+            "expired": sorted(expired)}
 
 
 def prune(cwd=None, apply: bool = False, include_stale: bool = False) -> dict:

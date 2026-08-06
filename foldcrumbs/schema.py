@@ -202,9 +202,33 @@ class MemoryRecord:
     # a moment ago from one whose date was simply never written down.
     updated_at_missing: bool = field(default=False, compare=False)
 
+    # "True until <date>" — the EXPIRING class. A memory whose statement stops
+    # being true at a known point (a deadline, a trial that ends, a deferral
+    # with a date on it) carries that point here. Past it, the memory is
+    # invisible everywhere an archived one is — index, recall, federation, dedup,
+    # contradiction pass — but the file is untouched: expiry is a visibility
+    # decision, `decay` is the sweep that archives, and removing the line (or
+    # moving it forward) is how the user says it still holds. Only ever set by
+    # explicit user intent (CLI `--expires`): a distiller guessing a date
+    # would be a silent timer on someone else's memory.
+    expires_at: datetime | None = None
+
     @property
     def is_foreign(self) -> bool:
         return self.origin_root is not None
+
+    @property
+    def is_expired(self) -> bool:
+        """Past its ``expires_at``, if it has one.
+
+        Evaluated live (not at parse time) so a store crossing midnight while a
+        session runs notices on the next read instead of the next restart. A
+        missing or unparseable date never expires: unknown is not evidence of
+        age, same rule decay applies.
+        """
+        if self.expires_at is None:
+            return False
+        return _now() >= self.expires_at
 
     def __post_init__(self) -> None:
         t = (self.type or "fact").lower()
@@ -288,6 +312,8 @@ class MemoryRecord:
         if self.supersedes_external:
             fm.append("supersedes_external: "
                       + ", ".join(self.supersedes_external))
+        if self.expires_at is not None:
+            fm.append(f"expires_at: {_iso(self.expires_at)}")
         fm.append("---")
         return "\n".join(fm) + "\n\n" + self.content.strip() + "\n"
 
@@ -319,6 +345,10 @@ class MemoryRecord:
             validation_count=int(_safe_float(meta.get("validation_count"), 0)),
             created_at=_parse_dt(meta.get("created_at")),
             updated_at=_parse_dt(meta.get("updated_at")),
+            # Optional and tolerant: an unparseable date degrades to "no
+            # expiry", never to an error — a hand-edited line must not take a
+            # memory out of service.
+            expires_at=_parse_dt_opt(meta.get("expires_at")),
         )
         # Remember that the timestamp was invented rather than read — which
         # covers a field that is absent *and* one that is present but
