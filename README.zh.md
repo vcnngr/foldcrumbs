@@ -143,6 +143,7 @@ agent 子进程。
 ```bash
 python3 -m foldcrumbs status
 python3 -m foldcrumbs remember "Recall is grep, no vector DB" --type decision --tag arch
+python3 -m foldcrumbs remember "试用许可证覆盖 staging" --expires 2026-09-01   # 或 --expires 30d
 python3 -m foldcrumbs recall "vector db" --type decision --tag arch   # 过滤器，可重复
 python3 -m foldcrumbs index
 python3 -m foldcrumbs distill transcript.txt    # 蒸馏持久记忆（LLM）
@@ -151,6 +152,7 @@ python3 -m foldcrumbs handoff                   # 打印当前交接
 python3 -m foldcrumbs answer "how does recall work?"
 python3 -m foldcrumbs forget fact_wrong.md --apply   # 软删除（--hard 直接删除文件）
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
+python3 -m foldcrumbs conflicts                      # 对账队列（含糊的对、主张）
 python3 -m foldcrumbs decay                          # 归档低信任记忆（dry-run；--apply 写入）
 python3 -m foldcrumbs restore fact_old.md            # 恢复一条已归档的记忆
 python3 -m foldcrumbs import --from ~/.claude/projects/<slug>/memory --apply
@@ -164,6 +166,15 @@ python3 -m foldcrumbs profile env kimi               # 选中它所需的那一�
 的记忆会被移到 `status: archived`；它离开索引和召回，但留在磁盘上。`restore
 <name>` 可以完整地恢复它，而 `prune --apply` 仍是那个单独的、显式的
 彻底删除文件的动作。默认为 dry-run。
+
+有些事实自带日期 — 一个会结束的试用、一次"推到九月"的延期、一个截止日期。
+`remember --expires <日期>` 会把它刻在记忆上（`2026-09-01`、`2026-09-01T12:00`，
+或相对的 `30d`/`2w`/`6m`；只写日期表示那一天结束）。过了这个日期，记忆就在所有
+已归档记忆会消失的地方变得不可见 — 索引、召回、联邦、去重 — 而文件原封不动地
+留在磁盘上。`decay` 随后是把它归档的清扫（并标注 `(expired)`），`status` 会显示
+什么已过期、下一个到期的是什么，而移除或移动文件里的日期就是你说它仍然有效的方式。
+只有用户的明确意图才会设置过期时间：蒸馏从不猜测日期，因此任何记忆都不会
+得到一个它未曾要求的静默定时器。
 
 ### Profile — 每个 agent 一个存储
 

@@ -9,7 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Optional semantic recall** (`FOLDCRUMBS_SEMANTIC=1`, off by default). With
+- **Reconciliation queue** (`foldcrumbs conflicts`) — the contradiction pass has
+  three verdicts now: supersede, coexist, flag. An unsure or garbled LLM answer
+  no longer collapses into a silent "no"; the pair is recorded in a
+  machine-local queue and surfaced by `foldcrumbs conflicts`, alongside the
+  claims this store holds on other instances' memories and the claims other
+  instances hold on ours. Pairs drop out of the queue automatically once either
+  side is retired. `doctor` points at a non-empty queue. Resolving is always
+  explicit: the queue suggests the exact `supersede`/`forget` command and
+  writes nothing itself.
+- **Expiring memories** — the "true until a known date" class. `remember
+  --expires <date>` stamps an `expires_at` on a memory (`2026-09-01`,
+  `2026-09-01T12:00`, or relative `30d`/`2w`/`6m`; a bare date means the end
+  of that day). Past it, the memory is invisible everywhere an archived one
+  is — index, recall, federation, dedup, the contradiction pass — while the
+  file stays untouched on disk. The `decay` sweep then archives lapsed
+  memories (labelled `(expired)`), `status` reports what has lapsed and what
+  expires next, and removing or moving the date is the explicit revival.
+  Expiry is only ever set by user intent: distillation never guesses a date.
+- Optional semantic recall (`FOLDCRUMBS_SEMANTIC=1`, off by default). With
   the switch on, `recall`/`answer` and the MCP tools also score candidates by
   embedding similarity against an OpenAI-compatible `/v1/embeddings` endpoint
   (`FOLDCRUMBS_EMBEDDING_ENDPOINT`, default: the distillation endpoint) and

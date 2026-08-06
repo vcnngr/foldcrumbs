@@ -150,6 +150,7 @@ non ne risente.
 ```bash
 python3 -m foldcrumbs status
 python3 -m foldcrumbs remember "Recall è grep, niente vector DB" --type decision --tag arch
+python3 -m foldcrumbs remember "La licenza trial copre staging" --expires 2026-09-01   # oppure --expires 30d
 python3 -m foldcrumbs recall "vector db" --type decision --tag arch   # filtri, ripetibili
 python3 -m foldcrumbs index
 python3 -m foldcrumbs distill transcript.txt    # distilla memorie durevoli (LLM)
@@ -158,6 +159,7 @@ python3 -m foldcrumbs handoff                   # stampa l'handoff corrente
 python3 -m foldcrumbs answer "come funziona il recall?"
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard rimuove il file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
+python3 -m foldcrumbs conflicts                      # coda di riconciliazione (coppie ambigue, rivendicazioni)
 python3 -m foldcrumbs decay                          # archivia memorie a bassa fiducia (dry-run; --apply scrive)
 python3 -m foldcrumbs restore fact_old.md            # recupera una memoria archiviata
 python3 -m foldcrumbs import --from ~/.claude/projects/<slug>/memory --apply
@@ -171,6 +173,16 @@ python3 -m foldcrumbs profile env kimi               # l'unica riga env che lo s
 (0.3) **e** che non viene toccata da 30 giorni passa a `status: archived`; esce dall'indice
 e dal recall ma resta su disco. `restore <name>` la riporta indietro intera, e `prune --apply`
 resta l'atto separato ed esplicito che rimuove i file definitivamente. Dry-run di default.
+
+Alcune verità hanno una data — una trial che finisce, un rinvio "fino a settembre", una
+scadenza. `remember --expires <data>` la imprime sulla memoria (`2026-09-01`,
+`2026-09-01T12:00`, o relativo `30d`/`2w`/`6m`; una data senza ora significa la fine di
+quel giorno). Passata la data, la memoria diventa invisibile ovunque lo sarebbe una
+archiviata — indice, recall, federazione, dedup — mentre il file resta intatto su disco.
+`decay` è poi la passata che la archivia (etichettandola `(expired)`), `status` mostra cosa
+è scaduto e cosa scadrà dopo, e rimuovere o spostare la data nel file è il modo per dire
+che vale ancora. Solo l'intento esplicito dell'utente imposta una scadenza: la distillazione
+non indovina mai date, così nessuna memoria riceve mai un timer silenzioso che non ha chiesto.
 
 ### Profili — uno store per agent
 

@@ -163,7 +163,7 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
             entries = [
                 _entry(m, memory_dir)
                 for m in store.iter_memories(cwd)
-                if m.status == "active"
+                if store._visible(m)
             ]
             entries.sort(key=lambda e: (e["created_at"], e["filename"]))
             existing = _read_shard_file(target)
@@ -628,7 +628,10 @@ def _external_supersessions(cwd: str | os.PathLike[str] | None = None,
         records = store.iter_memories(cwd)
     out: dict[str, str] = {}
     for rec in records:
-        if rec.status != "active":
+        # An expired claim no longer asserts: marking a foreign memory as
+        # contested on the strength of a statement that has passed its own
+        # date would keep fighting a fight this store has already dropped.
+        if not store._visible(rec):
             continue
         for claim in getattr(rec, "supersedes_external", None) or []:
             if ":" in claim:
