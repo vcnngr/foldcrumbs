@@ -15,6 +15,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -324,6 +325,35 @@ def _cmd_supersede(args: argparse.Namespace) -> int:
         return 1
     print(f"superseded: {args.old} -> {args.by}; index rebuilt. "
           "File kept on disk — `foldcrumbs prune --apply` clears it.")
+    return 0
+
+
+def _cmd_dashboard(args: argparse.Namespace) -> int:
+    """Render the dashboard as one self-contained HTML page."""
+    import json as _json
+    import tempfile
+    import webbrowser
+    from . import dashboard
+    data = dashboard.collect()
+    if args.json:
+        print(_json.dumps(data, indent=1, ensure_ascii=False))
+        return 0
+    page = dashboard.render(data)
+    if args.out:
+        out = Path(args.out).expanduser()
+        out.write_text(page, encoding="utf-8")
+        print(f"dashboard written to {out}")
+        path = out.resolve()
+    else:
+        # A temp file keeps the store and the repo free of generated artifacts;
+        # the page is a report, not something to keep around.
+        fd, tmp = tempfile.mkstemp(prefix="foldcrumbs-dashboard-", suffix=".html")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(page)
+        path = Path(tmp)
+        print(f"dashboard: {path}")
+    if not args.no_open:
+        webbrowser.open(path.as_uri())
     return 0
 
 
@@ -690,6 +720,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("old", help="filename of the outdated memory")
     sp.add_argument("--by", required=True, help="filename of the memory that replaces it")
     sp.set_defaults(func=_cmd_supersede)
+
+    db = sub.add_parser("dashboard", help="render the store as one "
+                        "self-contained HTML page")
+    db.add_argument("--json", action="store_true",
+                    help="print the dashboard data as JSON instead of HTML")
+    db.add_argument("--out", default="",
+                    help="write the page to this path instead of a temp file")
+    db.add_argument("--no-open", action="store_true",
+                    help="do not open the page in a browser")
+    db.set_defaults(func=_cmd_dashboard)
 
     pr = sub.add_parser("prune", help="delete pollution / superseded memories (dry-run by default)")
     pr.add_argument("--apply", action="store_true", help="actually delete (default: dry-run)")
