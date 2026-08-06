@@ -141,9 +141,38 @@ in Claude Code è richiamabile in Codex e OpenCode.
 | `FOLDCRUMBS_MIN_CONFIDENCE` | `0.7` | soglia minima del gate di scrittura |
 | `FOLDCRUMBS_NO_AUTO_SUPERSEDE` | – | impostalo per disattivare il passaggio di contraddizione in distill |
 | `FOLDCRUMBS_DIR` | derivato dal cwd | sovrascrive la directory di memoria |
+| `FOLDCRUMBS_SEMANTIC` | off | impostalo a `1` per aggiungere un canale embedding opzionale al recall |
+| `FOLDCRUMBS_EMBEDDING_ENDPOINT` | `FOLDCRUMBS_LLM_ENDPOINT` | server OpenAI-compatibile `/v1/embeddings` |
+| `FOLDCRUMBS_EMBEDDING_MODEL` | `FOLDCRUMBS_LLM_MODEL` | nome del modello di embedding |
+| `FOLDCRUMBS_EMBEDDING_TIMEOUT` | `10` | secondi; un server lento ricade sul recall lessicale |
 
 Sostituisci l'LLM con un gateway remoto o OpenRouter cambiando `FOLDCRUMBS_LLM_ENDPOINT` — il recall
 non ne risente.
+
+### Recall semantico opzionale (off di default)
+
+Il recall è lessicale — substring, sovrapposizione di parole, fuzzy — e resta esattamente tale a
+meno che tu non lo attivi con `FOLDCRUMBS_SEMANTIC=1`. Con lo switch attivo, il recall interroga
+anche un endpoint OpenAI-compatibile `/v1/embeddings` (gli stessi server che servono la
+distillazione: MLX, Ollama, llama.cpp, LM Studio) e prende il **migliore** dei due segnali di
+rilevanza, con quello semantico limitato sotto un match perfetto per parole — così un vettore può
+soccorrere una parafrasi che le parole mancano, ma non può mai scavalcare ciò che le parole hanno
+già fatto corrispondere esattamente. Niente di nuovo da installare: la chiamata è `urllib` stdlib,
+i vettori sono in cache machine-local (non nello store sincronizzato), e un endpoint mancante o
+morto è un fallback silenzioso al recall lessicale — mai bloccante, mai un errore. Due cancelli,
+entrambi tuoi: nessuno switch → nessuna richiesta; nessuna risposta → nessun cambiamento.
+
+## Dashboard
+
+`foldcrumbs dashboard` rende l'intero store come **una singola pagina HTML autocontenuta** — CSS
+inline, niente script, nessun riferimento `http(s)`, quindi si apre offline e non telefona mai a
+casa. Ogni numero è calcolato live dallo store dalle stesse funzioni che usa la CLI; niente è
+inventato, e ogni riga che nomina una memoria linka il file reale su disco. Pannelli: stato dello
+store, cosa archivierebbe la passata di decay, catene superseded, root federate (età shard,
+voci), rinforzo del recall, ultime memorie, istogramma di fiducia, anti-rot (budget, età handoff,
+canale semantico) — più i pannelli **Expiry** e **Conflicts** che appaiono automaticamente quando
+quelle feature hanno qualcosa da mostrare. `--json` stampa i dati sottostanti invece della pagina,
+`--out` la scrive su un percorso, `--no-open` salta il browser.
 
 ## CLI
 
@@ -157,6 +186,7 @@ python3 -m foldcrumbs distill transcript.txt    # distilla memorie durevoli (LLM
 python3 -m foldcrumbs checkpoint transcript.txt # scrive un handoff di ripresa (LLM)
 python3 -m foldcrumbs handoff                   # stampa l'handoff corrente
 python3 -m foldcrumbs answer "come funziona il recall?"
+python3 -m foldcrumbs dashboard                    # una singola pagina HTML autocontenuta (--json, --no-open)
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard rimuove il file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # coda di riconciliazione (coppie ambigue, rivendicazioni)
