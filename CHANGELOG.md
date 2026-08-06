@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asymmetric bento grid with per-panel status colouring. Still one
   self-contained HTML file: CSS animation only, no scripts, no external refs.
   Docs now state explicitly that the dashboard is per-project and generated on
-  the fly (EN/IT/ZH).
+  the fly (EN/IT/ZH), and a dedicated reading guide ships in three languages
+  (`docs/dashboard.md`, `docs/dashboard.it.md`, `docs/dashboard.zh.md`).
 
 ## [0.7.0] — 2026-08-06
 

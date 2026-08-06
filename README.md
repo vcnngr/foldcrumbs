@@ -169,7 +169,8 @@ row that names a memory links to the actual file on disk.
 **Per project, generated on the fly.** Like every other command, the dashboard reads the store of
 the project you run it from (`foldcrumbs dashboard` inside project A shows project A's memory).
 Nothing is cached or served from a server: each run computes the page from what the store holds at
-that moment.
+that moment. How to read every panel — hero, health badge, bento grid — is a separate guide:
+[docs/dashboard.md](docs/dashboard.md) ([Italiano](docs/dashboard.it.md), [中文](docs/dashboard.zh.md)).
 
 The page opens on a **live hero**: total, active and recalled memories, federated roots, and a
 heartbeat whose tempo is derived from the store's real recall activity — a heavily-used store

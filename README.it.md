@@ -172,7 +172,9 @@ inventato, e ogni riga che nomina una memoria linka il file reale su disco.
 **Per progetto, generata al volo.** Come ogni altro comando, la dashboard legge lo store del
 progetto da cui la lanci (`foldcrumbs dashboard` dentro il progetto A mostra la memoria del
 progetto A). Niente è servito da un server né messo in cache: ogni esecuzione calcola la pagina
-da ciò che lo store contiene in quel momento.
+da ciò che lo store contiene in quel momento. Come leggere ogni pannello — hero, badge di salute,
+griglia bento — è una guida a parte: [docs/dashboard.it.md](docs/dashboard.it.md)
+([English](docs/dashboard.md), [中文](docs/dashboard.zh.md)).
 
 La pagina si apre su un **hero live**: memorie totali, attive e richiamate, root federate, e un
 battito il cui tempo deriva dall'attività di recall reale dello store — uno store molto usato
