@@ -122,6 +122,24 @@ agent 子进程。
 所有 agent 共享每个项目**同一个**记忆存储，因此在 Claude Code 中记录的决策
 可以在 Codex 和 OpenCode 中被召回。
 
+### 在 Hermes 上安装
+
+[Hermes Agent](https://hermes-agent.nousresearch.com) 没有需要接入的生命周期 hook，因此
+不在 `foldcrumbs install` 的覆盖范围内 — 它改用 **profile** 机制：每个 Hermes profile
+一个专属记忆存储（聊天总线上的 Hermes agent 把记忆随身带走，而不是按仓库）。
+
+```bash
+foldcrumbs profile import --agent hermes          # dry-run：每个 Hermes agent 一个 profile
+foldcrumbs profile import --agent hermes --apply  # 注册它们
+foldcrumbs profile env <name>                     # 选中存储所需的那一行 env
+```
+
+`profile import` 读取 `~/.hermes/profiles`，为每个 agent 注册一个专属 profile，并把
+各自的记忆存放在 foldcrumbs 自己的 state 目录下（绝不放进 Hermes 的目录树 — 两个工具
+共同拥有一个目录正是数据丢失的根源）。把打印出的那行 `FOLDCRUMBS_DIR` 放进对应 profile
+的环境变量，即可让该 profile 指向它的存储；此后该 agent 既能看到自己的记忆，也能以只读
+联邦视图看到机器上所有 shared 存储。详情见[Profile](#profile--每个-agent-一个存储)。
+
 ## 配置（env）
 
 | 变量 | 默认值 | 含义 |
@@ -235,11 +253,10 @@ foldcrumbs profile env kimi-review
 CLI 无法回头修改启动它的那个 shell。所以 `profile env` 会打印出唯一有效的那一行，
 你把它放到 agent 进程诞生的地方（shell rc 文件、worker 的环境、Hermes profile 的
 `.env`）。让进程指向一个 dedicated profile，它就会以只读联邦视图看到机器上
-所有已注册的 shared 存储。
+所有已注册的 shared 存储。`profile remove` 取消注册但不触碰记忆本身。
 
-`profile import --agent hermes --apply` 会为多 agent 运行时的每个 agent 注册一个
-profile，让每个 agent 拥有自己的记忆（默认为 dry-run）。
-`profile remove` 取消注册但不触碰记忆本身。
+现成的场景 — 一台装了多个 agent 的 Hermes — 只需一条命令即可配置；
+见[在 Hermes 上安装](#在-hermes-上安装)。
 
 ## 管理存储
 
@@ -440,6 +457,7 @@ Codex 和 OpenCode 由 `foldcrumbs install --agent …` 接入它。注册上面
 | Claude Code | SessionStart hook | PostToolUse 监控器 + SessionEnd | 完整生命周期 hook |
 | Codex | SessionStart hook（`additionalContext`） | Stop + PostToolUse hook | 相同脚本；+ MCP 提供会话内工具调用 |
 | OpenCode | AGENTS.md → agent 调用 `recall`（MCP） | 插件 `session.idle`/`session.compacted` | 没有可注入的 hook，因此由提示词驱动召回 |
+| Hermes | 每个 profile 一行 `FOLDCRUMBS_DIR` | agent 调用 CLI / MCP | 无 hook；每个 profile 一个专属存储，对其余存储只读联邦 |
 
 ## 路线图
 

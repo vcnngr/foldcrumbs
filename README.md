@@ -127,6 +127,26 @@ indexer with a local model and others using their own CLI subscription. Skip the
 All agents share **one** memory store per project, so a decision recorded in Claude Code is
 recalled in Codex and OpenCode.
 
+### Installing on Hermes
+
+[Hermes Agent](https://hermes-agent.nousresearch.com) has no lifecycle hooks to wire, so it is
+not covered by `foldcrumbs install` — it uses the **profile** mechanism instead: one dedicated
+memory store per Hermes profile (a Hermes agent on a chat bus carries its memory with it, not
+per repository).
+
+```bash
+foldcrumbs profile import --agent hermes          # dry-run: one profile per Hermes agent
+foldcrumbs profile import --agent hermes --apply  # register them
+foldcrumbs profile env <name>                     # the one env line that selects a store
+```
+
+`profile import` reads `~/.hermes/profiles`, registers one dedicated profile per agent, and
+stores each memory under foldcrumbs' own state dir (never inside Hermes's tree — two tools
+owning one directory is how data gets lost). Point a Hermes profile at its store by putting
+the printed `FOLDCRUMBS_DIR` line in that profile's env; the agent then sees its own memory
+plus a read-only federated view of every shared store on the machine. Details under
+[Profiles](#profiles--one-store-per-agent).
+
 ## Configure (env)
 
 | var | default | meaning |
@@ -246,10 +266,10 @@ launched it. So `profile env` prints the one line that does work, and you put
 it wherever the agent's process is born (a shell rc file, a worker's env, a
 Hermes profile's `.env`). Point a process at a dedicated profile and it gets a
 read-only federated view of every shared store registered on the machine.
-
-`profile import --agent hermes --apply` registers one profile per agent of a
-multi-agent runtime, so each gets a memory of its own (dry-run by default).
 `profile remove` unregisters without touching the memories.
+
+The ready-made case — a Hermes installation with several agents — is a one-command
+setup; see [Installing on Hermes](#installing-on-hermes).
 
 ## Curating the store
 
@@ -464,6 +484,7 @@ MCP-speaking tool by registering the command above.
 | Claude Code | SessionStart hook | PostToolUse monitor + SessionEnd | full lifecycle hooks |
 | Codex | SessionStart hook (`additionalContext`) | Stop + PostToolUse hooks | same scripts; + MCP for in-session tool calls |
 | OpenCode | AGENTS.md → agent calls `recall` (MCP) | plugin `session.idle`/`session.compacted` | no inject-capable hook, so prompt-driven recall |
+| Hermes | `FOLDCRUMBS_DIR` per profile | agent calls the CLI / MCP | no hooks; one dedicated store per profile, federated read-only over the rest |
 
 ## Roadmap
 
