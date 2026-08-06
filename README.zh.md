@@ -152,6 +152,7 @@ python3 -m foldcrumbs handoff                   # 打印当前交接
 python3 -m foldcrumbs answer "how does recall work?"
 python3 -m foldcrumbs forget fact_wrong.md --apply   # 软删除（--hard 直接删除文件）
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
+python3 -m foldcrumbs conflicts                      # 对账队列（含糊的对、主张）
 python3 -m foldcrumbs decay                          # 归档低信任记忆（dry-run；--apply 写入）
 python3 -m foldcrumbs restore fact_old.md            # 恢复一条已归档的记忆
 python3 -m foldcrumbs import --from ~/.claude/projects/<slug>/memory --apply

@@ -201,14 +201,46 @@ def persist(records: list[MemoryRecord], cwd: str | None = None) -> dict[str, in
 
 _SUPERSEDE_PROMPT = (
     "You maintain a store of durable engineering memories. Given an OLD memory "
-    "and a NEW one about the same subject, decide whether the NEW memory makes "
-    "the OLD one obsolete: it reverses the decision, states the deferred thing "
-    "happened, or replaces the rule. Different aspects of the same subject do "
-    "NOT supersede each other. If unsure, answer false. "
-    'Reply with JSON and nothing else: {"supersedes": true|false}'
+    "and a NEW one about the same subject, classify their relationship with ONE "
+    "of three words:\n"
+    '  "supersede" — the NEW memory makes the OLD one obsolete: it reverses the '
+    "decision, states the deferred thing happened, or replaces the rule;\n"
+    '  "coexist"   — both remain true (different aspects, or the new one adds '
+    "detail);\n"
+    '  "flag"      — they conflict but you cannot tell which one holds.\n'
+    "Different aspects of the same subject do NOT supersede each other. When you "
+    'are unsure between supersede and coexist, answer "flag" — never guess. '
+    'Reply with JSON and nothing else: {"verdict": "supersede"|"coexist"|"flag"}'
 )
 
 _SUPERSEDE_TRUE_RE = re.compile(r'"supersedes"\s*:\s*true', re.IGNORECASE)
+_SUPERSEDE_FALSE_RE = re.compile(r'"supersedes"\s*:\s*false', re.IGNORECASE)
+_VERDICT_RE = re.compile(r'"verdict"\s*:\s*"(supersede|coexist|flag)"', re.IGNORECASE)
+
+
+def parse_supersede_verdict(answer: str | None) -> str | None:
+    """Classify a contradiction-pass answer: supersede / coexist / flag / None.
+
+    ``None`` means the LLM did not answer at all — fail-soft, nothing changes
+    (and nothing is flagged: an offline machine must not flood the queue).
+    ``flag`` means an answer arrived that is neither a clear supersede nor a
+    clear coexist — genuine uncertainty or confusion. That is exactly the case
+    the old true/false question had no room for, and it must surface, not be
+    guessed away. The old ``{"supersedes": ...}`` spelling is still honoured so
+    a stale prompt or model keeps working.
+    """
+    if answer is None:
+        return None
+    if not answer.strip():
+        return None               # an empty answer is still "no answer"
+    if _SUPERSEDE_TRUE_RE.search(answer):
+        return "supersede"
+    if _SUPERSEDE_FALSE_RE.search(answer):
+        return "coexist"
+    m = _VERDICT_RE.search(answer)
+    if m:
+        return m.group(1).lower()
+    return "flag"
 
 
 def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
@@ -216,8 +248,16 @@ def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
 
     Conservative by construction: candidates come from a cheap same-subject
     pre-filter (store.find_conflict_candidates), only an explicit LLM
-    ``supersedes: true`` flips anything, and with no LLM available nothing
-    happens. Superseded files stay on disk — recoverable, cleared by prune."""
+    ``supersede`` verdict flips anything, and with no LLM available nothing
+    happens. Superseded files stay on disk — recoverable, cleared by prune.
+
+    A third verdict exists now: ``flag``. When the LLM cannot tell which
+    statement holds, the pair goes to the reconciliation queue (machine-local,
+    visible via ``foldcrumbs conflicts``) instead of being guessed away — a
+    system that silently picks a side when genuinely unsure is a system that
+    will confidently act on the wrong fact eventually."""
+    from . import conflicts as conflicts_mod
+
     count = 0
     for rec in fresh:
         for old in store.find_conflict_candidates(rec, cwd, federated=True):
@@ -231,8 +271,22 @@ def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
                 temperature=0.0,
                 max_tokens=32,
             )
-            if answer and _SUPERSEDE_TRUE_RE.search(answer):
-                name = old.source_path or old.filename()
+            verdict = parse_supersede_verdict(answer)
+            if verdict is None:
+                continue          # no LLM answer: fail-soft, nothing changes
+            name = old.source_path or old.filename()
+            if verdict == "flag":
+                # Genuinely unsure — surface it, never guess. The queue entry
+                # names both sides and drops out again once either one is
+                # retired by other means (supersede, forget, expiry sweep).
+                conflicts_mod.flag_pair(
+                    name, rec.source_path or rec.filename(), cwd,
+                    old_root=old.origin_root if old.is_foreign else None)
+                config.log_event(
+                    f"conflict flagged: {name} <-> {rec.filename()} "
+                    f"(verdict unclear; see `foldcrumbs conflicts`)")
+                continue
+            if verdict == "supersede":
                 if old.is_foreign:
                     # Someone else's store is read-only from here, so the
                     # contradiction is *recorded*, not applied: the assertion
@@ -260,6 +314,7 @@ def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
                     config.log_event(
                         f"auto-supersede: {name} obsoleted by {rec.filename()}")
                 count += 1
+            # verdict == "coexist": both hold, nothing to do.
     return count
 
 

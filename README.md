@@ -173,6 +173,7 @@ python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
+python3 -m foldcrumbs conflicts                      # reconciliation queue (ambiguous pairs, claims)
 python3 -m foldcrumbs decay                          # archive low-trust memories (dry-run; --apply writes)
 python3 -m foldcrumbs restore fact_old.md            # bring an archived memory back
 python3 -m foldcrumbs import --from ~/.claude/projects/<slug>/memory --apply

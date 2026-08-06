@@ -152,6 +152,12 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
         print("hint: run `foldcrumbs index` to rebuild, or `foldcrumbs doctor` after a distill.")
     if a["pollution"]:
         print("hint: run `foldcrumbs prune` (dry-run) then `foldcrumbs prune --apply`.")
+    from . import conflicts as conflicts_mod
+    q = conflicts_mod.queue()
+    if q["flagged"] or q["claims_out"] or q["contested_here"]:
+        print(f"conflicts  : {len(q['flagged'])} ambiguous, "
+              f"{len(q['claims_out'])} claims out, "
+              f"{len(q['contested_here'])} contested — `foldcrumbs conflicts`")
     return 0
 
 
@@ -362,6 +368,14 @@ def _cmd_supersede(args: argparse.Namespace) -> int:
         return 1
     print(f"superseded: {args.old} -> {args.by}; index rebuilt. "
           "File kept on disk — `foldcrumbs prune --apply` clears it.")
+    return 0
+
+
+def _cmd_conflicts(_: argparse.Namespace) -> int:
+    """Show the reconciliation queue: ambiguous pairs, foreign claims."""
+    from . import conflicts as conflicts_mod
+    q = conflicts_mod.queue()
+    print(conflicts_mod.format_queue(q))
     return 0
 
 
@@ -739,6 +753,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("old", help="filename of the outdated memory")
     sp.add_argument("--by", required=True, help="filename of the memory that replaces it")
     sp.set_defaults(func=_cmd_supersede)
+
+    sub.add_parser("conflicts", help="show the reconciliation queue "
+                   "(ambiguous pairs, claims on other instances, contested memories)"
+                   ).set_defaults(func=_cmd_conflicts)
 
     pr = sub.add_parser("prune", help="delete pollution / superseded memories (dry-run by default)")
     pr.add_argument("--apply", action="store_true", help="actually delete (default: dry-run)")
