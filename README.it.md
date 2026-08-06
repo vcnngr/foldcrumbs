@@ -488,6 +488,19 @@ transcript e l'idea di rendering del blocco di contesto. Questi sono reimplement
 store di file; il motore di retrieval Moorcheh non è usato. Avviso completo in [LICENSE](LICENSE).
 Grazie agli autori di memanto per averlo rilasciato sotto MIT.
 
+## Contributori LLM
+
+foldcrumbs è stato costruito da un umano che dirige diversi large language model, ciascuno con un
+ruolo distinto. Git attribuisce i modelli Claude (i loro strumenti scrivono i trailer
+`Co-authored-by`); il resto del team è riconosciuto qui:
+
+| Modello | Contributo |
+|--|--|
+| Claude Opus 4.8 · Opus 5 · Fable 5 | codice, 0.1 → 0.6.1: store, distillazione, hook, federazione |
+| Qwen 3.8 Max | codice, 0.7.0: semantic recall, expiry, coda di riconciliazione, dashboard, release |
+| GPT-5.5 · GPT-5.6-sol | review e red-teaming del codice |
+| Kimi K3 | revisore indipendente del loop di sviluppo (verdetto GREEN/RED su ogni implementazione) |
+
 ## Licenza
 
 MIT — vedi [LICENSE](LICENSE).
