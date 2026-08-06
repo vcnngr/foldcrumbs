@@ -129,6 +129,26 @@ momento con `foldcrumbs backend <name>` (`foldcrumbs backend` da solo mostra que
 Tutti gli agent condividono **un unico** store di memoria per progetto, così una decisione registrata
 in Claude Code è richiamabile in Codex e OpenCode.
 
+### Installazione su Hermes
+
+[Hermes Agent](https://hermes-agent.nousresearch.com) non ha hook di ciclo di vita da cablare, quindi
+non è coperto da `foldcrumbs install` — usa invece il meccanismo dei **profili**: uno store di
+memoria dedicato per ogni profilo Hermes (un agent Hermes su un bus di chat porta la memoria con sé,
+non per repository).
+
+```bash
+foldcrumbs profile import --agent hermes          # dry-run: un profilo per ogni agent Hermes
+foldcrumbs profile import --agent hermes --apply  # li registra
+foldcrumbs profile env <nome>                     # l'unica riga env che seleziona uno store
+```
+
+`profile import` legge `~/.hermes/profiles`, registra un profilo dedicato per ogni agent, e mette
+ogni memoria sotto la state dir di foldcrumbs (mai dentro l'albero di Hermes — due strumenti che
+possiedono una stessa directory è il modo in cui si perdono dati). Punta un profilo Hermes al suo
+store mettendo la riga `FOLDCRUMBS_DIR` stampata nell'env di quel profilo; l'agent vedrà la propria
+memoria più una vista federata read-only di ogni store shared sulla macchina. Dettagli in
+[Profili](#profili--uno-store-per-agent).
+
 ## Configurazione (env)
 
 | var | default | significato |
@@ -247,11 +267,10 @@ Non esiste `profile use`. Quale store legge un processo è deciso dal suo ambien
 `profile env` stampa l'unica riga che funziona, e tu la metti dove nasce il processo dell'agent
 (un file rc della shell, l'env di un worker, il `.env` di un profilo Hermes). Punta un processo
 su un profilo dedicated e ottiene una vista federata read-only di ogni store shared registrato
-sulla macchina.
+sulla macchina. `profile remove` deregistra senza toccare le memorie.
 
-`profile import --agent hermes --apply` registra un profilo per ogni agent di un runtime
-multi-agent, così ognuno ha una memoria propria (dry-run di default).
-`profile remove` deregistra senza toccare le memorie.
+Il caso già pronto — un'installazione Hermes con diversi agent — è un setup da un solo comando;
+vedi [Installazione su Hermes](#installazione-su-hermes).
 
 ## Curare lo store
 
@@ -465,6 +484,7 @@ qualsiasi tool che parla MCP registrando il comando qui sopra.
 | Claude Code | hook SessionStart | monitor PostToolUse + SessionEnd | hook a ciclo di vita completo |
 | Codex | hook SessionStart (`additionalContext`) | hook Stop + PostToolUse | stessi script; + MCP per chiamate tool in-sessione |
 | OpenCode | AGENTS.md → l'agent chiama `recall` (MCP) | plugin `session.idle`/`session.compacted` | nessun hook capace di iniettare, quindi recall guidato dal prompt |
+| Hermes | `FOLDCRUMBS_DIR` per profilo | l'agent chiama la CLI / MCP | niente hook; uno store dedicato per profilo, federato read-only sul resto |
 
 ## Roadmap
 
