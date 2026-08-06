@@ -164,12 +164,22 @@ no answer → no change.
 `foldcrumbs dashboard` renders the whole store as **one self-contained HTML page** — inline CSS,
 no scripts, no `http(s)` references, so it opens offline and never phones home. Every number is
 computed live from the store by the same functions the CLI uses; nothing is invented, and every
-row that names a memory links to the actual file on disk. Panels: store status, what the decay
-sweep would archive, superseded chains, federated roots (shard age, entries), recall
-reinforcement, latest memories, trust histogram, anti-rot (budget, handoff age, semantic channel)
-— plus **Expiry** and **Conflicts** panels that appear automatically once those features have
-something to show. `--json` prints the underlying data instead of the page, `--out` writes it to
-a path, `--no-open` skips the browser.
+row that names a memory links to the actual file on disk.
+
+**Per project, generated on the fly.** Like every other command, the dashboard reads the store of
+the project you run it from (`foldcrumbs dashboard` inside project A shows project A's memory).
+Nothing is cached or served from a server: each run computes the page from what the store holds at
+that moment.
+
+The page opens on a **live hero**: total, active and recalled memories, federated roots, and a
+heartbeat whose tempo is derived from the store's real recall activity — a heavily-used store
+pulses faster than a dormant one (CSS animation, still script-free), plus a health badge
+(current / needs a sweep / attention) computed from decay, expiry and conflicts. Below it, a
+bento grid: what the decay sweep would archive, superseded chains, federated roots (shard age,
+entries), recall reinforcement, latest memories, trust histogram, anti-rot (budget, handoff age,
+semantic channel) — plus **Expiry** and **Conflicts** panels that appear automatically once those
+features have something to show. `--json` prints the underlying data instead of the page, `--out`
+writes it to a path, `--no-open` skips the browser.
 
 ## CLI
 
