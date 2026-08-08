@@ -19,10 +19,17 @@ jobs:
         run: ruff check foldcrumbs tests
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.12", "3.13"]
+        include:
+          # The production target is Apple Silicon: the fcntl/APFS paths only
+          # run there in the wild, so the platform gets its own lane. Full
+          # Python coverage stays on Ubuntu to keep the minutes down.
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
