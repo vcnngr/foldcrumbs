@@ -102,6 +102,66 @@ class TestHandler(unittest.TestCase):
         text = rec["result"]["content"][0]["text"]
         self.assertIn("grep", text)
 
+    # --- recall filters (type / tags): MCP-only agents like OpenCode used to
+    # have no way to narrow a search, while the CLI had --type/--tag ---
+
+    def _seed(self):
+        mcp_server.handle({"jsonrpc": "2.0", "id": 30, "method": "tools/call",
+                           "params": {"name": "remember", "arguments": {
+                               "content": "We deploy on Fridays via the pipeline.",
+                               "type": "fact", "title": "Deploy day",
+                               "tags": ["ops", "deploy"]}}})
+        mcp_server.handle({"jsonrpc": "2.0", "id": 31, "method": "tools/call",
+                           "params": {"name": "remember", "arguments": {
+                               "content": "Deploy reviews are mandatory before Friday.",
+                               "type": "decision", "title": "Deploy review"}}})
+
+    def test_recall_type_filter_as_string(self):
+        self._seed()
+        rec = mcp_server.handle({"jsonrpc": "2.0", "id": 32, "method": "tools/call",
+                                 "params": {"name": "recall", "arguments": {
+                                     "query": "deploy", "type": "decision"}}})
+        text = rec["result"]["content"][0]["text"]
+        self.assertIn("Deploy reviews", text)
+        self.assertNotIn("We deploy on Fridays", text,
+                         "a type filter returned memories of another type")
+
+    def test_recall_type_filter_as_array(self):
+        self._seed()
+        rec = mcp_server.handle({"jsonrpc": "2.0", "id": 33, "method": "tools/call",
+                                 "params": {"name": "recall", "arguments": {
+                                     "query": "deploy", "type": ["decision"]}}})
+        text = rec["result"]["content"][0]["text"]
+        self.assertIn("Deploy reviews", text)
+        self.assertNotIn("We deploy on Fridays", text)
+
+    def test_recall_tags_filter(self):
+        self._seed()
+        rec = mcp_server.handle({"jsonrpc": "2.0", "id": 34, "method": "tools/call",
+                                 "params": {"name": "recall", "arguments": {
+                                     "query": "deploy", "tags": ["ops"]}}})
+        text = rec["result"]["content"][0]["text"]
+        self.assertIn("We deploy on Fridays", text)
+        self.assertNotIn("Deploy reviews", text,
+                         "a tags filter returned an untagged memory")
+
+    def test_recall_without_filters_is_unchanged(self):
+        self._seed()
+        rec = mcp_server.handle({"jsonrpc": "2.0", "id": 35, "method": "tools/call",
+                                 "params": {"name": "recall", "arguments": {
+                                     "query": "deploy"}}})
+        text = rec["result"]["content"][0]["text"]
+        self.assertIn("We deploy on Fridays", text)
+        self.assertIn("Deploy reviews", text)
+
+    def test_recall_schema_declares_the_filters(self):
+        r = mcp_server.handle({"jsonrpc": "2.0", "id": 36, "method": "tools/list"})
+        recall = next(t for t in r["result"]["tools"] if t["name"] == "recall")
+        props = recall["inputSchema"]["properties"]
+        self.assertIn("type", props)
+        self.assertIn("tags", props)
+        self.assertEqual(recall["inputSchema"]["required"], ["query"])
+
     def test_unknown_tool_is_error(self):
         r = mcp_server.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                                "params": {"name": "nope", "arguments": {}}})

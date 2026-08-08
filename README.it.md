@@ -477,6 +477,12 @@ foldcrumbs-mcp            # oppure: python3 -m foldcrumbs.mcp_server
 Codex e OpenCode sono collegati ad esso da `foldcrumbs install --agent …`. Usalo direttamente da
 qualsiasi tool che parla MCP registrando il comando qui sopra.
 
+`recall` accetta gli stessi filtri di restringimento della CLI: passa `type` (una stringa o un
+array) e/o `tags` (un array) per restituire solo le memorie che corrispondono — es.
+`recall(query="deploy", type="decision")`. Senza filtri si comporta esattamente come prima.
+Conta soprattutto per gli agent solo-MCP (OpenCode), che prima non avevano alcun modo di
+restringere una ricerca.
+
 ## Come è collegato ogni agent
 
 | Agent | Inietta all'avvio | Cattura | Note |
