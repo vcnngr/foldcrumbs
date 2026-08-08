@@ -450,6 +450,11 @@ foldcrumbs-mcp            # 或：python3 -m foldcrumbs.mcp_server
 Codex 和 OpenCode 由 `foldcrumbs install --agent …` 接入它。注册上面的命令，即可
 从任何支持 MCP 的工具直接使用。
 
+`recall` 支持与 CLI 相同的收窄过滤器：传入 `type`（字符串或数组）和/或 `tags`
+（数组），即可只返回匹配的记忆 — 例如 `recall(query="deploy", type="decision")`。
+不带过滤器时行为与之前完全一致。这一点对仅使用 MCP 的 agent（OpenCode）尤为重要，
+它们此前完全无法收窄搜索范围。
+
 ## 各 agent 的接入方式
 
 | Agent | 启动时注入 | 捕获 | 备注 |

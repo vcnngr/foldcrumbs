@@ -1,12 +1,12 @@
 """Minimal MCP (Model Context Protocol) server over stdio — stdlib only.
 
-Exposes three tools on the shared foldcrumbs store so MCP-speaking agents (Codex,
+Exposes four tools on the shared foldcrumbs store so MCP-speaking agents (Codex,
 OpenCode, any MCP client) read/write the same memory Claude Code uses:
 
   * remember(content, type, title, confidence, tags) — store a memory
-  * recall(query, limit)                              — search the store
-  * answer(question, limit)                           — grounded answer (LLM)
-  * forget(name)                                      — soft-delete one memory
+  * recall(query, limit, type, tags)                 — search the store
+  * answer(question, limit)                          — grounded answer (LLM)
+  * forget(name)                                     — soft-delete one memory
 
 Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout (the MCP stdio
 transport). We implement only what a client needs to list and call tools —
@@ -64,6 +64,20 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "description": "Max memories (default 10)."},
+                "type": {
+                    "description": "Only memories of this type (or types). "
+                                   "A string or an array of strings (repeatable).",
+                    "anyOf": [
+                        {"type": "string", "enum": sorted(VALID_TYPES)},
+                        {"type": "array", "items": {"type": "string",
+                                                    "enum": sorted(VALID_TYPES)}},
+                    ],
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Only memories carrying at least one of these tags.",
+                },
             },
             "required": ["query"],
         },
@@ -107,8 +121,9 @@ TOOLS = [
 # --- tool implementations -------------------------------------------------- #
 
 
-def _search(query: str, limit: int) -> list[MemoryRecord]:
-    return store.search(query, limit=limit)
+def _search(query: str, limit: int, types: list[str] | None = None,
+            tags: list[str] | None = None) -> list[MemoryRecord]:
+    return store.search(query, limit=limit, types=types, tags=tags)
 
 
 def tool_remember(args: dict[str, Any]) -> str:
@@ -127,7 +142,13 @@ def tool_remember(args: dict[str, Any]) -> str:
 
 
 def tool_recall(args: dict[str, Any]) -> str:
-    mems = _search(str(args["query"]), int(args.get("limit", 10)))
+    types = args.get("type")
+    if isinstance(types, str):
+        types = [types]
+    tags = args.get("tags")
+    mems = _search(str(args["query"]), int(args.get("limit", 10)),
+                   types=list(types) if types else None,
+                   tags=list(tags) if tags else None)
     block = format_context_block(mems, heading=str(args["query"]))
     return block or "(no matching memories)"
 

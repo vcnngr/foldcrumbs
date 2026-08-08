@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MCP recall filters** — the `recall` tool accepts `type` (a string or an
+  array) and `tags` (an array), the same narrowing the CLI has always had.
+  Without filters the behaviour is unchanged. This closes the gap for
+  MCP-only agents (OpenCode), which previously could not narrow a search at
+  all.
+
 ### Changed
 
 - **Dashboard v2** — the page is no longer a wall of equal boxes: it opens on
