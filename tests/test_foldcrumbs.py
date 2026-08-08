@@ -4830,6 +4830,131 @@ class TestProfiles(_FederationEnv):
         self.assertFalse(self.profiles.remove("councillor"),
                          "removing an unknown profile reported success")
 
+    # --- the default profile (it lives at the runtime's home, not in
+    # profiles/, and used to be skipped — 16 agents imported out of 17) ---
+
+    def test_discover_includes_the_default_profile_when_the_home_is_one(self):
+        home = self._fake_agent("cz-claude", "devlog")
+        (home.parent / "SOUL.md").write_text("soul", encoding="utf-8")
+        self.assertEqual(self.profiles.discover(home=home),
+                         ["cz-claude", "default", "devlog"])
+
+    def test_discover_without_a_home_level_soul_keeps_the_old_list(self):
+        # A bare folder of directories (a fixture, a partial tree) must not
+        # invent a default profile that does not exist.
+        home = self._fake_agent("cz-claude", "devlog")
+        self.assertEqual(self.profiles.discover(home=home),
+                         ["cz-claude", "devlog"])
+
+    def test_import_gives_the_default_profile_a_store_too(self):
+        home = self._fake_agent("cz-claude")
+        (home.parent / "SOUL.md").write_text("soul", encoding="utf-8")
+        res = self.profiles.import_agent(home=home, apply=True)
+        self.assertIn("default", res["added"],
+                      "the runtime's own default profile was skipped")
+
+    # --- failures must be failures (they used to be masked as skips, or
+    # vanish without a trace) ---
+
+    def test_a_prefix_that_breaks_naming_fails_loudly_in_dry_run(self):
+        home = self._fake_agent("cz-claude")
+        res = self.profiles.import_agent(home=home, prefix=".bad-")
+        self.assertEqual(res["added"], [])
+        self.assertIn(".bad-cz-claude", res["failed"])
+        self.assertIn("invalid", res["failed"][".bad-cz-claude"])
+
+    def test_a_registration_conflict_is_a_failure_not_a_skip(self):
+        from foldcrumbs import federation as fed
+        home = self._fake_agent("cz-claude")
+
+        def boom(name, **kw):
+            raise fed.FederationConflict("already registered elsewhere")
+
+        real_add = self.profiles.add
+        self.profiles.add = boom
+        try:
+            res = self.profiles.import_agent(home=home, apply=True)
+        finally:
+            self.profiles.add = real_add
+        self.assertEqual(res["added"], [])
+        self.assertEqual(res["skipped"], [],
+                         "a conflict was disguised as 'already registered'")
+        self.assertIn("cz-claude", res["failed"])
+        self.assertIn("conflict", res["failed"]["cz-claude"])
+
+    def test_an_unregistrable_root_is_a_failure_not_silent(self):
+        home = self._fake_agent("cz-claude")
+        real_add = self.profiles.add
+        self.profiles.add = lambda name, **kw: None
+        try:
+            res = self.profiles.import_agent(home=home, apply=True)
+        finally:
+            self.profiles.add = real_add
+        self.assertEqual(res["added"], [])
+        self.assertIn("cz-claude", res["failed"],
+                      "a profile vanished without an error or a skip")
+
+    def test_an_invalid_name_raised_by_add_is_a_failure(self):
+        home = self._fake_agent("cz-claude")
+
+        def boom(name, **kw):
+            raise ValueError("not usable as a profile name: " + repr(name))
+
+        real_add = self.profiles.add
+        self.profiles.add = boom
+        try:
+            res = self.profiles.import_agent(home=home, apply=True)
+        finally:
+            self.profiles.add = real_add
+        self.assertIn("cz-claude", res["failed"])
+        self.assertIn("invalid", res["failed"]["cz-claude"])
+        self.assertEqual(res["skipped"], [])
+
+    def test_cli_import_failure_exits_nonzero_and_says_why(self):
+        import argparse
+        import contextlib
+        import io
+        from foldcrumbs import cli
+        home = self._fake_agent("cz-claude")
+        (home.parent / "SOUL.md").write_text("soul", encoding="utf-8")
+        real_homes = self.profiles.AGENT_HOMES
+        self.profiles.AGENT_HOMES = {"hermes": home}
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = cli._cmd_profile(argparse.Namespace(
+                    action="import", agent="hermes", apply=True,
+                    prefix=".bad-"))
+        finally:
+            self.profiles.AGENT_HOMES = real_homes
+        self.assertEqual(rc, 1, "a failed import reported success")
+        out = buf.getvalue()
+        self.assertIn("FAILED", out)
+        # Both named profiles fail under a name-breaking prefix.
+        self.assertIn("2 failed", out)
+
+    def test_cli_import_success_exits_zero_and_names_default(self):
+        import argparse
+        import contextlib
+        import io
+        from foldcrumbs import cli
+        home = self._fake_agent("cz-claude")
+        (home.parent / "SOUL.md").write_text("soul", encoding="utf-8")
+        real_homes = self.profiles.AGENT_HOMES
+        self.profiles.AGENT_HOMES = {"hermes": home}
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = cli._cmd_profile(argparse.Namespace(
+                    action="import", agent="hermes", apply=True,
+                    prefix=None))
+        finally:
+            self.profiles.AGENT_HOMES = real_homes
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("default", out)
+        self.assertIn("0 failed", out)
+
 
 class TestFederatedSearch(_FederationEnv):
     """Federated recall: the path OpenCode and Codex depend on."""

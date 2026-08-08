@@ -77,6 +77,18 @@ def _only(name: str):
     return found[0] if found else None
 
 
+def _bad_name(name: str) -> str | None:
+    """Why a name cannot be a profile, or None when it can.
+
+    One source of truth: ``add`` refuses with these same words, and the
+    import dry-run pre-checks with them so a broken prefix is visible before
+    ``--apply``, not discovered by it.
+    """
+    if not name or "/" in name or os.sep in name or name.startswith("."):
+        return f"not usable as a profile name: {name!r}"
+    return None
+
+
 def add(name: str, kind: str = DEDICATED, path: str | os.PathLike[str] | None = None):
     """Register a profile. Returns its root, or None if it could not be made.
 
@@ -86,8 +98,9 @@ def add(name: str, kind: str = DEDICATED, path: str | os.PathLike[str] | None = 
     """
     if kind not in _MODE_FOR:
         raise ValueError(f"not a profile shape: {kind}")
-    if not name or "/" in name or os.sep in name or name.startswith("."):
-        raise ValueError(f"not usable as a profile name: {name!r}")
+    bad = _bad_name(name)
+    if bad:
+        raise ValueError(bad)
     if path is None:
         if kind == SHARED:
             raise ValueError(
@@ -119,15 +132,27 @@ def discover(agent: str = "hermes", home: str | os.PathLike[str] | None = None
     it knows who its agents are. This reads that list so each can be given a
     memory of its own, and returns empty when the runtime is not installed
     rather than treating its absence as an error.
+
+    Includes the runtime's own ``default`` profile when there is one: a
+    hermes installation keeps its named profiles under ``profiles/``, but the
+    default profile *is* the home directory itself (its SOUL/config live at
+    the root). Skipping it would silently import everyone except the agent
+    that answers when no profile is named. Detection is layout-based — a
+    ``SOUL.md`` beside the profiles directory — so a bare folder of
+    directories (a test fixture, a partial tree) does not invent a profile.
     """
     base = Path(home) if home is not None else AGENT_HOMES.get(agent)
     if base is None:
         raise ValueError(f"no known profile layout for {agent!r}")
     try:
-        return sorted(d.name for d in base.iterdir()
-                      if d.is_dir() and not d.name.startswith("."))
+        names = sorted(d.name for d in base.iterdir()
+                       if d.is_dir() and not d.name.startswith("."))
     except OSError:
         return []
+    if (base.parent / "SOUL.md").is_file():
+        # The home itself is a profile — the runtime's default one.
+        names = sorted(names + ["default"])
+    return names
 
 
 def import_agent(agent: str = "hermes", home=None, apply: bool = False,
@@ -140,25 +165,45 @@ def import_agent(agent: str = "hermes", home=None, apply: bool = False,
     tools own one directory, and the first to tidy up would take the other's
     data with it.
 
-    Dry-run unless ``apply``, and already-registered names are reported as
-    skipped rather than re-registered under a second id.
+    Dry-run unless ``apply``. Outcomes are kept apart so a failure is never
+    reported as success: ``skipped`` means the profile was already registered
+    (nothing to do), ``failed`` means registration did not work and why — an
+    invalid name (e.g. from a prefix that breaks the naming rules), a root
+    that could not be made, or a conflict with an existing registration under
+    the same directory. Callers surface ``failed`` and return a non-zero exit.
     """
     label = (lambda n: f"{prefix}{n}") if prefix else (lambda n: n)
     found = discover(agent, home)
     taken = {p["name"] for p in listing()}
     plan = {n: label(n) for n in found}
     added, skipped = [], sorted(n for n in found if label(n) in taken)
+    failed: dict[str, str] = {}
+    # Pre-check names on every pass, dry-run included: a broken prefix must be
+    # visible *before* --apply, not discovered by it.
+    for name in found:
+        if label(name) in taken:
+            continue
+        bad = _bad_name(label(name))
+        if bad:
+            failed[label(name)] = f"invalid: {bad}"
     if apply:
         for name in found:
-            if label(name) in taken:
+            if label(name) in taken or label(name) in failed:
                 continue
             try:
-                if add(label(name)) is not None:
+                ref = add(label(name))
+            except federation.FederationConflict as exc:
+                failed[label(name)] = f"conflict: {exc}"
+            except ValueError as exc:
+                failed[label(name)] = f"invalid: {exc}"
+            else:
+                if ref is not None:
                     added.append(label(name))
-            except (ValueError, federation.FederationConflict):
-                skipped.append(label(name))
+                else:
+                    failed[label(name)] = "no root could be registered for it"
     return {"found": found, "plan": plan, "added": added,
-            "skipped": sorted(set(skipped)), "applied": apply}
+            "skipped": sorted(set(skipped)), "failed": failed,
+            "applied": apply}
 
 
 def listing() -> list[dict]:
