@@ -189,17 +189,30 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             print(f"no {args.agent} profiles found on this machine.")
             return 0
         for name in res["found"]:
-            mark = "  (already registered)" if res["plan"][name] in res["skipped"] else ""
-            print(f"  {res['plan'][name]}{mark}")
+            planned = res["plan"][name]
+            if planned in res["skipped"]:
+                mark = "  (already registered)"
+            elif planned in res["failed"]:
+                mark = f"  (FAILED: {res['failed'][planned]})"
+            else:
+                mark = ""
+            print(f"  {planned}{mark}")
         if res["applied"]:
             print(f"registered {len(res['added'])} profile(s); "
-                  f"{len(res['skipped'])} already there. "
-                  "`foldcrumbs profile env <name>` prints what to set.")
+                  f"{len(res['skipped'])} already there; "
+                  f"{len(res['failed'])} failed.")
+            if res["failed"]:
+                print("failed profiles were NOT registered — see reasons above.")
+            else:
+                print("`foldcrumbs profile env <name>` prints what to set.")
         else:
             new = [n for n in res["plan"].values() if n not in res["skipped"]]
             print(f"{len(new)} profile(s) would be registered, each with a "
                   "memory of its own. Run with --apply to do it.")
-        return 0
+            if res["failed"]:
+                print(f"warning: {len(res['failed'])} would FAIL (bad names) — "
+                      "fix the prefix before applying.")
+        return 1 if res["failed"] else 0
 
     if action == "env":
         try:
