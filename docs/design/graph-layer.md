@@ -20,9 +20,10 @@ causali sul progetto foldcrumbs → 4 falliscono col recall attuale
 criterio di accettazione della serie è che queste domande inizino a
 funzionare.
 
-Assunzione strutturale: il layer viene costruito DOPO lo split di
-store.py/federation.py in pacchetti (W4). Le interfacce pubbliche
-restano invariate.
+Assunzione strutturale (aggiornata 2026-08-17, scelta titolare): W4
+(split di store.py/federation.py in pacchetti) è DEFERITO — il graph
+layer è additivo (nuovo modulo graph.py + nuovi campi schema.py) e non
+richiede lo split. Le interfacce pubbliche restano invariate. Se/...[truncated]
 
 ## Principi (non negoziabili)
 
@@ -61,8 +62,7 @@ Output di `foldcrumbs graph`:
 
 Scopo di G0: dimostrare che il grafo derivato dice qualcosa di utile
 sullo store reale PRIMA di introdurre schema nuovo. Se G0 non dimostra
-valore, la serie si ferma qui senza danni. G0 non tocca lo schema: può
-partire appena W4 è mergiato.
+valore, la serie si ferma qui senza danni. G0 non tocca lo schema.
 
 ## G1 — Relazioni esplicite (schema nuovo, additivo)
 
@@ -191,9 +191,11 @@ Il distill propone terne, NON le scrive:
 
 ## Piano di esecuzione e gate
 
-1. W4 (split moduli) → main — prerequisito strutturale
+1. ~~W4 (split moduli) → main~~ DEFERITO (scelta titolare 2026-08-17):
+   il layer è additivo; lo split resta fattibile come lavoro dedicato
+   futuro con riscrittura del contratto test (~70 patch-site privati)
 2. ✅ Design red-team doppio → questa revisione → approvazione titolare
-3. G0 → branch `feat/graph-view` — può partire appena W4 è mergiato
+3. G0 → branch `feat/graph-view` — sbloccato (nessun prerequisito W4)
 4. G1 → branch `feat/relations` — gate: le fixture obbligatorie
    (round-trip relations_json, multi-processo fail-closed, tri-stato
    path, rifiuto predicati/target invalidi) devono esistere PRIMA del
