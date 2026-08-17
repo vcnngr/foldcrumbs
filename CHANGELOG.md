@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Graph view (G0)** — `foldcrumbs graph` derives a read-only graph from
+  relations the store ALREADY has: supersede chains (keyed on the immutable
+  memory id, arrows only when both ends still exist), live reconciliation
+  pairs, and weak tag co-occurrence (2+ shared tags). Formats: `text` edge
+  list (default, pipe-friendly), `--format mermaid`, `--format dot`, and
+  `--format html` for a self-contained report page (a TABLE report, not an
+  interactive visualization — no scripts, no external references). The
+  command writes nothing; same store, same bytes (deterministic). Design
+  rationale: docs/design/graph-layer.md (REV-2, red-teamed).
+
 - **MCP recall filters** — the `recall` tool accepts `type` (a string or an
   array) and `tags` (an array), the same narrowing the CLI has always had.
   Without filters the behaviour is unchanged. This closes the gap for

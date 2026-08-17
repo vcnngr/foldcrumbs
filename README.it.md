@@ -206,6 +206,32 @@ canale semantico) — più i pannelli **Expiry** e **Conflicts** che appaiono au
 quelle feature hanno qualcosa da mostrare. `--json` stampa i dati sottostanti invece della pagina,
 `--out` la scrive su un percorso, `--no-open` salta il browser.
 
+## Graph
+
+`foldcrumbs graph` deriva un grafo in sola lettura dalle relazioni che lo
+store HA GIÀ — nessun nuovo schema, nessuna scrittura:
+
+- **catene di supersede** — vecchia → nuova, keyate sull'id immutabile della
+  memoria (mai sul filename, che un retitle cambierebbe), frecce disegnate
+  solo quando entrambi gli estremi esistono ancora;
+- **coppie in conflitto** — la coda di riconciliazione viva, con entrambi i
+  lati ancora presenti;
+- **archi deboli di tag** — memorie che condividono 2+ tag, mostrate solo come
+  indizi di clustering, escluse da qualsiasi futura ricerca di percorso.
+
+```bash
+foldcrumbs graph                       # lista di archi in testo (pipe-friendly)
+foldcrumbs graph --format mermaid      # per graph tools / documentazione
+foldcrumbs graph --format dot          # Graphviz
+foldcrumbs graph --format html         # pagina report autocontenuta (--out, --no-open)
+```
+
+Portata onesta: questo è il G0 del graph layer — un report sulle relazioni
+esistenti, non un graph database. La pagina HTML è un report tabellare (niente
+script, nessun riferimento esterno, si apre offline), non una visualizzazione
+interattiva. Se il grafo derivato meriterà uno schema più ricco (G1) lo
+deciderà il collaudo sul campo, secondo docs/design/graph-layer.md.
+
 ## CLI
 
 ```bash
@@ -219,6 +245,7 @@ python3 -m foldcrumbs checkpoint transcript.txt # scrive un handoff di ripresa (
 python3 -m foldcrumbs handoff                   # stampa l'handoff corrente
 python3 -m foldcrumbs answer "come funziona il recall?"
 python3 -m foldcrumbs dashboard                    # una singola pagina HTML autocontenuta (--json, --no-open)
+python3 -m foldcrumbs graph                        # relazioni già presenti nello store (text/mermaid/dot/html)
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard rimuove il file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # coda di riconciliazione (coppie ambigue, rivendicazioni)
