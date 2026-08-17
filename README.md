@@ -223,9 +223,33 @@ foldcrumbs graph --format html         # self-contained report page (--out, --no
 
 Honest scope: this is G0 of the graph layer — a report on existing relations,
 not a graph database. The HTML page is a table report (no scripts, no external
-references, opens offline), not an interactive visualization. Whether the
-derived graph earns a richer schema (G1) will be decided by field testing,
-per docs/design/graph-layer.md.
+references, opens offline), not an interactive visualization. Per
+docs/design/graph-layer.md.
+
+### Explicit relations (G1)
+
+On top of the derived view, a memory can carry **explicit** relations to
+another memory or to an external entity. They live in one canonical-JSON
+frontmatter line (`relations_json`) — diff-friendly, round-trip safe — and
+follow strict rules (design REV-2): predicates come from a closed vocabulary
+of eight (`caused_by`, `depends_on`, `supersedes`, `contradicts`, `supports`,
+`refines`, `blocks`, `precedes`); anything else is refused. An edge without
+evidence is recorded as `inferred` at confidence ≤ 0.5. Writes are locked per
+memory (fail-closed), so two agents editing one memory never lose an edge.
+
+```bash
+foldcrumbs relate "Release slipped" caused_by --to-memory "Supplier delay" \
+    --evidence "the release slipped because the supplier was late"
+foldcrumbs relate "Postgres migration" depends_on --to-entity "Moonshot AI" \
+    --namespace vendor --evidence "vendor quota gates the migration"
+foldcrumbs graph path "Supplier delay" "Release slipped"   # FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED
+foldcrumbs graph doctor                                    # dangling targets, unknown predicates
+foldcrumbs graph entities --similar                        # external entities + merge hints
+```
+
+`graph path` is tri-state and says which way each edge was walked: a path may
+follow an edge against its stored direction, and the output marks it (`<--`).
+Entity suggestions are hints only — merging entities is always your decision.
 
 ## CLI
 
@@ -241,6 +265,10 @@ python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
 python3 -m foldcrumbs dashboard                    # one self-contained HTML page (--json, --no-open)
 python3 -m foldcrumbs graph                        # relations the store already has (text/mermaid/dot/html)
+python3 -m foldcrumbs relate "Release slipped" caused_by --to-memory "Supplier delay" --evidence "…"
+python3 -m foldcrumbs graph path "Supplier delay" "Release slipped"   # FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED
+python3 -m foldcrumbs graph doctor                 # dangling targets, unknown predicates
+python3 -m foldcrumbs graph entities --similar     # external entities + merge hints
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # reconciliation queue (ambiguous pairs, claims)

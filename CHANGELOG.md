@@ -19,6 +19,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command writes nothing; same store, same bytes (deterministic). Design
   rationale: docs/design/graph-layer.md (REV-2, red-teamed).
 
+- **Explicit relations (G1)** — memories can now carry explicit relations to
+  other memories or external entities. `foldcrumbs relate` writes one
+  relation, `foldcrumbs graph path A B` walks strong edges between two
+  memories, `foldcrumbs graph doctor` reports dangling targets and unknown
+  predicates, `foldcrumbs graph entities` lists external entities (with
+  `--similar` suggestions — never automatic merges). Design REV-2 governs
+  every rule below:
+  - storage is ONE canonical-JSON frontmatter line (`relations_json`): the
+    flat parser round-trips it and diffs stay deterministic; unknown
+    frontmatter keys are preserved on rewrite instead of erased;
+  - strong edges key on the immutable memory id, never the filename; a
+    nonexistent target id is rejected at write time;
+  - writes are read-modify-write under a per-memory lock — fail-closed: a
+    contended write refuses visibly, never loses an edge;
+  - predicates come from a closed vocabulary of eight (`caused_by`,
+    `depends_on`, `supersedes`, `contradicts`, `supports`, `refines`,
+    `blocks`, `precedes`); anything else is rejected explicitly;
+  - a write without evidence is accepted but recorded as `inferred` with
+    confidence ≤ 0.5 — the uncertainty is stored, never hidden;
+  - path queries are tri-state and unambiguous: FOUND (with evidence per
+    edge and the direction each edge was walked), NOT_FOUND_EXHAUSTIVE, or
+    TRUNCATED:<reason> (not proof of absence, and it says so).
+  Implemented fixture-first (TDD per design gate 4): round-trip,
+  multi-process fail-closed, tri-state path, and invalid-input rejection
+  all existed as failing tests before the production code.
+
 - **MCP recall filters** — the `recall` tool accepts `type` (a string or an
   array) and `tags` (an array), the same narrowing the CLI has always had.
   Without filters the behaviour is unchanged. This closes the gap for
