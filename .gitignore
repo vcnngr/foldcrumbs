@@ -10,3 +10,4 @@ dist/
 .ruff_cache/
 reddit-launch-drafts.md
 graphify-out/
+.social/
