@@ -202,6 +202,31 @@ semantic channel) — plus **Expiry** and **Conflicts** panels that appear autom
 features have something to show. `--json` prints the underlying data instead of the page, `--out`
 writes it to a path, `--no-open` skips the browser.
 
+## Graph
+
+`foldcrumbs graph` derives a read-only graph from relations the store ALREADY
+has — no new schema, no writes:
+
+- **supersede chains** — old → new, keyed on the immutable memory id (never
+  the filename, which a retitle would change), arrows drawn only when both
+  ends still exist;
+- **conflict pairs** — the live reconciliation queue, both sides still present;
+- **weak tag edges** — memories sharing 2+ tags, shown as clustering hints
+  only, kept out of any future path search.
+
+```bash
+foldcrumbs graph                       # plain edge list (pipe-friendly)
+foldcrumbs graph --format mermaid      # for graph tools / docs
+foldcrumbs graph --format dot          # Graphviz
+foldcrumbs graph --format html         # self-contained report page (--out, --no-open)
+```
+
+Honest scope: this is G0 of the graph layer — a report on existing relations,
+not a graph database. The HTML page is a table report (no scripts, no external
+references, opens offline), not an interactive visualization. Whether the
+derived graph earns a richer schema (G1) will be decided by field testing,
+per docs/design/graph-layer.md.
+
 ## CLI
 
 ```bash
@@ -215,6 +240,7 @@ python3 -m foldcrumbs checkpoint transcript.txt # write a resume handoff (LLM)
 python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
 python3 -m foldcrumbs dashboard                    # one self-contained HTML page (--json, --no-open)
+python3 -m foldcrumbs graph                        # relations the store already has (text/mermaid/dot/html)
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # reconciliation queue (ambiguous pairs, claims)

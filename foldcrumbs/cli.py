@@ -422,6 +422,37 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_graph(args: argparse.Namespace) -> int:
+    """Derive a read-only graph from the relations the store already has."""
+    from . import graph
+    g = graph.build()
+    project = Path.cwd().name
+    if args.format == "mermaid":
+        print(graph.render_mermaid(g))
+    elif args.format == "dot":
+        print(graph.render_dot(g))
+    elif args.format == "html":
+        page = graph.render_html(g, project)
+        if args.out:
+            out = Path(args.out).expanduser()
+            out.write_text(page, encoding="utf-8")
+            print(f"graph written to {out}")
+            path = out.resolve()
+        else:
+            import tempfile
+            fd, tmp = tempfile.mkstemp(prefix="foldcrumbs-graph-", suffix=".html")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(page)
+            path = Path(tmp)
+            print(f"graph: {path}")
+        if not args.no_open:
+            import webbrowser
+            webbrowser.open(path.as_uri())
+    else:  # default: text edge list
+        print(graph.render_text(g), end="")
+    return 0
+
+
 def _cmd_status(_: argparse.Namespace) -> int:
     mems = store.load_all()
     active = [m for m in mems if m.status == "active"]
@@ -810,6 +841,19 @@ def build_parser() -> argparse.ArgumentParser:
     db.add_argument("--no-open", action="store_true",
                     help="do not open the page in a browser")
     db.set_defaults(func=_cmd_dashboard)
+    gp = sub.add_parser("graph", help="derive a read-only graph from the "
+                        "relations the store already has (supersede chains, "
+                        "conflict queue, tag co-occurrence)")
+    gp.add_argument("--format", choices=["text", "mermaid", "dot", "html"],
+                    default="text",
+                    help="text = edge list (default); mermaid/dot for graph "
+                         "tools; html = self-contained report page")
+    gp.add_argument("--out", default="",
+                    help="with --format html: write to this path instead of "
+                         "a temp file")
+    gp.add_argument("--no-open", action="store_true",
+                    help="with --format html: do not open the page")
+    gp.set_defaults(func=_cmd_graph)
 
     pr = sub.add_parser("prune", help="delete pollution / superseded memories (dry-run by default)")
     pr.add_argument("--apply", action="store_true", help="actually delete (default: dry-run)")
