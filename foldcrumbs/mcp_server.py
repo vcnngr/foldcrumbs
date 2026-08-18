@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 from . import __version__, llm, store
@@ -80,6 +81,31 @@ TOOLS = [
                 },
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "graph_path",
+        "description": (
+            "Walk the strong (memory→memory) relations between two memories. "
+            "Answers 'how are these connected / why did X lead to Y'. "
+            "Result is tri-state: FOUND (the path, with evidence per edge and "
+            "the direction each edge was walked), NOT_FOUND_EXHAUSTIVE (search "
+            "completed, no connection), or TRUNCATED:<reason> (budget ran out "
+            "— NOT proof of absence)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from": {"type": "string",
+                         "description": "Start memory: exact title, memory id, or filename stem."},
+                "to": {"type": "string",
+                       "description": "End memory: exact title, memory id, or filename stem."},
+                "depth": {"type": "integer",
+                          "description": "Max hops (default 3, hard cap 4)."},
+                "max_nodes": {"type": "integer",
+                              "description": "Max memories to visit (default 500)."},
+            },
+            "required": ["from", "to"],
         },
     },
     {
@@ -193,8 +219,62 @@ def tool_forget(args: dict[str, Any]) -> str:
     return f"{action}: {name} (file kept on disk; index rebuilt)"
 
 
+def _resolve_local_ref(ref: str):
+    """Resolve a memory reference (id, exact title, or filename stem) to the
+    single local memory it names. Mirrors the CLI's resolution rules. Returns
+    the record or raises ValueError with candidates listed."""
+    mems = [m for m in store.load_all() if not m.is_foreign]
+    by_id = {m.id: m for m in mems}
+    if ref in by_id:
+        return by_id[ref]
+    for m in mems:
+        if m.title == ref:
+            return m
+    for m in mems:
+        if Path(m.filename()).stem == ref:
+            return m
+    hints = [m.title for m in mems if ref.lower() in m.title.lower()][:5]
+    msg = f"no memory matches {ref!r}"
+    if hints:
+        msg += f" — did you mean: {', '.join(repr(h) for h in hints)}?"
+    raise ValueError(msg)
+
+
+def tool_graph_path(args: dict[str, Any]) -> str:
+    from . import relations
+    try:
+        src = _resolve_local_ref(str(args["from"]))
+        dst = _resolve_local_ref(str(args["to"]))
+    except ValueError as exc:
+        return str(exc)
+    res = relations.find_path(
+        src.id, dst.id,
+        depth=int(args.get("depth", 3)),
+        max_nodes=int(args.get("max_nodes", 500)))
+    status = res["status"]
+    if status == "FOUND":
+        lines = [f"FOUND — {len(res['path'])} steps:"]
+        for step in res["path"]:
+            edge = step.get("edge")
+            if edge:
+                arrow = "--" if step.get("forward", True) else "<--"
+                ev = edge.get("e", "")
+                tail = f"[{arrow} {edge['p']}, conf {edge['c']}"
+                tail += f"; evidence: {ev}" if ev else "; no evidence"
+                lines.append(f"  -> {step['title']} ({step['file']}) {tail}]")
+            else:
+                lines.append(f"  * {step['title']} ({step['file']})")
+        return "\n".join(lines)
+    if status == "NOT_FOUND_EXHAUSTIVE":
+        return (f"NOT_FOUND_EXHAUSTIVE — search completed, no connection "
+                f"between these memories. Visited {res['reached']} memories.")
+    return (f"{status} — visited {res['reached']} memories before the budget "
+            f"ran out. {res['note']}")
+
+
 _DISPATCH = {"remember": tool_remember, "recall": tool_recall,
-             "answer": tool_answer, "forget": tool_forget}
+             "answer": tool_answer, "forget": tool_forget,
+             "graph_path": tool_graph_path}
 
 
 # --- JSON-RPC / MCP plumbing ----------------------------------------------- #

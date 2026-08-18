@@ -213,6 +213,22 @@ class MemoryRecord:
     # would be a silent timer on someone else's memory.
     expires_at: datetime | None = None
 
+    # Explicit relations to other memories or external entities (G1, design
+    # REV-2). One line of canonical JSON — sorted keys, no whitespace — so the
+    # flat frontmatter parser survives it and diffs stay deterministic. Empty
+    # or malformed degrades to "no relations", never to an error, same
+    # tolerance as expires_at. The schema of the line (predicates, targets,
+    # evidence rules) is enforced by foldcrumbs.relations, not here: this
+    # field only stores and returns what was validated at write time.
+    relations_json: str | None = None
+
+    # Frontmatter keys this code does not know about, kept verbatim so a
+    # rewrite never erases what a human or another tool wrote into the file
+    # (design REV-2, bloccante GPT-F6). Load-only metadata: never compared,
+    # never a positional-argument concern — it sits last, like every field
+    # added after 0.6.0.
+    extra_meta: dict = field(default_factory=dict, compare=False)
+
     @property
     def is_foreign(self) -> bool:
         return self.origin_root is not None
@@ -314,6 +330,12 @@ class MemoryRecord:
                       + ", ".join(self.supersedes_external))
         if self.expires_at is not None:
             fm.append(f"expires_at: {_iso(self.expires_at)}")
+        if self.relations_json:
+            fm.append(f"relations_json: {self.relations_json}")
+        # Unknown keys go back into the file verbatim: a rewrite must never
+        # erase frontmatter this code does not own (design REV-2, GPT-F6).
+        for key in sorted(self.extra_meta):
+            fm.append(f"{key}: {self.extra_meta[key]}")
         fm.append("---")
         return "\n".join(fm) + "\n\n" + self.content.strip() + "\n"
 
@@ -349,7 +371,20 @@ class MemoryRecord:
             # expiry", never to an error — a hand-edited line must not take a
             # memory out of service.
             expires_at=_parse_dt_opt(meta.get("expires_at")),
+            # One line of canonical JSON; validation happens at write time in
+            # foldcrumbs.relations, so here it is stored as read. A malformed
+            # line degrades to None, never to an error — same posture.
+            relations_json=(meta.get("relations_json") or "").strip() or None,
         )
+        # Frontmatter this code does not own: preserved verbatim so a
+        # rewrite cannot erase it (design REV-2, GPT-F6).
+        _known = {
+            "name", "description", "type", "id", "confidence", "provenance",
+            "status", "source", "tags", "validation_count", "created_at",
+            "updated_at", "superseded_by", "supersedes_external",
+            "expires_at", "relations_json",
+        }
+        rec.extra_meta = {k: v for k, v in meta.items() if k not in _known}
         # Remember that the timestamp was invented rather than read — which
         # covers a field that is absent *and* one that is present but
         # unparseable, since both end up as a fresh "now" on every parse.

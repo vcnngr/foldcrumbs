@@ -213,9 +213,31 @@ foldcrumbs graph --format html         # 自包含报告页面（--out、--no-op
 ```
 
 诚实的边界：这是图谱层的 G0 — 是对既有关系的报告，而不是图数据库。HTML 页面
-是一份表格报告（无脚本、无外部引用、可离线打开），不是交互式可视化。派生图谱
-是否值得引入更丰富的 schema（G1），将由现场实测决定，见
+是一份表格报告（无脚本、无外部引用、可离线打开），不是交互式可视化。见
 docs/design/graph-layer.md。
+
+### 显式关系（G1）
+
+在派生视图之上，一条记忆可以携带指向另一条记忆或外部实体的**显式**关系。
+它们以一行规范 JSON 的形式保存在 frontmatter 里（`relations_json`）—
+便于 diff、往返安全 — 并遵循严格规则（design REV-2）：谓词来自一个封闭的
+八词词汇表（`caused_by`、`depends_on`、`supersedes`、`contradicts`、
+`supports`、`refines`、`blocks`、`precedes`）；其他一律拒绝。没有 evidence
+的边会以 confidence ≤ 0.5 记为 `inferred`。写入按记忆加锁（fail-closed），
+因此两个 agent 同时编辑同一条记忆绝不会丢边。
+
+```bash
+foldcrumbs relate "发布延期" caused_by --to-memory "供应商延迟" \
+    --evidence "因为供应商延迟，发布才延期"
+foldcrumbs relate "Postgres 迁移" depends_on --to-entity "Moonshot AI" \
+    --namespace vendor --evidence "vendor 配额决定迁移窗口"
+foldcrumbs graph path "供应商延迟" "发布延期"   # FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED
+foldcrumbs graph doctor                          # 悬空目标、未知谓词
+foldcrumbs graph entities --similar              # 外部实体 + 合并建议
+```
+
+`graph path` 是三态的，并会标明每条边是按哪个方向走的：路径可能与边存储的
+方向相反，输出会用（`<--`）标出。实体建议仅是建议 — 合并实体永远由你决定。
 
 ## CLI
 
@@ -231,6 +253,10 @@ python3 -m foldcrumbs handoff                   # 打印当前交接
 python3 -m foldcrumbs answer "how does recall work?"
 python3 -m foldcrumbs dashboard                    # 一个自包含的 HTML 页面（--json、--no-open）
 python3 -m foldcrumbs graph                        # 存储中已有的关系（text/mermaid/dot/html）
+python3 -m foldcrumbs relate "发布延期" caused_by --to-memory "供应商延迟" --evidence "…"
+python3 -m foldcrumbs graph path "供应商延迟" "发布延期"   # FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED
+python3 -m foldcrumbs graph doctor                 # 悬空目标、未知谓词
+python3 -m foldcrumbs graph entities --similar     # 外部实体 + 合并建议
 python3 -m foldcrumbs forget fact_wrong.md --apply   # 软删除（--hard 直接删除文件）
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # 对账队列（含糊的对、主张）

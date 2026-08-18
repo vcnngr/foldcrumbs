@@ -229,8 +229,34 @@ foldcrumbs graph --format html         # pagina report autocontenuta (--out, --n
 Portata onesta: questo è il G0 del graph layer — un report sulle relazioni
 esistenti, non un graph database. La pagina HTML è un report tabellare (niente
 script, nessun riferimento esterno, si apre offline), non una visualizzazione
-interattiva. Se il grafo derivato meriterà uno schema più ricco (G1) lo
-deciderà il collaudo sul campo, secondo docs/design/graph-layer.md.
+interattiva. Secondo docs/design/graph-layer.md.
+
+### Relazioni esplicite (G1)
+
+Sopra la vista derivata, una memoria può portare relazioni **esplicite** verso
+un'altra memoria o un'entità esterna. Vivono in una riga frontmatter JSON
+canonico (`relations_json`) — diff-friendly, round-trip sicura — e seguono
+regole strette (design REV-2): i predicati vengono da un vocabolario chiuso di
+otto (`caused_by`, `depends_on`, `supersedes`, `contradicts`, `supports`,
+`refines`, `blocks`, `precedes`); qualunque altro è rifiutato. Un arco senza
+evidence viene registrato come `inferred` con confidence ≤ 0.5. Le scritture
+sono lockate per memoria (fail-closed): due agenti che editano la stessa
+memoria non perdono mai un arco.
+
+```bash
+foldcrumbs relate "Release slittata" caused_by --to-memory "Ritardo fornitore" \
+    --evidence "la release è slittata perché il fornitore era in ritardo"
+foldcrumbs relate "Migrazione Postgres" depends_on --to-entity "Moonshot AI" \
+    --namespace vendor --evidence "la quota vendor blocca la migrazione"
+foldcrumbs graph path "Ritardo fornitore" "Release slittata"   # FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED
+foldcrumbs graph doctor                                        # target penzolanti, predicati sconosciuti
+foldcrumbs graph entities --similar                            # entità esterne + suggerimenti merge
+```
+
+`graph path` è tri-stato e dice in che verso ogni arco è stato percorso: un
+cammino può seguire un arco contro la direzione in cui è salvato, e l'output
+lo segna (`<--`). I suggerimenti sulle entità sono solo suggerimenti — il
+merge di entità è sempre decisione tua.
 
 ## CLI
 
@@ -246,6 +272,10 @@ python3 -m foldcrumbs handoff                   # stampa l'handoff corrente
 python3 -m foldcrumbs answer "come funziona il recall?"
 python3 -m foldcrumbs dashboard                    # una singola pagina HTML autocontenuta (--json, --no-open)
 python3 -m foldcrumbs graph                        # relazioni già presenti nello store (text/mermaid/dot/html)
+python3 -m foldcrumbs relate "Release slittata" caused_by --to-memory "Ritardo fornitore" --evidence "…"
+python3 -m foldcrumbs graph path "Ritardo fornitore" "Release slittata"   # FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED
+python3 -m foldcrumbs graph doctor                 # target penzolanti, predicati sconosciuti
+python3 -m foldcrumbs graph entities --similar     # entità esterne + suggerimenti merge
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard rimuove il file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # coda di riconciliazione (coppie ambigue, rivendicazioni)

@@ -422,9 +422,101 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_memory_ref(ref: str):
+    """Resolve a user-supplied reference to one local memory.
+
+    Tries, in order: exact id, exact title, unique filename-stem. Ambiguity
+    and absence are errors with the candidates listed — the graph layer never
+    guesses which memory you meant.
+    """
+    from . import relations
+    mems = store.load_all()
+    by_id = {m.id: m for m in mems if not m.is_foreign}
+    if ref in by_id:
+        return by_id[ref]
+    by_title = {}
+    for m in mems:
+        if not m.is_foreign:
+            by_title.setdefault(m.title, []).append(m)
+    if ref in by_title and len(by_title[ref]) == 1:
+        return by_title[ref][0]
+    by_stem = {}
+    for m in mems:
+        if not m.is_foreign:
+            by_stem.setdefault(Path(m.filename()).stem, []).append(m)
+    if ref in by_stem and len(by_stem[ref]) == 1:
+        return by_stem[ref][0]
+    hints = [m.title for m in mems
+             if ref.lower() in m.title.lower()][:5]
+    msg = f"no memory matches {ref!r}"
+    if hints:
+        msg += f" — did you mean: {', '.join(repr(h) for h in hints)}?"
+    raise relations.InvalidRelation(msg)
+
+
 def _cmd_graph(args: argparse.Namespace) -> int:
-    """Derive a read-only graph from the relations the store already has."""
-    from . import graph
+    """Derive a read-only graph from the relations the store already has,
+    or walk/inspect the explicit relations (G1 subcommands)."""
+    from . import graph, relations
+
+    mode = getattr(args, "graph_mode", None) or "view"
+    if mode == "path":
+        src = _resolve_memory_ref(args.src)
+        dst = _resolve_memory_ref(args.dst)
+        res = relations.find_path(src.id, dst.id, depth=args.depth,
+                                  max_nodes=args.max_nodes)
+        status = res["status"]
+        if status == "FOUND":
+            print(f"FOUND — {len(res['path'])} steps:")
+            for step in res["path"]:
+                edge = step.get("edge")
+                if edge:
+                    ev = edge.get("e", "")
+                    # The edge is stored in one direction; a path may walk
+                    # it the other way. Say so — evidence is directional.
+                    arrow = "--" if step.get("forward", True) else "<--"
+                    tail = f"  [{arrow} {edge['p']}, conf {edge['c']}"
+                    tail += f"; evidence: {ev}" if ev else "; no evidence"
+                    print(f"  → {step['title']} ({step['file']}){tail}]")
+                else:
+                    print(f"  • {step['title']} ({step['file']})")
+            return 0
+        if status == "NOT_FOUND_EXHAUSTIVE":
+            print(f"NOT_FOUND_EXHAUSTIVE — search completed, no connection. "
+                  f"Visited {res['reached']} memories.")
+            return 1
+        # TRUNCATED:<reason> — not proof of absence, and we say so.
+        print(f"{status} — visited {res['reached']} memories before the "
+              f"budget ran out. {res['note']}")
+        return 1
+    if mode == "doctor":
+        rep = relations.doctor()
+        if not rep["dangling"] and not rep["bad_predicates"]:
+            print("graph doctor: clean — no dangling targets, no unknown "
+                  "predicates.")
+            return 0
+        for d in rep["dangling"]:
+            print(f"dangling: {d['memory']!r} --{d['predicate']}--> missing "
+                  f"memory id {d['missing_target']}")
+        for b in rep["bad_predicates"]:
+            print(f"unknown predicate: {b['memory']!r} uses {b['predicate']!r}")
+        return 1
+    if mode == "entities":
+        ents = relations.external_entities()
+        if not ents:
+            print("no external entities referenced.")
+            return 0
+        for e in ents:
+            where = ", ".join(e["memories"][:4])
+            more = "" if len(e["memories"]) <= 4 else "…"
+            print(f"[{e['ns']}] {e['label']}  ({e['count']} refs: "
+                  f"{where}{more})")
+        if args.similar:
+            for a, b in relations.similar_entities():
+                print(f"possibly the same entity: {a!r} ~ {b!r} "
+                      "(suggestion only — you decide)")
+        return 0
+
     g = graph.build()
     project = Path.cwd().name
     if args.format == "mermaid":
@@ -450,6 +542,50 @@ def _cmd_graph(args: argparse.Namespace) -> int:
             webbrowser.open(path.as_uri())
     else:  # default: text edge list
         print(graph.render_text(g), end="")
+    return 0
+
+
+def _cmd_relate(args: argparse.Namespace) -> int:
+    """Attach one explicit relation between a memory and a target.
+
+    The source is always a memory (by id/title/filename-stem). The target is
+    either another memory (`--to-memory`) or an external entity
+    (`--to-entity LABEL` with optional `--namespace`). Exactly one target
+    form is required. Refusals (unknown predicate, missing/dangling target,
+    locked memory) are printed with the reason and cost a non-zero exit.
+    """
+    from . import relations
+    src = _resolve_memory_ref(args.memory)
+    if args.to_memory and args.to_entity:
+        print("error: pass exactly one of --to-memory / --to-entity",
+              file=sys.stderr)
+        return 2
+    if args.to_memory:
+        dst = _resolve_memory_ref(args.to_memory)
+        target = {"k": "m", "id": dst.id}
+    elif args.to_entity:
+        target = {"k": "x", "ns": args.namespace or "general",
+                  "l": args.to_entity}
+    else:
+        print("error: pass exactly one of --to-memory / --to-entity",
+              file=sys.stderr)
+        return 2
+    try:
+        added = relations.add_relation(
+            src.id, args.predicate, target,
+            evidence=args.evidence or "",
+            confidence=args.confidence)
+    except relations.InvalidRelation as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    except relations.RelationLockBusy as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    if added:
+        print(f"relation added: {src.title!r} --{args.predicate}--> "
+              f"{args.to_memory or args.to_entity}")
+    else:
+        print("relation already present — nothing written.")
     return 0
 
 
@@ -853,7 +989,45 @@ def build_parser() -> argparse.ArgumentParser:
                          "a temp file")
     gp.add_argument("--no-open", action="store_true",
                     help="with --format html: do not open the page")
-    gp.set_defaults(func=_cmd_graph)
+    gp.set_defaults(func=_cmd_graph, graph_mode=None)
+    gsub = gp.add_subparsers(dest="graph_mode")
+    gpath = gsub.add_parser("path", help="walk strong edges from one memory "
+                            "to another; result is FOUND / "
+                            "NOT_FOUND_EXHAUSTIVE / TRUNCATED:<reason>")
+    gpath.add_argument("src", help="start: memory id, title or filename stem")
+    gpath.add_argument("dst", help="end: memory id, title or filename stem")
+    gpath.add_argument("--depth", type=int, default=3,
+                       help="max hops (default 3, hard cap 4)")
+    gpath.add_argument("--max-nodes", type=int, default=500,
+                       help="max memories to visit (default 500)")
+    gpath.set_defaults(func=_cmd_graph)
+    gdoc = gsub.add_parser("doctor", help="report dangling memory targets and "
+                           "unknown predicates")
+    gdoc.set_defaults(func=_cmd_graph)
+    gent = gsub.add_parser("entities", help="list external entities "
+                           "referenced by relations")
+    gent.add_argument("--similar", action="store_true",
+                      help="also suggest possibly-duplicate entities "
+                           "(suggestion only — no automatic merging)")
+    gent.set_defaults(func=_cmd_graph)
+
+    rl = sub.add_parser("relate", help="attach one explicit relation to a "
+                        "memory (G1; writes are locked per memory)")
+    rl.add_argument("memory", help="source memory: id, title or filename stem")
+    from . import relations as _rel
+    rl.add_argument("predicate",
+                    help="one of: " + ", ".join(sorted(_rel.PREDICATES)))
+    rl.add_argument("--to-memory", default="",
+                    help="target: another memory (id, title or stem)")
+    rl.add_argument("--to-entity", default="",
+                    help="target: an external entity label")
+    rl.add_argument("--namespace", default="general",
+                    help="namespace for an external entity (default: general)")
+    rl.add_argument("--evidence", default="",
+                    help="exact supporting quote; without it the relation is "
+                         "recorded as inferred (confidence ≤ 0.5)")
+    rl.add_argument("--confidence", type=float, default=0.8)
+    rl.set_defaults(func=_cmd_relate)
 
     pr = sub.add_parser("prune", help="delete pollution / superseded memories (dry-run by default)")
     pr.add_argument("--apply", action="store_true", help="actually delete (default: dry-run)")

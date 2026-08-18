@@ -59,7 +59,9 @@ class TestHandler(unittest.TestCase):
     def test_tools_list(self):
         r = mcp_server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = {t["name"] for t in r["result"]["tools"]}
-        self.assertEqual(names, {"remember", "recall", "answer", "forget"})
+        self.assertEqual(names,
+                         {"remember", "recall", "answer", "forget",
+                          "graph_path"})
 
     def test_forget_by_filename(self):
         rem = mcp_server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -162,6 +164,75 @@ class TestHandler(unittest.TestCase):
         self.assertIn("tags", props)
         self.assertEqual(recall["inputSchema"]["required"], ["query"])
 
+    # --- graph_path (G1): MCP-only agents (OpenCode) walk explicit
+    # relations; resolution by title, tri-state semantics preserved ---
+
+    def _gp_seed(self):
+        """A -> caused_by -> B chain, attached with real evidence."""
+        from foldcrumbs import relations, store
+        mcp_server.handle({"jsonrpc": "2.0", "id": 40, "method": "tools/call",
+                           "params": {"name": "remember", "arguments": {
+                               "content": "Supplier delivered late.",
+                               "type": "fact", "title": "Supplier delay"}}})
+        mcp_server.handle({"jsonrpc": "2.0", "id": 41, "method": "tools/call",
+                           "params": {"name": "remember", "arguments": {
+                               "content": "The release date moved.",
+                               "type": "fact", "title": "Release slipped"}}})
+        by_title = {r.title: r for r in store.load_all()}
+        src, dst = by_title["Release slipped"], by_title["Supplier delay"]
+        ok = relations.add_relation(
+            src.id, "caused_by", {"k": "m", "id": dst.id},
+            evidence="supplier delay pushed the release")
+        self.assertTrue(ok, "fixture relation was not attached")
+
+    def test_graph_path_found(self):
+        self._gp_seed()
+        r = mcp_server.handle({"jsonrpc": "2.0", "id": 42, "method": "tools/call",
+                               "params": {"name": "graph_path", "arguments": {
+                                   "from": "Release slipped",
+                                   "to": "Supplier delay"}}})
+        text = r["result"]["content"][0]["text"]
+        self.assertFalse(r["result"]["isError"])
+        self.assertIn("FOUND", text)
+        self.assertIn("caused_by", text)
+        # evidence must travel with the edge
+        self.assertIn("supplier delay pushed the release", text)
+
+    def test_graph_path_bidirectional(self):
+        self._gp_seed()
+        r = mcp_server.handle({"jsonrpc": "2.0", "id": 43, "method": "tools/call",
+                               "params": {"name": "graph_path", "arguments": {
+                                   "from": "Supplier delay",
+                                   "to": "Release slipped"}}})
+        text = r["result"]["content"][0]["text"]
+        self.assertIn("FOUND", text,
+                      "path query must not depend on edge storage direction")
+
+    def test_graph_path_not_found_is_exhaustive(self):
+        mcp_server.handle({"jsonrpc": "2.0", "id": 44, "method": "tools/call",
+                           "params": {"name": "remember", "arguments": {
+                               "content": "Island.", "type": "fact",
+                               "title": "Lonely memory"}}})
+        mcp_server.handle({"jsonrpc": "2.0", "id": 45, "method": "tools/call",
+                           "params": {"name": "remember", "arguments": {
+                               "content": "Also alone.", "type": "fact",
+                               "title": "Other lonely memory"}}})
+        r = mcp_server.handle({"jsonrpc": "2.0", "id": 46, "method": "tools/call",
+                               "params": {"name": "graph_path", "arguments": {
+                                   "from": "Lonely memory",
+                                   "to": "Other lonely memory"}}})
+        text = r["result"]["content"][0]["text"]
+        self.assertIn("NOT_FOUND_EXHAUSTIVE", text)
+        self.assertNotIn("TRUNCATED", text)
+
+    def test_graph_path_unknown_memory_is_visible_error(self):
+        r = mcp_server.handle({"jsonrpc": "2.0", "id": 47, "method": "tools/call",
+                               "params": {"name": "graph_path", "arguments": {
+                                   "from": "Ghost memory",
+                                   "to": "Another ghost"}}})
+        text = r["result"]["content"][0]["text"]
+        self.assertIn("no memory matches", text.lower())
+
     def test_unknown_tool_is_error(self):
         r = mcp_server.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                                "params": {"name": "nope", "arguments": {}}})
@@ -196,7 +267,8 @@ class TestSubprocessRoundTrip(unittest.TestCase):
         # initialize, tools/list, tools/call answered; notification got no response.
         self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "foldcrumbs")
         self.assertEqual({t["name"] for t in by_id[2]["result"]["tools"]},
-                         {"remember", "recall", "answer", "forget"})
+                         {"remember", "recall", "answer", "forget",
+                          "graph_path"})
         self.assertFalse(by_id[3]["result"]["isError"])
         self.assertEqual(len(responses), 3)  # no response for the notification
 
