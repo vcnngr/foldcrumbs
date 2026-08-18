@@ -194,6 +194,29 @@ decay、expiry 与 conflicts 计算得出。其下是便当格（bento）布局�
 **Conflicts** 面板，一旦这些功能有内容可显示就自动出现。`--json` 打印底层数据
 而不是页面，`--out` 把页面写到指定路径，`--no-open` 不打开浏览器。
 
+## 图谱
+
+`foldcrumbs graph` 从存储**已有**的关系中派生一个只读图谱 — 没有新 schema，
+没有任何写入：
+
+- **取代链（supersede chains）** — 旧 → 新，以记忆的不可变 id 为键（绝不用
+  filename，重命名标题就会改变它），且只在两端仍然存在时才画出箭头；
+- **冲突对** — 存活的调和队列（reconciliation queue），且双方都仍在；
+- **弱标签边** — 共享 2 个以上标签的记忆，仅作为聚类线索展示，不参与任何
+  未来的路径搜索。
+
+```bash
+foldcrumbs graph                       # 纯文本边列表（便于管道处理）
+foldcrumbs graph --format mermaid      # 供图工具 / 文档使用
+foldcrumbs graph --format dot          # Graphviz
+foldcrumbs graph --format html         # 自包含报告页面（--out、--no-open）
+```
+
+诚实的边界：这是图谱层的 G0 — 是对既有关系的报告，而不是图数据库。HTML 页面
+是一份表格报告（无脚本、无外部引用、可离线打开），不是交互式可视化。派生图谱
+是否值得引入更丰富的 schema（G1），将由现场实测决定，见
+docs/design/graph-layer.md。
+
 ## CLI
 
 ```bash
@@ -207,6 +230,7 @@ python3 -m foldcrumbs checkpoint transcript.txt # 写入一份恢复用交接（
 python3 -m foldcrumbs handoff                   # 打印当前交接
 python3 -m foldcrumbs answer "how does recall work?"
 python3 -m foldcrumbs dashboard                    # 一个自包含的 HTML 页面（--json、--no-open）
+python3 -m foldcrumbs graph                        # 存储中已有的关系（text/mermaid/dot/html）
 python3 -m foldcrumbs forget fact_wrong.md --apply   # 软删除（--hard 直接删除文件）
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # 对账队列（含糊的对、主张）
