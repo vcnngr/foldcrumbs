@@ -1,9 +1,10 @@
 # Design — G2: estrazione relazioni dal modello (serie 0.8.0)
 
-Status: REV-2 — post round 2 red-team.
-Kimi R2: APPROVATO CON MODIFICHE (3 bloccanti: N1-N3).
-GPT R2: BOCCIATO (5 P0).
-I due convergono su 4 problemi reali; questo documento li chiude tutti.
+Status: REV-2 + EMENDAMENTO 2026-08-19 (E1-E6, post round 3 red-team).
+Kimi R3: APPROVATO CON MODIFICHE (3 bloccanti: B1-B3) — chiusi da E1/E2/E3.
+GPT R3: APPROVATO CON MODIFICHE (3 bloccanti minimi) — chiusi da E4/E5/E6.
+Prima convergenza dei due revisori in tre round; emendamento approvato
+dal titolare. A1 decisa (promote umano = arco manual è l'intento, auditato).
 
 EMENDAMENTO AL REV-2 (graph-layer.md) — APPROVATO DAL TITOLARE 2026-08-18:
 il Fuori scope del REV-2 vietava "estrazione automatica senza coda di
@@ -116,6 +117,100 @@ test con fixture preregistrate:
    manual le collega).
 4. **promozione**: `graph doctor promote` sposta una proposta pending in
    store con prov=manual, e il path la attraversa di default.
+
+=============================================================================
+
+## EMENDAMENTO 2026-08-19 — post round 3 red-team (APPROVATO DAL TITOLARE)
+
+Kimi R3 (t_8ac61f91): APPROVATO CON MODIFICHE, 3 bloccanti (B1-B3).
+GPT R3 (t_a61ae776): APPROVATO CON MODIFICHE, 3 bloccanti minimi.
+Prima convergenza dei due revisori in tre round; entrambi: "non serve un
+REV-3 ampio". Tutti i claim sottostanti verificati contro il codice reale
+(relations.py:152-154, relations.py:212-217, federation.py:233;
+conflicts.py non ha lock). L'emendamento E1-E6 chiude i 6 bloccanti.
+
+### E1 — Dedup su tutti gli status + suppression persistente
+[Kimi-B1; GPT backlog dedup]
+La dedup NON cerca solo pending: prima di scrivere si verifica, nell'ordine:
+1. esiste già in STORE un arco (subject_id, predicate, target.id) con
+   qualsiasi prov? → la proposta non si scrive (già decisa dal mondo reale).
+2. esiste una proposta con la stessa chiave in status pending, promoted O
+   rejected? → non si scrive.
+Un reject è suppression persistente: la stessa tripla non viene ri-proposta
+in sessioni successive. Riapertura solo tramite azione esplicita umana
+(`graph doctor reopen <proposal_id>`), mai automatica.
+
+### E2 — Concorrenza: file_lock, non il pattern conflicts.py
+[Kimi-B2]
+REV-2 D2 citava conflicts.py come garanzia; verifica sul codice: conflicts.py
+non ha lock. La coda proposals scrive sotto `federation.file_lock`
+(federation.py:233 — lo stesso lock che relations.py usa già per arco),
+dedup inclusa: la sequenza leggi-verifica-scrivi è interamente sotto lock.
+Nessuna scrittura read-then-write fuori lock.
+
+### E3 — Semantica nodi non-active: NOT_FOUND_EXHAUSTIVE, dichiarato
+[Kimi-B3]
+Nodo con status != active o is_expired interrogato come src/dst:
+restituisce NOT_FOUND_EXHAUSTIVE con nota esplicativa ("nodo presente ma
+non attraversabile: status=superseded"), NON MISSING (il nodo esiste) e NON
+InvalidRelation (romperebbe il tri-stato). MISSING resta riservato a id che
+non esistono in load_all.
+
+### E4 — Overlay coda→graph_path, definito per status
+[GPT bloccante 1]
+Con `--include-inferred`, graph_path costruisce un overlay read-only dalle
+sole proposte PENDING con predicato valido ed endpoint vivi; lo store resta
+byte-identico. rejected, promoted e malformate non entrano mai nell'overlay.
+`promote` materializza UNA relazione manual in store e marca la proposta
+promoted, atomico e idempotente sotto file_lock: dopo il promote l'arco
+esiste una volta sola (da store), mai doppio arco queue+store.
+Criteri fail-closed preregistrati:
+- pending valida → default NOT_FOUND_EXHAUSTIVE, include-inferred FOUND,
+  store byte-identico;
+- rejected/malformata → mai FOUND in nessun modo;
+- promoted → FOUND via store una sola volta, overlay vuoto per quella chiave.
+
+### E5 — Migrazione fail-closed degli archi senza prov (legacy)
+[GPT bloccante 2]
+Verificato nel codice: relations.py scrive prov="inferred" solo con evidence
+vuota; gli archi con evidence (inclusi quelli creati con `relate`) non hanno
+campo prov. Policy:
+- prov assente = `legacy`, valore distinto, NON mappato silenziosamente a
+  manual (sarebbe falsa attestazione dell'attore originario);
+- legacy NON è default-traversable;
+- `graph doctor` conta gli archi legacy e `graph doctor promote-legacy` li
+  marca manual uno per uno, solo su azione umana esplicita (attestazione
+  consapevole, non automatica);
+- ogni nuovo write path (CLI relate, MCP relate, distill) scrive prov
+  esplicito; nessun arco nuovo può uscire senza prov.
+
+### E6 — D5 diventa criterio binario preregistrato
+[GPT bloccante 3]
+Prima del codice si preregistrano nella fixture: archi attesi e archi
+vietati (subject_id, predicato, target, direzione, evidence verificabile),
+il massimo output accettabile, e la soglia binaria di precision
+(precision = proposte corrette / proposte totali; soglia iniziale 0.8,
+cambiabile solo prima del codice, mai dopo). Protocol tests con model stub
+separati dalla misura semantica del modello. Il report emette numeratore,
+denominatore e verdict binario PASS/FAIL — non solo la misura.
+
+### A1 — Decisa: promote umano = arco manual è l'intento, documentato
+[Kimi-A1; posizione qwen-pro approvata dal titolare]
+Agente propone (prov=agent/inferred) → umano promuove → arco manual.
+Questo NON è un buco: è l'umano che decide consapevolmente, esattamente il
+principio dell'emendamento al REV-2. L'audit trail lo rende verificabile:
+la proposta originaria resta in coda con il suo prov originale e status
+promoted; l'arco materializzato porta prov=manual + riferimento a
+proposal_id + decided_at. La storia di provenienza non viene riscritta:
+due record distinti e auditabili (coerenza D1/D2, punto GPT).
+
+### Domande aperte R3 — risposte nette (GPT R3, condivise)
+1. Cap 10/sessione: adeguato per il primo collaudo; si misura, non si alza.
+2. TTL pending: no; eventuale stato stale con archiviazione auditabile in
+   backlog, mai cancellazione silenziosa.
+3. Env persistente per --include-inferred: NO. Contraddirebbe la scelta
+   esplicita per-query approvata dal titolare: trasformerebbe l'opt-in in
+   default ambientale.
 
 =============================================================================
 
