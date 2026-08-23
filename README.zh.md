@@ -153,6 +153,7 @@ foldcrumbs profile env <name>                     # 选中存储所需的那一�
 | `FOLDCRUMBS_NO_AUTO_SUPERSEDE` | – | 设置后禁用蒸馏时的矛盾检查 |
 | `FOLDCRUMBS_DIR` | 由 cwd 推导 | 覆盖记忆目录 |
 | `FOLDCRUMBS_SEMANTIC` | off | 设为 `1` 为召回添加可选的 embedding 通道 |
+| `FOLDCRUMBS_G2` | off | 设为 `1` 让 distill 把关系提案写入审批队列（绝不直接写入 store） |
 | `FOLDCRUMBS_EMBEDDING_ENDPOINT` | `FOLDCRUMBS_LLM_ENDPOINT` | OpenAI 兼容的 `/v1/embeddings` 服务器 |
 | `FOLDCRUMBS_EMBEDDING_MODEL` | `FOLDCRUMBS_LLM_MODEL` | embedding 模型名称 |
 | `FOLDCRUMBS_EMBEDDING_TIMEOUT` | `10` | 秒；服务器缓慢时回退到词法召回 |
@@ -238,6 +239,34 @@ foldcrumbs graph entities --similar              # 外部实体 + 合并建议
 
 `graph path` 是三态的，并会标明每条边是按哪个方向走的：路径可能与边存储的
 方向相反，输出会用（`<--`）标出。实体建议仅是建议 — 合并实体永远由你决定。
+
+### 模型提议的关系（G2）
+
+模型生成的关系绝不直接落入 store。设置 `FOLDCRUMBS_G2=1` 后，distill 会
+让 LLM *提议*刚产生的记忆之间的关系；提案进入 pending 队列，**只有人工
+晋升**才会把边写入 store。其余全部显式开启且可见（设计：
+docs/design/g2-extraction.md）：
+
+- 每条边都带来源（provenance）— `manual`（人工 CLI）、`agent`（MCP）、
+  `inferred`（distill）— 非人工来源的 confidence 上限为 0.5；
+- `graph path` 默认只走 manual 边；agent/inferred/legacy 边与 pending 提案
+  只有在使用明确的按查询标志 `--include-inferred` 时才被遍历 — 故意不提供
+  对应的环境变量；
+- 晋升是崩溃安全的：先写入边（以 proposal id 打标），再更新队列状态；
+  中途打断会在重试时收敛；
+- 在来源分类法之前写入的边会被 `graph doctor` 计为 *legacy*，逐条人工
+  确认 — 绝不悄悄改标为 manual。
+
+```bash
+FOLDCRUMBS_G2=1 foldcrumbs distill transcript.txt   # 提议关系（LLM）
+foldcrumbs graph proposals                           # pending 队列
+foldcrumbs graph doctor promote <proposal-id>        # 人工：写入边（prov=manual）
+foldcrumbs graph doctor reject  <proposal-id>        # 持久抑制
+foldcrumbs graph path A B --include-inferred         # 按查询显式开启的遍历
+```
+
+MCP 服务器暴露同样的姿态：一个 `relate` 工具（来源 `agent`，confidence
+上限 0.5）以及 `graph_path` 上的 `include_inferred` 参数，默认关闭。
 
 ## CLI
 

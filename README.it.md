@@ -162,6 +162,7 @@ memoria più una vista federata read-only di ogni store shared sulla macchina. D
 | `FOLDCRUMBS_NO_AUTO_SUPERSEDE` | – | impostalo per disattivare il passaggio di contraddizione in distill |
 | `FOLDCRUMBS_DIR` | derivato dal cwd | sovrascrive la directory di memoria |
 | `FOLDCRUMBS_SEMANTIC` | off | impostalo a `1` per aggiungere un canale embedding opzionale al recall |
+| `FOLDCRUMBS_G2` | off | impostalo a `1` perché distill proponga relazioni nella coda di approvazione (mai scritte direttamente nello store) |
 | `FOLDCRUMBS_EMBEDDING_ENDPOINT` | `FOLDCRUMBS_LLM_ENDPOINT` | server OpenAI-compatibile `/v1/embeddings` |
 | `FOLDCRUMBS_EMBEDDING_MODEL` | `FOLDCRUMBS_LLM_MODEL` | nome del modello di embedding |
 | `FOLDCRUMBS_EMBEDDING_TIMEOUT` | `10` | secondi; un server lento ricade sul recall lessicale |
@@ -257,6 +258,38 @@ foldcrumbs graph entities --similar                            # entità esterne
 cammino può seguire un arco contro la direzione in cui è salvato, e l'output
 lo segna (`<--`). I suggerimenti sulle entità sono solo suggerimenti — il
 merge di entità è sempre decisione tua.
+
+### Relazioni proposte dal modello (G2)
+
+Le relazioni generate da un modello non finiscono mai direttamente nello store.
+Con `FOLDCRUMBS_G2=1`, distill chiede all'LLM di *proporre* relazioni tra le
+memorie appena prodotte; le proposte entrano in una coda pending e **solo una
+promozione umana** scrive l'arco nello store. Tutto il resto è opt-in e
+visibile (design: docs/design/g2-extraction.md):
+
+- ogni arco porta una provenienza — `manual` (CLI umana), `agent` (MCP),
+  `inferred` (distill) — e la provenienza non umana ha confidence limitata a 0.5;
+- `graph path` attraversa di default solo gli archi manual; archi
+  agent/inferred/legacy e proposte pending si attraversano solo col flag
+  esplicito per-query `--include-inferred` — non esiste una variabile
+  d'ambiente per questo, di proposito;
+- la promozione è crash-safe: prima si scrive l'arco (taggato col proposal
+  id), poi lo stato in coda; un'interruzione nel mezzo converge al retry;
+- gli archi scritti prima della tassonomia di provenienza sono contati come
+  *legacy* da `graph doctor` e attestati uno per uno — mai ri-etichettati
+  manual in silenzio.
+
+```bash
+FOLDCRUMBS_G2=1 foldcrumbs distill transcript.txt   # proponi relazioni (LLM)
+foldcrumbs graph proposals                           # la coda pending
+foldcrumbs graph doctor promote <proposal-id>        # umano: scrive l'arco (prov=manual)
+foldcrumbs graph doctor reject  <proposal-id>        # soppressione persistente
+foldcrumbs graph path A B --include-inferred         # attraversamento opt-in, per query
+```
+
+Il server MCP espone la stessa postura: un tool `relate` (provenienza `agent`,
+confidence limitata a 0.5) e un parametro `include_inferred` su `graph_path`,
+spento di default.
 
 ## CLI
 
