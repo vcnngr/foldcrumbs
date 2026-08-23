@@ -45,6 +45,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-process fail-closed, tri-state path, and invalid-input rejection
   all existed as failing tests before the production code.
 
+- **Relation extraction (G2)** — the graph finally fills itself in, without
+  betraying the design. Model-generated relations NEVER land in the store
+  directly: distill proposes them into a pending queue (opt-in via
+  `FOLDCRUMBS_G2=1`, default off), and only a human `promote` materializes an
+  arc with `prov=manual`. Design: docs/design/g2-extraction.md (REV-2 +
+  amendments E1–E6 + E4-bis, red-teamed through round 4). The posture rules:
+  - **Provenance taxonomy** — every arc carries `prov` ∈ {manual, agent,
+    inferred}; non-human provenance caps confidence at 0.5. `graph path`
+    walks manual arcs by default; agent/inferred/legacy arcs and pending
+    proposals are traversed ONLY behind the explicit per-query
+    `--include-inferred` flag (there is deliberately no env var for it).
+  - **Proposal queue** — `state/relation_proposals.jsonl`, written under a
+    file lock. Dedup is total (store triple or queued triple in ANY status
+    blocks a re-proposal); a reject is persistent suppression revived only
+    by a human `reopen`; capped at 10 proposals per distill session.
+  - **Crash-safe promote** — the arc is written FIRST, tagged with the
+    proposal id, then the queue row is marked promoted. A crash between the
+    two converges on retry; `graph doctor` detects the impossible
+    promoted-without-arc case loudly instead of fixing it silently.
+  - **Legacy migration** — arcs written before the taxonomy have no `prov`
+    and are NOT silently relabelled manual; `graph doctor` counts them and a
+    human attests each one via `promote-legacy`.
+  - **New surfaces** — `foldcrumbs graph proposals`, `graph doctor
+    promote/reject/reopen/promote-legacy`, the MCP `relate` tool (prov=agent,
+    capped), and `include_inferred` on `graph_path` (CLI + MCP).
+  Implemented fixture-first (E6 preregistration): 43 tests covering
+  validation, total dedup, promote/reject/reopen, crash recovery, overlay
+  containment, provenance containment, legacy arcs, node universe, parse,
+  the distill gate, and MCP relate — all passing before review.
+
 - **MCP recall filters** — the `recall` tool accepts `type` (a string or an
   array) and `tags` (an array), the same narrowing the CLI has always had.
   Without filters the behaviour is unchanged. This closes the gap for

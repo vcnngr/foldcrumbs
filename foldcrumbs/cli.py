@@ -470,6 +470,66 @@ def _resolve_memory_ref(ref: str):
     raise relations.InvalidRelation(msg)
 
 
+def _cmd_graph_doctor_action(action: str, args: argparse.Namespace) -> int:
+    """Human decisions on the proposal queue and legacy arcs (G2).
+
+    promote/reject/reopen act on ONE proposal by id — the queue never
+    decides for you. promote-legacy attests one legacy arc (memory id +
+    predicate + target memory id) as manual. All four are explicit human
+    attestations; nothing here runs automatically.
+    """
+    from . import proposals as proposals_mod, relations
+
+    if action in ("promote", "reject", "reopen"):
+        proposal_id = getattr(args, "proposal_id", "") or ""
+        if not proposal_id:
+            print("error: a proposal id is required "
+                  "(see `foldcrumbs graph proposals`)", file=sys.stderr)
+            return 2
+        fn = {"promote": proposals_mod.promote,
+              "reject": proposals_mod.reject,
+              "reopen": proposals_mod.reopen}[action]
+        try:
+            res = fn(proposal_id)
+        except proposals_mod.ProposalError as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+        except proposals_mod.ProposalLockBusy as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+        note = res.get("note", "")
+        if res["action"] == "noop":
+            print(f"nothing to do — proposal is {res['status']}"
+                  + (f" ({note})" if note else ""))
+            return 0
+        if action == "promote":
+            print(f"promoted — the arc is now in the store with prov=manual "
+                  f"(audit trail: proposal {proposal_id} stays in the queue "
+                  f"as promoted).")
+        else:
+            print(f"{action} — proposal is now {res['status']}.")
+        return 0
+
+    if action == "promote-legacy":
+        mem = _resolve_memory_ref(args.memory)
+        dst = _resolve_memory_ref(args.to_memory)
+        try:
+            ok = relations.promote_legacy_arc(
+                mem.id, args.predicate, {"k": "m", "id": dst.id})
+        except relations.InvalidRelation as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+        if ok:
+            print(f"attested — {mem.title!r} --{args.predicate}--> "
+                  f"{dst.title!r} is now prov=manual.")
+        else:
+            print("no matching legacy arc (already attested, or the triple "
+                  "does not exist).")
+        return 0
+    print(f"error: unknown doctor action {action!r}", file=sys.stderr)
+    return 2
+
+
 def _cmd_graph(args: argparse.Namespace) -> int:
     """Derive a read-only graph from the relations the store already has,
     or walk/inspect the explicit relations (G1 subcommands)."""
@@ -480,10 +540,13 @@ def _cmd_graph(args: argparse.Namespace) -> int:
         src = _resolve_memory_ref(args.src)
         dst = _resolve_memory_ref(args.dst)
         res = relations.find_path(src.id, dst.id, depth=args.depth,
-                                  max_nodes=args.max_nodes)
+                                  max_nodes=args.max_nodes,
+                                  include_inferred=args.include_inferred)
         status = res["status"]
         if status == "FOUND":
-            print(f"FOUND — {len(res['path'])} steps:")
+            scope = ("manual arcs + inferred overlay"
+                     if args.include_inferred else "manual arcs only")
+            print(f"FOUND — {len(res['path'])} steps ({scope}):")
             for step in res["path"]:
                 edge = step.get("edge")
                 if edge:
@@ -492,31 +555,63 @@ def _cmd_graph(args: argparse.Namespace) -> int:
                     # it the other way. Say so — evidence is directional.
                     arrow = "--" if step.get("forward", True) else "<--"
                     tail = f"  [{arrow} {edge['p']}, conf {edge['c']}"
+                    prov = edge.get("prov")
+                    if prov and prov != "manual":
+                        tail += f", {prov}"
+                    if edge.get("_overlay"):
+                        tail += ", pending proposal"
                     tail += f"; evidence: {ev}" if ev else "; no evidence"
                     print(f"  → {step['title']} ({step['file']}){tail}]")
                 else:
                     print(f"  • {step['title']} ({step['file']})")
             return 0
         if status == "NOT_FOUND_EXHAUSTIVE":
+            note = res.get("note", "")
             print(f"NOT_FOUND_EXHAUSTIVE — search completed, no connection. "
                   f"Visited {res['reached']} memories.")
+            if note:
+                print(f"note: {note}")
             return 1
         # TRUNCATED:<reason> — not proof of absence, and we say so.
         print(f"{status} — visited {res['reached']} memories before the "
               f"budget ran out. {res['note']}")
         return 1
     if mode == "doctor":
+        action = getattr(args, "doctor_action", None) or "report"
+        if action != "report":
+            return _cmd_graph_doctor_action(action, args)
+        from . import proposals as proposals_mod
         rep = relations.doctor()
-        if not rep["dangling"] and not rep["bad_predicates"]:
-            print("graph doctor: clean — no dangling targets, no unknown "
-                  "predicates.")
-            return 0
+        legacy = relations.legacy_arcs()
+        qrep = proposals_mod.doctor()
+        clean = (not rep["dangling"] and not rep["bad_predicates"]
+                 and not legacy and not qrep["promoted_missing_arc"])
+        print(f"graph doctor: "
+              f"{'clean' if clean else 'findings below'} — "
+              f"{len(rep['dangling'])} dangling, "
+              f"{len(rep['bad_predicates'])} unknown predicates, "
+              f"{len(legacy)} legacy arcs (no prov), "
+              f"proposals: {qrep['counts']['pending']} pending / "
+              f"{qrep['counts']['promoted']} promoted / "
+              f"{qrep['counts']['rejected']} rejected")
         for d in rep["dangling"]:
             print(f"dangling: {d['memory']!r} --{d['predicate']}--> missing "
                   f"memory id {d['missing_target']}")
         for b in rep["bad_predicates"]:
             print(f"unknown predicate: {b['memory']!r} uses {b['predicate']!r}")
-        return 1
+        for pid in qrep["promoted_missing_arc"]:
+            print(f"ERROR: proposal {pid} is promoted but its arc is missing "
+                  "from the store — impossible by construction; manual "
+                  "inspection required (E4-bis)")
+        if legacy:
+            print("legacy arcs (no prov; not walked by default — attest one "
+                  "by one with `graph doctor promote-legacy`):")
+            for a in legacy[:20]:
+                print(f"  {a['memory_id']} --{a['predicate']}--> "
+                      f"{a['target_id']}")
+            if len(legacy) > 20:
+                print(f"  … {len(legacy) - 20} more")
+        return 0 if clean else 1
     if mode == "entities":
         ents = relations.external_entities()
         if not ents:
@@ -531,6 +626,38 @@ def _cmd_graph(args: argparse.Namespace) -> int:
             for a, b in relations.similar_entities():
                 print(f"possibly the same entity: {a!r} ~ {b!r} "
                       "(suggestion only — you decide)")
+        return 0
+    if mode == "proposals":
+        from . import proposals as proposals_mod
+        rows = proposals_mod.load_all()
+        if not rows:
+            print("no relation proposals. Distill with FOLDCRUMBS_G2=1 to "
+                  "have the model suggest relations.")
+            return 0
+        by_status = getattr(args, "status", None)
+        shown = [r for r in rows if not by_status
+                 or r.get("status") == by_status]
+        if not shown:
+            print(f"no {by_status} proposals.")
+            return 0
+        # Newest first is what a human deciding promotions wants to see first.
+        shown.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+        titles = {m.id: m.title for m in store.load_all()}
+        for r in shown:
+            t = r.get("target") or {}
+            sub = str(r.get("subject_id") or "")
+            tgt = str(t.get("id") or "")
+            ev = (r.get("evidence") or "").strip()
+            print(f"[{r.get('status')}] {r.get('proposal_id')}")
+            print(f"  {titles.get(sub, sub)!r}"
+                  f" --{r.get('predicate')}--> "
+                  f"{titles.get(tgt, tgt)!r}"
+                  f"  (conf {r.get('confidence')}, {r.get('prov')})")
+            if ev:
+                print(f"  evidence: {ev}")
+        print("\ndecide one at a time:\n"
+              "  foldcrumbs graph doctor promote <proposal-id>\n"
+              "  foldcrumbs graph doctor reject  <proposal-id>")
         return 0
 
     g = graph.build()
@@ -590,7 +717,8 @@ def _cmd_relate(args: argparse.Namespace) -> int:
         added = relations.add_relation(
             src.id, args.predicate, target,
             evidence=args.evidence or "",
-            confidence=args.confidence)
+            confidence=args.confidence,
+            prov="manual")          # E5: the human CLI attests explicitly
     except relations.InvalidRelation as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
@@ -1021,10 +1149,38 @@ def build_parser() -> argparse.ArgumentParser:
                        help="max hops (default 3, hard cap 4)")
     gpath.add_argument("--max-nodes", type=int, default=500,
                        help="max memories to visit (default 500)")
+    gpath.add_argument("--include-inferred", action="store_true",
+                       help="ALSO walk agent/inferred/legacy arcs and pending "
+                            "proposals. Default walks manual arcs only: "
+                            "every use of this flag is an explicit, conscious "
+                            "choice (design G2 amendment — no env var, ever)")
     gpath.set_defaults(func=_cmd_graph)
-    gdoc = gsub.add_parser("doctor", help="report dangling memory targets and "
-                           "unknown predicates")
-    gdoc.set_defaults(func=_cmd_graph)
+    gdoc = gsub.add_parser("doctor", help="report dangling memory targets, "
+                           "unknown predicates, legacy arcs and the proposal "
+                           "queue; or act on ONE proposal / legacy arc")
+    gdoc_act = gdoc.add_subparsers(dest="doctor_action")
+    for act, helptext in (
+            ("promote", "promote ONE pending proposal: writes its arc into "
+                        "the store with prov=manual (human attestation)"),
+            ("reject", "reject ONE proposal: persistent suppression — the "
+                       "triple is not re-proposed until a human reopens it"),
+            ("reopen", "reopen ONE rejected proposal (human action only)")):
+        pa = gdoc_act.add_parser(act, help=helptext)
+        pa.add_argument("proposal_id", help="proposal id from "
+                                            "`foldcrumbs graph proposals`")
+    pleg = gdoc_act.add_parser(
+        "promote-legacy", help="attest ONE legacy arc (no prov) as manual — "
+                               "conscious human attestation, one by one")
+    pleg.add_argument("memory", help="source memory: id, title or stem")
+    pleg.add_argument("predicate",
+                      help="the arc's predicate")
+    pleg.add_argument("to_memory", help="target memory: id, title or stem")
+    gdoc.set_defaults(func=_cmd_graph, doctor_action=None)
+    gprop = gsub.add_parser("proposals", help="list the relation proposal "
+                            "queue (pending / promoted / rejected)")
+    gprop.add_argument("--status", choices=["pending", "promoted", "rejected"],
+                       help="only this status (default: all)")
+    gprop.set_defaults(func=_cmd_graph)
     gent = gsub.add_parser("entities", help="list external entities "
                            "referenced by relations")
     gent.add_argument("--similar", action="store_true",

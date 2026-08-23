@@ -169,7 +169,9 @@ class TestTriStatePath(RelStore):
     """find_path returns FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED:<reason>."""
 
     def _chain(self, n):
-        """Linear chain of n memories: m0 → m1 → … → m(n-1)."""
+        """Linear chain of n memories: m0 → m1 → … → m(n-1). Arcs are marked
+        prov=manual because these fixtures represent trusted, default-traversable
+        chains (post-E5: arcs without prov are legacy and NOT walked by default)."""
         recs = [self._put(f"Node {i}", f"Content {i}.") for i in range(n)]
         for i in range(n - 1):
             relations.add_relation(
@@ -177,6 +179,7 @@ class TestTriStatePath(RelStore):
                 target={"k": "m", "id": recs[i + 1].id},
                 evidence=f"node {i} causes node {i + 1}",
                 confidence=0.9,
+                prov="manual",
             )
         return recs
 

@@ -158,6 +158,14 @@ def log_event(msg: str) -> None:
         pass
 
 
+def g2_enabled() -> bool:
+    """G2 relation extraction is OPT-IN (design D2). Off unless
+    FOLDCRUMBS_G2=1 (or legacy ENGRAM_G2=1). Default off means a distill run
+    never writes a proposed relation until the user explicitly enables it —
+    the queue stays empty and graph_path behaviour is unchanged."""
+    return _env("G2", "") not in ("", "0", "false", "no", "off")
+
+
 def auto_prune_enabled() -> bool:
     """Auto-prune obvious artifact pollution after distill. On by default; off
     when FOLDCRUMBS_NO_AUTO_PRUNE (or legacy ENGRAM_NO_AUTO_PRUNE) is set."""

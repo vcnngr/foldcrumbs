@@ -61,7 +61,7 @@ class TestHandler(unittest.TestCase):
         names = {t["name"] for t in r["result"]["tools"]}
         self.assertEqual(names,
                          {"remember", "recall", "answer", "forget",
-                          "graph_path"})
+                          "graph_path", "relate"})
 
     def test_forget_by_filename(self):
         rem = mcp_server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -182,7 +182,8 @@ class TestHandler(unittest.TestCase):
         src, dst = by_title["Release slipped"], by_title["Supplier delay"]
         ok = relations.add_relation(
             src.id, "caused_by", {"k": "m", "id": dst.id},
-            evidence="supplier delay pushed the release")
+            evidence="supplier delay pushed the release",
+            prov="manual")      # trusted arc: default-traversable post-E5
         self.assertTrue(ok, "fixture relation was not attached")
 
     def test_graph_path_found(self):
@@ -268,7 +269,7 @@ class TestSubprocessRoundTrip(unittest.TestCase):
         self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "foldcrumbs")
         self.assertEqual({t["name"] for t in by_id[2]["result"]["tools"]},
                          {"remember", "recall", "answer", "forget",
-                          "graph_path"})
+                          "graph_path", "relate"})
         self.assertFalse(by_id[3]["result"]["isError"])
         self.assertEqual(len(responses), 3)  # no response for the notification
 
