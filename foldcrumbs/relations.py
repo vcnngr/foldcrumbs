@@ -250,11 +250,13 @@ def _add_relation_locked(mem_id: str, rel: dict, norm_t: dict,
             raise RelationLockBusy(
                 "proposal queue is locked by another writer; the relation "
                 "was NOT added (refusing to race)")
-        # GPT code-RT re-review, P0-1 residual: a queued triple (ANY status)
-        # is a decided or undecided human matter. A direct write answering
-        # it silently would leave queue + store holding the same triple —
-        # two representations. Refuse visibly; the human decides via
-        # promote/reject/reopen instead.
+        # GPT code-RT re-review, P0-1 residual: a triple queued as an OPEN
+        # human matter (pending or rejected) is refused here. A direct write
+        # answering it silently would leave queue + store holding the same
+        # triple — two representations. Refuse visibly; the human decides
+        # via promote/reject/reopen instead. (A promoted row is not open:
+        # its arc is already in the store, and the store-side dedup below
+        # answers it with the historical False contract.)
         if _queue_has_triple():
             raise InvalidRelation(
                 "this triple is already in the proposal queue; a direct "
