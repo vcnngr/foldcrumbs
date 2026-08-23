@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] — 2026-08-23
 
 ### Added
 
@@ -56,10 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     walks manual arcs by default; agent/inferred/legacy arcs and pending
     proposals are traversed ONLY behind the explicit per-query
     `--include-inferred` flag (there is deliberately no env var for it).
-  - **Proposal queue** — `state/relation_proposals.jsonl`, written under a
-    file lock. Dedup is total (store triple or queued triple in ANY status
-    blocks a re-proposal); a reject is persistent suppression revived only
-    by a human `reopen`; capped at 10 proposals per distill session.
+  - **Proposal queue** — `state/proposals/<store-hash>/relation_proposals.jsonl`
+    (namespaced per store: two projects never see each other's proposals),
+    written under a file lock. Dedup is total (store triple or queued triple
+    in ANY status blocks a re-proposal); a reject is persistent suppression
+    revived only by a human `reopen`; capped at 10 proposals per distill
+    session. A direct write of a triple that is an OPEN human matter in the
+    queue (pending or rejected) is refused visibly — one representation,
+    never two.
   - **Crash-safe promote** — the arc is written FIRST, tagged with the
     proposal id, then the queue row is marked promoted. A crash between the
     two converges on retry; `graph doctor` detects the impossible
@@ -447,7 +451,9 @@ can now be forgotten, superseded, and merged across stores.
 - Trust/decay model and typed-memory categories adapted from
   [memanto](https://github.com/moorcheh-ai/memanto) (MIT).
 
-[Unreleased]: https://github.com/vcnngr/foldcrumbs/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/vcnngr/foldcrumbs/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/vcnngr/foldcrumbs/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/vcnngr/foldcrumbs/compare/v0.6.1...v0.7.0
 [0.5.0]: https://github.com/vcnngr/foldcrumbs/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/vcnngr/foldcrumbs/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/vcnngr/foldcrumbs/releases/tag/v0.3.0
