@@ -542,11 +542,251 @@ class TestMcpRelate(G2Store):
                                    "from": "Mem One", "to": "Mem Two"}}})
         self.assertIn("NOT_FOUND_EXHAUSTIVE", r["result"]["content"][0]["text"])
         r2 = mcp_server.handle({"jsonrpc": "2.0", "id": 4,
-                                "method": "tools/call",
-                                "params": {"name": "graph_path", "arguments": {
-                                    "from": "Mem One", "to": "Mem Two",
-                                    "include_inferred": True}}})
+                               "method": "tools/call",
+                               "params": {"name": "graph_path", "arguments": {
+                                   "from": "Mem One", "to": "Mem Two",
+                                   "include_inferred": True}}})
         self.assertIn("FOUND", r2["result"]["content"][0]["text"])
+
+
+# ── Regression tests from GPT code red-team (t_0202c40d) ─────────────────
+# Each class maps to one counterexample GPT executed against the merged
+# implementation (5da0c04). These tests are born red against that commit.
+
+class TestP01Serialization(G2Store):
+    """P0-1: submit/promote and direct writers must serialize on one lock;
+    promote must never declare success without the exact tagged arc."""
+
+    def _pending(self):
+        a, b = self._put("A"), self._put("B")
+        proposals.submit([self._triple(a.id, "caused_by", b.id,
+                                       evidence="the cause")])
+        return a, b, proposals.load_all()[0]["proposal_id"]
+
+    def test_promote_after_untagged_direct_write_refuses_visibly(self):
+        """GPT's second counterexample: pending proposal + untagged direct
+        arc on the same triple + promote. The old code marked promoted
+        anyway (doctor then screamed promoted_missing_arc). The fix:
+        refuse visibly, leave the queue row pending."""
+        a, b, pid = self._pending()
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="direct", prov="agent")
+        with self.assertRaises(proposals.ProposalError) as ctx:
+            proposals.promote(pid)
+        self.assertIn("could not be attested", str(ctx.exception))
+        self.assertEqual(proposals.get(pid)["status"], "pending")
+        self.assertEqual(proposals.doctor()["promoted_missing_arc"], [])
+
+    def test_overlay_hides_pending_when_store_has_the_triple(self):
+        """GPT: with include_inferred the same triple appeared once from the
+        store and once from the overlay. Store copy is authoritative; the
+        overlay stays silent for that triple."""
+        a, b, pid = self._pending()
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="direct", prov="agent")
+        self.assertEqual(proposals.overlay_edges(), [])
+
+    def test_submit_and_direct_write_serialize(self):
+        """Both writers take the queue lock; the triple lands exactly once,
+        as either a queued proposal OR a store arc — never both."""
+        a, b = self._put("A"), self._put("B")
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="direct", prov="agent")
+        stats = proposals.submit([self._triple(a.id, "caused_by", b.id)])
+        self.assertEqual(stats["written"], 0)
+        self.assertEqual(stats["dup_store"], 1)
+        self.assertEqual(proposals.load_all(), [])
+
+
+class TestP02BooleanFlag(G2Store):
+    """P0-2: include_inferred is fail-closed on type. ONLY boolean True
+    enables non-manual traversal; strings, numbers, null are refusals."""
+
+    def _agent_arc(self):
+        from foldcrumbs import mcp_server
+        for content, title in (("First fact.", "Mem One"),
+                               ("Second fact.", "Mem Two")):
+            mcp_server.handle({"jsonrpc": "2.0", "id": 1,
+                               "method": "tools/call",
+                               "params": {"name": "remember", "arguments": {
+                                   "content": content, "type": "fact",
+                                   "title": title}}})
+        mcp_server.handle({"jsonrpc": "2.0", "id": 2,
+                           "method": "tools/call",
+                           "params": {"name": "relate", "arguments": {
+                               "memory": "Mem One", "predicate": "caused_by",
+                               "to_memory": "Mem Two", "evidence": "e"}}})
+
+    def _path(self, flag):
+        from foldcrumbs import mcp_server
+        args = {"from": "Mem One", "to": "Mem Two"}
+        if flag is not None:
+            args["include_inferred"] = flag
+        r = mcp_server.handle({"jsonrpc": "2.0", "id": 9,
+                               "method": "tools/call",
+                               "params": {"name": "graph_path",
+                                          "arguments": args}})
+        return r["result"]["content"][0]["text"]
+
+    def test_string_false_does_not_enable_traversal(self):
+        """GPT's exact counterexample: the string "false" must never enable
+        non-manual traversal. The fix is fail-closed on type — ANY non-bool
+        is a visible refusal, which is strictly stronger than falling back
+        to NOT_FOUND (it also surfaces a client misusing the schema)."""
+        self._agent_arc()
+        text = self._path("false")
+        self.assertNotIn("FOUND —", text)   # never enables traversal
+        self.assertIn("refused", text)       # visible refusal, not silent
+
+    def test_string_true_is_refused_not_coerced(self):
+        self._agent_arc()
+        text = self._path("true")
+        self.assertIn("refused", text)      # visible refusal, not FOUND
+
+    def test_numbers_and_null_are_fail_closed(self):
+        self._agent_arc()
+        # null/absent falls back to the safe default (no opt-in) — same as
+        # the flag being absent; numbers are non-bool and refused.
+        self.assertIn("NOT_FOUND_EXHAUSTIVE", self._path(None))
+        self.assertIn("refused", self._path(1))
+        self.assertIn("refused", self._path(0))
+
+    def test_boolean_true_still_works(self):
+        self._agent_arc()
+        self.assertIn("FOUND", self._path(True))
+        self.assertIn("NOT_FOUND_EXHAUSTIVE", self._path(False))
+
+
+class TestP03PerStoreQueue(G2Store):
+    """P0-3: the queue is namespaced by the store it serves; promote works
+    with an explicit cwd regardless of the process cwd."""
+
+    def test_two_stores_do_not_see_each_other(self):
+        """GPT's exact scenario: shared STATE_DIR, two different cwd. Each
+        store gets its own queue; B never sees A's proposals; promote works
+        with an explicit cwd even when the process cwd is elsewhere.
+
+        Setup note: TmpStore points ENGRAM_DIR at one dir, collapsing every
+        cwd onto one store — the opposite of what this test needs. So this
+        test clears the DIR overrides and lets memory_dir derive from cwd.
+        """
+        import os
+        import tempfile
+        from importlib import reload
+        from foldcrumbs import config as _c
+
+        shared_state = tempfile.mkdtemp(prefix="g2_shared_state_")
+        cfg_dir = tempfile.mkdtemp(prefix="g2_cfg_")
+        env_keys = ("FOLDCRUMBS_DIR", "ENGRAM_DIR", "FOLDCRUMBS_STATE_DIR",
+                    "ENGRAM_STATE_DIR", "CLAUDE_CONFIG_DIR")
+        saved = {k: os.environ.get(k) for k in env_keys}
+        os.environ.pop("FOLDCRUMBS_DIR", None)
+        os.environ.pop("ENGRAM_DIR", None)
+        os.environ["FOLDCRUMBS_STATE_DIR"] = shared_state
+        os.environ["CLAUDE_CONFIG_DIR"] = cfg_dir
+        reload(_c)
+        try:
+            dir_a = tempfile.mkdtemp(prefix="g2_proj_a_")
+            dir_b = tempfile.mkdtemp(prefix="g2_proj_b_")
+            self.assertNotEqual(_c.memory_dir(dir_a), _c.memory_dir(dir_b),
+                                "test premise: two cwds = two stores")
+            rec_a1 = MemoryRecord(title="Alpha One", content="a1")
+            rec_a2 = MemoryRecord(title="Alpha Two", content="a2")
+            store.write_memory(rec_a1, dir_a)
+            store.write_memory(rec_a2, dir_a)
+            stats = proposals.submit(
+                [{"subject_id": rec_a1.id, "predicate": "caused_by",
+                  "target_id": rec_a2.id, "evidence": "e",
+                  "confidence": 0.5}],
+                cwd=dir_a)
+            self.assertEqual(stats["written"], 1)
+            # Store B sees none of A's queue (GPT: it used to read A's row
+            # and A's evidence).
+            self.assertEqual(proposals.load_all(cwd=dir_b), [])
+            self.assertEqual(proposals.counts(cwd=dir_b)["pending"], 0)
+            # A still sees its own proposal.
+            self.assertEqual(proposals.counts(cwd=dir_a)["pending"], 1)
+            # Promote with an explicit cwd works even though the process cwd
+            # is neither store (GPT: this used to raise InvalidRelation
+            # because _known_ids read the process cwd).
+            pid = proposals.load_all(cwd=dir_a)[0]["proposal_id"]
+            res = proposals.promote(pid, cwd=dir_a)
+            self.assertEqual(res["action"], "ok")
+            rec = next(m for m in store.load_all(dir_a) if m.id == rec_a1.id)
+            rels = relations.parse(rec.relations_json)
+            self.assertEqual(len(rels), 1)
+            self.assertEqual(rels[0]["prov"], "manual")
+            self.assertEqual(rels[0]["proposal_id"], pid)
+            # Doctor stays per-store: B has no findings about A's queue.
+            self.assertEqual(proposals.doctor(cwd=dir_b)["counts"]["pending"],
+                             0)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            reload(_c)
+
+    def test_known_ids_cwd_aware(self):
+        """add_relation with explicit cwd validates target ids against THAT
+        store (GPT's promote-from-elsewhere failure) — with the DIR env
+        overrides cleared so cwd really selects the store."""
+        import os
+        import tempfile
+        from importlib import reload
+        from foldcrumbs import config as _c
+
+        shared_state = tempfile.mkdtemp(prefix="g2_shared_state2_")
+        cfg_dir = tempfile.mkdtemp(prefix="g2_cfg2_")
+        env_keys = ("FOLDCRUMBS_DIR", "ENGRAM_DIR", "FOLDCRUMBS_STATE_DIR",
+                    "ENGRAM_STATE_DIR", "CLAUDE_CONFIG_DIR")
+        saved = {k: os.environ.get(k) for k in env_keys}
+        os.environ.pop("FOLDCRUMBS_DIR", None)
+        os.environ.pop("ENGRAM_DIR", None)
+        os.environ["FOLDCRUMBS_STATE_DIR"] = shared_state
+        os.environ["CLAUDE_CONFIG_DIR"] = cfg_dir
+        reload(_c)
+        try:
+            dir_a = tempfile.mkdtemp(prefix="g2_proj_a2_")
+            rec1 = MemoryRecord(title="Beta One", content="b1")
+            rec2 = MemoryRecord(title="Beta Two", content="b2")
+            store.write_memory(rec1, dir_a)
+            store.write_memory(rec2, dir_a)
+            ok = relations.add_relation(
+                rec1.id, "depends_on", {"k": "m", "id": rec2.id},
+                evidence="e", prov="manual", cwd=dir_a)
+            self.assertTrue(ok)
+            # The arc landed in store A, nowhere else.
+            rec = next(m for m in store.load_all(dir_a) if m.id == rec1.id)
+            self.assertEqual(len(relations.parse(rec.relations_json)), 1)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            reload(_c)
+
+
+class TestP1Envelope(G2Store):
+    """P1-1: a proposal without evidence is invalid on the way in — the
+    envelope validator matches what the overlay enforces on the way out."""
+
+    def test_empty_evidence_rejected(self):
+        a, b = self._put("A"), self._put("B")
+        stats = proposals.submit(
+            [self._triple(a.id, "caused_by", b.id, evidence="")])
+        self.assertEqual(stats["written"], 0)
+        self.assertEqual(stats["invalid"], 1)
+        self.assertEqual(proposals.load_all(), [])
+
+    def test_whitespace_evidence_rejected(self):
+        a, b = self._put("A"), self._put("B")
+        stats = proposals.submit(
+            [self._triple(a.id, "caused_by", b.id, evidence="   ")])
+        self.assertEqual(stats["written"], 0)
+        self.assertEqual(stats["invalid"], 1)
 
 
 if __name__ == "__main__":

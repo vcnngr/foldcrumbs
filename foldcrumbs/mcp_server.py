@@ -282,6 +282,23 @@ def _resolve_local_ref(ref: str):
     raise ValueError(msg)
 
 
+def _parse_include_inferred(args: dict[str, Any]) -> bool:
+    """Fail-closed boolean parsing (GPT code-RT P0-2): the published schema
+    is boolean, so ONLY a real boolean counts. A string ("false", "true"),
+    a number, or null must never enable the non-manual traversal — opting in
+    is a conscious act and silent coercion would defeat the whole containment
+    promise of G2. Absent -> False; wrong type -> visible refusal."""
+    if "include_inferred" not in args or args["include_inferred"] is None:
+        return False
+    value = args["include_inferred"]
+    if not isinstance(value, bool):
+        raise ValueError(
+            "include_inferred must be a boolean (true/false), got "
+            f"{type(value).__name__}: {value!r} — non-manual arcs stay "
+            "hidden until you opt in explicitly")
+    return value
+
+
 def tool_graph_path(args: dict[str, Any]) -> str:
     from . import relations
     try:
@@ -289,11 +306,15 @@ def tool_graph_path(args: dict[str, Any]) -> str:
         dst = _resolve_local_ref(str(args["to"]))
     except ValueError as exc:
         return str(exc)
+    try:
+        include_inferred = _parse_include_inferred(args)
+    except ValueError as exc:
+        return f"refused: {exc}"
     res = relations.find_path(
         src.id, dst.id,
         depth=int(args.get("depth", 3)),
         max_nodes=int(args.get("max_nodes", 500)),
-        include_inferred=bool(args.get("include_inferred", False)))
+        include_inferred=include_inferred)
     status = res["status"]
     if status == "FOUND":
         lines = [f"FOUND — {len(res['path'])} steps:"]

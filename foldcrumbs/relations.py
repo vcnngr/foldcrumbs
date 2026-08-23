@@ -115,8 +115,8 @@ def _norm_target_shape(target: dict) -> dict:
     raise InvalidRelation("target kind must be 'm' (memory) or 'x' (external)")
 
 
-def _known_ids() -> set[str]:
-    return {m.id for m in store.load_all()}
+def _known_ids(cwd: str | Path | None = None) -> set[str]:
+    return {m.id for m in store.load_all(cwd)}
 
 
 def _dedup_key(predicate: str, norm_target: dict) -> str:
@@ -128,13 +128,23 @@ def _dedup_key(predicate: str, norm_target: dict) -> str:
 def add_relation(mem_id: str, predicate: str, target: dict,
                  evidence: str = "", confidence: float = 0.8,
                  prov: str | None = None, proposal_id: str | None = None,
-                 cwd: str | Path | None = None) -> bool:
+                 cwd: str | Path | None = None,
+                 _queue_lock_held: bool = False) -> bool:
     """Attach one relation to memory ``mem_id``. Returns True when the edge
     was written, False when it already existed (same predicate + target).
 
     Raises InvalidRelation for any violation; RelationLockBusy when the
     per-memory lock cannot be acquired — both are VISIBLE refusals, per the
     fail-closed rule.
+
+    Serialization (GPT code-RT P0-1): every triple mutation acquires the
+    proposal-queue lock FIRST, then the per-memory lock — the queue lock is
+    the single serialization point shared with proposals.submit/promote, so
+    "store triple OR queued triple blocks the other" holds against live
+    concurrent writers, not just against crashes. Lock order is always
+    queue → memory; no path takes them in reverse. Internal callers that
+    already hold the queue lock (proposals._decide) pass
+    ``_queue_lock_held=True`` instead of re-acquiring it.
 
     Provenance (design g2-extraction.md D1/E5): callers that represent a
     write path pass ``prov`` explicitly — ``manual`` (human CLI), ``agent``
@@ -173,28 +183,50 @@ def add_relation(mem_id: str, predicate: str, target: dict,
     if proposal_id:
         rel["proposal_id"] = proposal_id
 
-    lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{mem_id}"
-    lock_dir.parent.mkdir(parents=True, exist_ok=True)
-    with federation.file_lock(lock_dir, wait=_LOCK_WAIT_SECONDS) as held:
+    return _add_relation_locked(mem_id, rel, norm_t, cwd, _queue_lock_held)
+
+
+def _add_relation_locked(mem_id: str, rel: dict, norm_t: dict,
+                         cwd: str | Path | None,
+                         queue_lock_held: bool) -> bool:
+    """The lock dance, split out so the queue lock wraps everything:
+    queue lock first (unless the caller — proposals._decide — holds it
+    already), memory lock inside. Never the reverse."""
+    from . import proposals as proposals_mod
+
+    def _write_under_memory_lock() -> bool:
+        lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{mem_id}"
+        lock_dir.parent.mkdir(parents=True, exist_ok=True)
+        with federation.file_lock(lock_dir, wait=_LOCK_WAIT_SECONDS) as held:
+            if not held:
+                raise RelationLockBusy(
+                    f"memory {mem_id} is locked by another writer; "
+                    "the relation was NOT added (refusing to race)")
+            # Existence checks belong UNDER the lock: a memory target that
+            # does not exist right now is rejected outright (no dangling
+            # references on the way in), and checking outside would reopen a
+            # check-then-write window. cwd-aware (GPT code-RT P0-3).
+            if norm_t["k"] == "m" and norm_t["id"] not in _known_ids(cwd):
+                raise InvalidRelation(f"no memory with id {norm_t['id']!r}")
+            rec = _find_by_id(mem_id, cwd)
+            rels = parse(rec.relations_json)
+            key = _dedup_key(rel["p"], norm_t)
+            if any(_dedup_key(r["p"], r["t"]) == key for r in rels):
+                return False
+            rels.append(rel)
+            rec.relations_json = canonical(rels)
+            store.write_memory(rec, cwd)
+        return True
+
+    if queue_lock_held:
+        return _write_under_memory_lock()
+    with federation.file_lock(proposals_mod._lock_path(cwd),
+                              wait=_LOCK_WAIT_SECONDS) as held:
         if not held:
             raise RelationLockBusy(
-                f"memory {mem_id} is locked by another writer; "
-                "the relation was NOT added (refusing to race)")
-        # Existence checks belong UNDER the lock: a memory target that does
-        # not exist right now is rejected outright (no dangling references on
-        # the way in), and checking outside would reopen a check-then-write
-        # window.
-        if norm_t["k"] == "m" and norm_t["id"] not in _known_ids():
-            raise InvalidRelation(f"no memory with id {norm_t['id']!r}")
-        rec = _find_by_id(mem_id, cwd)
-        rels = parse(rec.relations_json)
-        key = _dedup_key(predicate, norm_t)
-        if any(_dedup_key(r["p"], r["t"]) == key for r in rels):
-            return False
-        rels.append(rel)
-        rec.relations_json = canonical(rels)
-        store.write_memory(rec, cwd)
-    return True
+                "proposal queue is locked by another writer; the relation "
+                "was NOT added (refusing to race)")
+        return _write_under_memory_lock()
 
 
 def _find_by_id(mem_id: str,
@@ -418,7 +450,7 @@ def doctor(cwd: str | Path | None = None) -> dict:
     """Surface graph rot instead of hiding it: dangling memory targets
     (memory removed after the edge was written) and unknown predicates.
     Read-only."""
-    ids = _known_ids()
+    ids = _known_ids(cwd)
     dangling: list[dict] = []
     bad_predicates: list[dict] = []
     for m in store.load_all(cwd):
