@@ -351,6 +351,12 @@ def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
     # `graph doctor`, never followed in silence.
     adj: dict[str, list[tuple[str, dict, bool]]] = {}
     for m in mems:
+        # The SOURCE must be in the universe too: 0.8.0 checked only the
+        # target, so a superseded/deleted/provisional memory that stored an
+        # arc leaked into the graph through reverse adjacency — paths walked
+        # through nodes D3 excludes, direction-dependently (0.8.1 hotfix).
+        if m.id not in universe:
+            continue
         for r in parse(m.relations_json):
             t = r.get("t")
             if isinstance(t, dict) and t.get("k") == "m" \

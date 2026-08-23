@@ -327,5 +327,66 @@ class TestRelationsCLI(RelStore):
         self.assertIn("NOT_FOUND_EXHAUSTIVE", out)
 
 
+# ── Regression: universe leak via reverse adjacency (0.8.1 hotfix) ─────────
+
+class TestUniverseLeak(RelStore):
+    """0.8.0 bug: the adjacency filter checked only the EDGE TARGET against
+    the node universe, never the edge SOURCE. A memory outside the universe
+    (superseded/deleted/provisional) that STORED an arc therefore entered
+    the graph through reverse adjacency — paths walked through nodes D3
+    excludes, and the result depended on which direction the arc was stored
+    in. D3: arcs touching excluded nodes are skipped, in BOTH directions."""
+
+    def _link(self, src, dst, predicate="depends_on"):
+        relations.add_relation(src.id, predicate, {"k": "m", "id": dst.id},
+                               evidence="e", prov="manual")
+
+    def test_arcs_stored_outward_from_superseded_node_not_walked(self):
+        """Chain A - S - B with both arcs stored on S (the superseded node).
+        0.8.0 returned FOUND — S leaked in through reverse adjacency."""
+        a, s, b = self._put("A"), self._put("S"), self._put("B")
+        self._link(s, a)          # stored S->A; query walks it as A->S
+        self._link(s, b)          # stored S->B
+        fresh = next(m for m in store.load_all() if m.id == s.id)
+        store.mark_superseded_on_disk(fresh, b.id)
+        res = relations.find_path(a.id, b.id)
+        self.assertEqual(res["status"], "NOT_FOUND_EXHAUSTIVE")
+
+    def test_arcs_into_superseded_node_not_walked_either(self):
+        """The symmetric storage direction (arcs on A and S pointing at S and
+        B): this one was already refused in 0.8.0 — it must stay refused."""
+        a, s, b = self._put("A"), self._put("S"), self._put("B")
+        self._link(a, s)
+        self._link(s, b)
+        fresh = next(m for m in store.load_all() if m.id == s.id)
+        store.mark_superseded_on_disk(fresh, b.id)
+        res = relations.find_path(a.id, b.id)
+        self.assertEqual(res["status"], "NOT_FOUND_EXHAUSTIVE")
+
+    def test_deleted_and_provisional_sources_not_walked(self):
+        """The leak was status-agnostic: any node outside the active universe
+        must not contribute reverse adjacency."""
+        for bad_status in ("deleted", "provisional"):
+            with self.subTest(status=bad_status):
+                a, s, b = self._put("A"), self._put("S"), self._put("B")
+                self._link(s, a)
+                self._link(s, b)
+                fresh = next(m for m in store.load_all() if m.id == s.id)
+                fresh.status = bad_status
+                store.write_memory(fresh)
+                res = relations.find_path(a.id, b.id)
+                self.assertEqual(res["status"], "NOT_FOUND_EXHAUSTIVE")
+
+    def test_active_chain_still_found(self):
+        """Guard: the fix must not break ordinary paths."""
+        a, c, b = self._put("A"), self._put("C"), self._put("B")
+        self._link(a, c)
+        self._link(c, b)
+        res = relations.find_path(a.id, b.id)
+        self.assertEqual(res["status"], "FOUND")
+        self.assertEqual([st["title"] for st in res["path"]],
+                         ["A", "C", "B"])
+
+
 if __name__ == "__main__":
     unittest.main()
