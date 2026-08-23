@@ -18,14 +18,26 @@ Posture rules that shape the code:
 * E2 — every read-check-write on the queue happens under one
   ``federation.file_lock``. The conflicts.py pattern was checked during R3
   and does NOT lock — this module must not inherit that gap.
+* SERIALIZATION (GPT code-RT P0-1) — the queue lock is the ONE serialization
+  point for EVERY triple mutation: submit reads the store and rewrites the
+  queue under it, and ``relations.add_relation`` acquires it FIRST (before
+  the per-memory lock). Lock order is always queue → memory; no path takes
+  them in reverse. This is what makes "store triple OR queued triple blocks
+  the other" hold against concurrent writers, not just against crashes.
 * E4-bis — promote is a recoverable protocol, not a transaction. The arc is
   written into the store FIRST, tagged with the proposal_id; only then is the
-  queue row marked promoted. A crash in between converges on retry: the tag
-  tells the recovery pass the arc is already there.
+  queue row marked promoted. A crash in between converges on retry; promote
+  never declares success unless the exact tagged arc is observable (GPT
+  code-RT P0-1: an untagged pre-existing triple is attested under the lock,
+  never papered over).
+* PER-STORE QUEUE (GPT code-RT P0-3) — the queue is namespaced by the store
+  it serves (``memory_dir(cwd)``), not machine-wide: two projects under one
+  STATE_DIR never see each other's proposals.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import uuid
@@ -51,19 +63,28 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def queue_path() -> Path:
-    return Path(config.STATE_DIR) / "relation_proposals.jsonl"
+def _store_key(cwd=None) -> str:
+    """Stable identity of the store this queue serves: the resolved absolute
+    memory dir. Two cwd values resolving to the same store share a queue;
+    different stores get different queues (GPT code-RT P0-3)."""
+    root = Path(config.memory_dir(cwd)).resolve()
+    return hashlib.sha256(str(root).encode()).hexdigest()[:16]
 
 
-def _lock_path() -> Path:
-    return Path(config.STATE_DIR) / "locks" / "relation-proposals"
+def queue_path(cwd=None) -> Path:
+    return Path(config.STATE_DIR) / "proposals" / _store_key(cwd) \
+        / "relation_proposals.jsonl"
+
+
+def _lock_path(cwd=None) -> Path:
+    return Path(config.STATE_DIR) / "proposals" / _store_key(cwd) / "lock"
 
 
 # --- reading ----------------------------------------------------------------
 
-def load_all() -> list[dict]:
+def load_all(cwd=None) -> list[dict]:
     """Tolerant read: one corrupt line must not blind the rest of the queue."""
-    path = queue_path()
+    path = queue_path(cwd)
     if not path.exists():
         return []
     rows: list[dict] = []
@@ -80,26 +101,26 @@ def load_all() -> list[dict]:
     return rows
 
 
-def get(proposal_id: str) -> dict | None:
-    for row in load_all():
+def get(proposal_id: str, cwd=None) -> dict | None:
+    for row in load_all(cwd):
         if row.get("proposal_id") == proposal_id:
             return row
     return None
 
 
-def counts() -> dict:
+def counts(cwd=None) -> dict:
     out = {"pending": 0, "promoted": 0, "rejected": 0}
-    for row in load_all():
+    for row in load_all(cwd):
         st = row.get("status")
         if st in out:
             out[st] += 1
     return out
 
 
-def _rewrite(rows: list[dict]) -> None:
+def _rewrite(rows: list[dict], cwd=None) -> None:
     """Replace the whole queue file. Caller MUST hold the queue lock.
     tmp + os.replace so a crash never leaves a half-written queue."""
-    path = queue_path()
+    path = queue_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows),
@@ -137,7 +158,20 @@ def _store_has_proposal_tag(proposal_id: str, cwd=None) -> bool:
     return False
 
 
-# --- writing (always under the queue lock, E2) ------------------------------
+# --- writing (always under the queue lock, E2 + P0-1 serialization) ---------
+
+def _envelope_valid(predicate: str | None, evidence: str | None) -> bool:
+    """ONE validator for the proposal envelope, used on the way in (submit)
+    and on the way out (overlay_edges) alike (GPT code-RT re-review P1-1):
+    a known predicate and a non-empty evidence quote. A queue row that is
+    malformed on disk (hand-edited, truncated) is dropped from the overlay —
+    never surfaced. A direct write without evidence is a different shape
+    (relations.py records its own uncertainty, prov=inferred) and does not
+    go through this validator."""
+    from . import relations
+    return bool(predicate) and predicate in relations.PREDICATES \
+        and bool(str(evidence or "").strip())
+
 
 def submit(raw: list[dict], prov: str = "inferred",
            cap: int = MAX_PER_SESSION, cwd=None) -> dict:
@@ -146,12 +180,17 @@ def submit(raw: list[dict], prov: str = "inferred",
     ``raw`` items: {subject_id, predicate, target_id, evidence, confidence}.
     Invalid items are dropped at parse (D4) — never written, never raised:
     the queue is fail-soft on the way in, fail-closed on the way out.
+
+    The store is re-read for the dedup check INSIDE the queue lock: writers
+    that add arcs to the store take the same lock first (relations.add_
+    relation), so the "store triple blocks the proposal" check and the
+    enqueue are one indivisible step against concurrent writers
+    (GPT code-RT P0-1).
     """
     from . import relations
 
     stats = {"written": 0, "invalid": 0, "dup_store": 0, "dup_queue": 0,
              "capped": 0}
-    known = {m.id for m in store.load_all(cwd)}
     valid: list[dict] = []
     for item in raw:
         if not isinstance(item, dict):
@@ -161,10 +200,14 @@ def submit(raw: list[dict], prov: str = "inferred",
         target = str(item.get("target_id") or "").strip()
         predicate = str(item.get("predicate") or "").strip()
         evidence = str(item.get("evidence") or "").strip()
-        if subject not in known or target not in known or subject == target:
+        if predicate not in relations.PREDICATES \
+                or not subject or not target or subject == target:
             stats["invalid"] += 1
             continue
-        if predicate not in relations.PREDICATES:
+        # P1-1 (GPT code-RT): a model proposal without an evidence quote is
+        # not a supported claim — the envelope validator is ONE function,
+        # shared with overlay_edges on the way out.
+        if not _envelope_valid(predicate, evidence):
             stats["invalid"] += 1
             continue
         try:
@@ -178,17 +221,22 @@ def submit(raw: list[dict], prov: str = "inferred",
             "evidence": evidence[:2000], "confidence": round(confidence, 2),
         })
 
-    with federation.file_lock(_lock_path(), wait=_LOCK_WAIT_SECONDS) as held:
+    with federation.file_lock(_lock_path(cwd), wait=_LOCK_WAIT_SECONDS) as held:
         if not held:
             raise ProposalLockBusy(
                 "proposal queue is locked by another writer; nothing written")
-        rows = load_all()
+        # Store and queue ids read under the lock: one consistent view.
+        known = {m.id for m in store.load_all(cwd)}
+        rows = load_all(cwd)
         queued_keys = {_dedup_key(r) for r in rows}
         for item in valid:
+            key = (item["subject_id"], item["predicate"], item["target_id"])
+            if key[0] not in known or key[2] not in known:
+                stats["invalid"] += 1
+                continue
             if stats["written"] >= cap:
                 stats["capped"] += 1
                 continue
-            key = (item["subject_id"], item["predicate"], item["target_id"])
             if _store_has_triple(*key, cwd=cwd):
                 stats["dup_store"] += 1
                 continue
@@ -210,7 +258,7 @@ def submit(raw: list[dict], prov: str = "inferred",
             rows.append(row)
             queued_keys.add(key)
             stats["written"] += 1
-        _rewrite(rows)
+        _rewrite(rows, cwd)
     return stats
 
 
@@ -219,11 +267,11 @@ def submit(raw: list[dict], prov: str = "inferred",
 def _decide(proposal_id: str, new_status: str, cwd=None) -> dict:
     from . import relations
 
-    with federation.file_lock(_lock_path(), wait=_LOCK_WAIT_SECONDS) as held:
+    with federation.file_lock(_lock_path(cwd), wait=_LOCK_WAIT_SECONDS) as held:
         if not held:
             raise ProposalLockBusy(
                 "proposal queue is locked by another writer; nothing changed")
-        rows = load_all()
+        rows = load_all(cwd)
         row = next((r for r in rows if r.get("proposal_id") == proposal_id),
                    None)
         if row is None:
@@ -237,15 +285,27 @@ def _decide(proposal_id: str, new_status: str, cwd=None) -> dict:
                         "proposal_id": proposal_id,
                         "note": "only pending proposals can be promoted"}
             # E4-bis step 3: the arc FIRST, tagged with the proposal_id.
-            # add_relation returns False when the triple already exists —
-            # that is convergence, not failure (E1 already kept the store's
-            # copy authoritative).
-            relations.add_relation(
+            # The queue lock is already held here; add_relation is told so
+            # it takes only the memory lock (queue → memory order).
+            added = relations.add_relation(
                 row["subject_id"], row["predicate"],
                 {"k": "m", "id": row["target"]["id"]},
                 evidence=row.get("evidence") or "",
                 confidence=row.get("confidence", 0.5),
-                prov="manual", proposal_id=proposal_id, cwd=cwd)
+                prov="manual", proposal_id=proposal_id, cwd=cwd,
+                _queue_lock_held=True)
+            if not added:
+                # The triple already exists in the store. Convergence is only
+                # real if the tagged arc is now observable — otherwise a human
+                # would be told "promoted" while no arc carries this proposal
+                # (GPT code-RT P0-1).
+                if not _store_has_proposal_tag(proposal_id, cwd=cwd):
+                    raise ProposalError(
+                        f"promote refused: the triple exists in the store "
+                        f"without this proposal's tag and could not be "
+                        f"attested (proposal {proposal_id}); inspect with "
+                        f"`foldcrumbs graph doctor` — nothing was marked "
+                        f"promoted")
             # E4-bis step 4: only now mark the queue row.
         if new_status not in PROPOSAL_STATUSES:
             raise ProposalError(f"unknown status {new_status!r}")
@@ -255,13 +315,14 @@ def _decide(proposal_id: str, new_status: str, cwd=None) -> dict:
                     "note": "only rejected proposals can be reopened"}
         row["status"] = new_status
         row["decided_at"] = None if new_status == "pending" else _now_iso()
-        _rewrite(rows)
+        _rewrite(rows, cwd)
     return {"action": "ok", "status": new_status, "proposal_id": proposal_id}
 
 
 def promote(proposal_id: str, cwd=None) -> dict:
     """Human promotion: pending -> store arc (prov=manual) + promoted.
-    Idempotent; crash-safe per E4-bis (arc first, tagged; status second)."""
+    Idempotent; crash-safe per E4-bis (arc first, tagged; status second).
+    Success is declared ONLY when the exact tagged arc is observable."""
     return _decide(proposal_id, "promoted", cwd)
 
 
@@ -292,12 +353,16 @@ def overlay_edges(cwd=None) -> list[dict]:
     mems = store.load_all(cwd)
     alive = {m.id for m in mems if m.status == "active" and not m.is_expired}
     tagged = set()
+    store_triples = set()
     for m in mems:
         for rel in relations.parse(m.relations_json):
             if rel.get("proposal_id"):
                 tagged.add(rel["proposal_id"])
+            t = rel.get("t")
+            if isinstance(t, dict) and t.get("k") == "m":
+                store_triples.add((m.id, rel.get("p"), t.get("id")))
     edges: list[dict] = []
-    for row in load_all():
+    for row in load_all(cwd):
         if row.get("status") != "pending":
             continue
         if row.get("proposal_id") in tagged:
@@ -308,6 +373,17 @@ def overlay_edges(cwd=None) -> list[dict]:
         if subject not in alive or target not in alive:
             continue
         if row.get("predicate") not in relations.PREDICATES:
+            continue
+        # P1-1 (GPT code-RT re-review): the SAME envelope validator as submit
+        # — a malformed queue row (hand-edited evidence blanked out) never
+        # surfaces through the overlay.
+        if not _envelope_valid(row.get("predicate"), row.get("evidence")):
+            continue
+        # GPT code-RT P0-1: if the triple already exists in the store (any
+        # prov — e.g. a direct write that raced the proposal), the store copy
+        # is authoritative; the overlay stays silent so a path never shows
+        # the same edge twice.
+        if (subject, row.get("predicate"), target) in store_triples:
             continue
         edges.append({
             "p": row["predicate"],
@@ -330,9 +406,9 @@ def doctor(cwd=None) -> dict:
     construction — if it is ever observed, report it loudly, never fix it
     silently)."""
     promoted_missing_arc: list[str] = []
-    for row in load_all():
+    for row in load_all(cwd):
         if row.get("status") == "promoted" \
                 and not _store_has_proposal_tag(row["proposal_id"], cwd=cwd):
             promoted_missing_arc.append(row["proposal_id"])
-    return {"counts": counts(),
+    return {"counts": counts(cwd),
             "promoted_missing_arc": promoted_missing_arc}
