@@ -277,6 +277,60 @@ def _find_by_id(mem_id: str,
     raise InvalidRelation(f"no memory with id {mem_id!r}")
 
 
+# --- transit attestation (D3-bis) -------------------------------------------
+
+def _transit_gate(rec: MemoryRecord) -> bool:
+    """D3-bis eligibility gate for a superseded node to be walked through.
+    Four conditions in AND, fail-closed:
+      local (never federated/foreign) + status superseded + not expired
+      + ``transit`` frontmatter exactly the string ``true`` (strip,
+      case-sensitive). Anything else — ``yes``, ``1``, ``TRUE``, empty,
+      absent — is intransit. The attestation itself can only be produced by
+      the CLI (``graph transit``); automatic entry paths strip the key."""
+    if rec.origin_root is not None:          # federated record: not local
+        return False
+    if rec.status != "superseded" or rec.is_expired:
+        return False
+    return str(rec.extra_meta.get("transit", "")).strip() == "true"
+
+
+def set_transit(mem_id: str, on: bool,
+                cwd: str | Path | None = None) -> dict:
+    """Human attestation (D3-bis): make one superseded memory transit-eligible
+    (``on``) or withdraw it (``off``). The ONLY writer of the reserved
+    ``transit`` key, executed under the per-memory lock like ``relate``.
+
+    Refuses visibly: the record must exist, be local, and be superseded —
+    attesting an active memory is meaningless and a likely mistake.
+    Idempotent: ``on`` on an attested record and ``off`` on a bare one are
+    valid no-ops."""
+    rec = _find_by_id(mem_id, cwd)
+    if rec.origin_root is not None:
+        raise InvalidRelation("cannot attest transit on a foreign memory")
+    if rec.status != "superseded":
+        raise InvalidRelation(
+            f"transit attestation only applies to superseded memories "
+            f"(this one is {rec.status}) — nothing was written")
+    has = str(rec.extra_meta.get("transit", "")).strip() == "true"
+    if has == on:
+        return {"action": "noop", "memory_id": mem_id,
+                "transit": has}
+    lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{mem_id}"
+    lock_dir.parent.mkdir(parents=True, exist_ok=True)
+    with federation.file_lock(lock_dir, wait=_LOCK_WAIT_SECONDS) as held:
+        if not held:
+            raise RelationLockBusy(
+                f"memory {mem_id} is locked by another writer; the transit "
+                "attestation was NOT changed (refusing to race)")
+        rec = _find_by_id(mem_id, cwd)     # re-read under the lock
+        if on:
+            rec.extra_meta["transit"] = "true"
+        else:
+            rec.extra_meta.pop("transit", None)
+        store.write_memory(rec, cwd)
+    return {"action": "ok", "memory_id": mem_id, "transit": on}
+
+
 # --- path queries (tri-state BFS) ------------------------------------------
 
 def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
@@ -286,11 +340,21 @@ def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
     """Walk strong edges (target kind 'm') from src to dst. TRI-STATE result,
     never ambiguous (design §BFS):
 
-      FOUND                 — "path": one step per node, edge info included
+      FOUND                 — "path": one step per node, edge info included;
+                              steps on attested superseded nodes carry
+                              "status": "superseded" (never silent)
       NOT_FOUND_EXHAUSTIVE  — search completed; the connection does not exist;
                               "reached" says how many nodes were visited
       TRUNCATED:<reason>    — budget ran out; NOT proof of absence, and the
                               output says so
+
+    Two phases (D3-bis): phase 1 runs on the active-only universe — the exact
+    0.8.0 search. Phase 2 extends the universe with superseded nodes a human
+    attested (``graph transit``), and runs ONLY when phase 1 finished
+    exhaustively (NOT_FOUND_EXHAUSTIVE). A phase-1 TRUNCATED stays TRUNCATED
+    — a budget-limited search is not proof of absence, and falling back could
+    prefer a transit path over an active one hiding beyond the budget.
+    Active-only therefore always wins.
 
     Provenance containment (g2-extraction.md D1, approved amendment):
     by default only ``prov=manual`` arcs are walked — full trust is reserved
@@ -299,12 +363,14 @@ def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
     proposal overlay. There is deliberately NO environment variable for it:
     opting in must stay a conscious act every time (R3 decision 3).
 
-    Node universe (D3/E3): every ACTIVE, non-expired memory is a node no
-    matter which arcs are walked — filters restrict EDGES, never NODES, so
-    the tri-state stays honest. An id absent from the store raises
-    InvalidRelation (MISSING); an id present but superseded/deleted/
-    provisional/expired yields NOT_FOUND_EXHAUSTIVE with an explanatory note
-    — it exists, it is just not traversable.
+    Node universe (D3/E3 + D3-bis): every ACTIVE, non-expired memory is a
+    node no matter which arcs are walked; superseded memories join as
+    transit-only nodes in phase 2 only when attested. deleted/provisional/
+    expired never join — neither as endpoints nor as transit. Filters
+    restrict EDGES, never NODES, so the tri-state stays honest. An id absent
+    from the store raises InvalidRelation (MISSING); an id present but
+    superseded/deleted/provisional/expired yields NOT_FOUND_EXHAUSTIVE with
+    an explanatory note when it is an endpoint.
 
     Neighbors are visited in id order → same store, same path, every time.
     Weak edges (external entities, tags) are never walked here.
@@ -321,6 +387,7 @@ def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
     # E3: endpoints that exist but are not traversable get an explicit
     # NOT_FOUND_EXHAUSTIVE — never MISSING (they exist) and never an
     # InvalidRelation (that would break the tri-state for callers).
+    # Attested superseded nodes remain non-endpoints: transit-only (D3-bis).
     for node_id in (src_id, dst_id):
         m = by_id[node_id]
         if m.status != "active" or m.is_expired:
@@ -331,8 +398,28 @@ def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
                             f"({why}); not MISSING — present, excluded from "
                             "paths by design"}
 
-    universe = {m.id for m in mems
-                if m.status == "active" and not m.is_expired}
+    active_universe = {m.id for m in mems
+                       if m.status == "active" and not m.is_expired}
+    transit_nodes = {m.id for m in mems if _transit_gate(m)}
+
+    res = _bfs(src_id, dst_id, mems, by_id, active_universe, depth,
+               max_nodes, include_inferred, cwd, transit_in_play=False)
+    if res["status"] != "NOT_FOUND_EXHAUSTIVE":
+        return res
+    if not transit_nodes:
+        return res
+    return _bfs(src_id, dst_id, mems, by_id,
+                active_universe | transit_nodes, depth, max_nodes,
+                include_inferred, cwd, transit_in_play=True)
+
+
+def _bfs(src_id: str, dst_id: str, mems, by_id: dict[str, MemoryRecord],
+         universe: set, depth: int, max_nodes: int, include_inferred: bool,
+         cwd, transit_in_play: bool) -> dict:
+    """One bounded BFS over ``universe``. Adjacency keeps an edge only when
+    BOTH endpoints are in the universe — a superseded source used to leak in
+    through reverse adjacency (0.8.0: the filter checked the target only),
+    contradicting D3; checking both sides closes it in every phase."""
 
     def _walkable(rel: dict) -> bool:
         prov = rel.get("prov")
@@ -364,12 +451,17 @@ def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
                 adj.setdefault(m.id, []).append((t["id"], r, True))
                 adj.setdefault(t["id"], []).append((m.id, r, False))
     # E4 overlay: pending proposals, read-only, only behind the explicit
-    # flag. The store is never touched.
+    # flag. The store is never touched. Overlay edges only ever connect
+    # active endpoints (D3-bis: overlay_edges enforces it), so no overlay
+    # arc is incident to a transit node.
     if include_inferred:
         from . import proposals as proposals_mod
         for e in proposals_mod.overlay_edges(cwd):
-            adj.setdefault(e["_subject"], []).append((e["t"]["id"], e, True))
-            adj.setdefault(e["t"]["id"], []).append((e["_subject"], e, False))
+            if e["_subject"] in universe and e["t"]["id"] in universe:
+                adj.setdefault(e["_subject"], []).append(
+                    (e["t"]["id"], e, True))
+                adj.setdefault(e["t"]["id"], []).append(
+                    (e["_subject"], e, False))
     for node in adj:
         adj[node].sort(key=lambda e: (e[0], not e[2]))
 
@@ -401,10 +493,14 @@ def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
         level += 1
 
     if truncated:
+        note = ("budget exhausted — this is NOT proof the path "
+                "does not exist; raise --depth/--max-nodes")
+        if transit_in_play:
+            note += (" (transit nodes were in play: a superseded memory "
+                     "attested with `graph transit`)")
         return {"status": f"TRUNCATED:{truncated}",
                 "reached": len(visited),
-                "note": "budget exhausted — this is NOT proof the path "
-                        "does not exist; raise --depth/--max-nodes"}
+                "note": note}
     return {"status": "NOT_FOUND_EXHAUSTIVE",
             "reached": len(visited),
             "note": "search completed; no connection between these memories"}
@@ -422,12 +518,14 @@ def _assemble(src_id: str, dst_id: str, parent: dict,
     while cur != src_id:
         pred, edge, forward = parent[cur]
         m = by_id[cur]
+        # D3-bis: the node's own status travels with the step — a transit
+        # step on an attested superseded memory is NEVER silent about it.
         steps.append({"id": cur, "title": m.title, "file": m.filename(),
-                      "edge": edge, "forward": forward})
+                      "edge": edge, "forward": forward, "status": m.status})
         cur = pred
     m = by_id[src_id]
     steps.append({"id": src_id, "title": m.title, "file": m.filename(),
-                  "edge": None, "forward": True})
+                  "edge": None, "forward": True, "status": m.status})
     steps.reverse()
     return {"status": "FOUND", "path": steps}
 

@@ -549,6 +549,10 @@ def _cmd_graph(args: argparse.Namespace) -> int:
             print(f"FOUND — {len(res['path'])} steps ({scope}):")
             for step in res["path"]:
                 edge = step.get("edge")
+                # D3-bis: a transit step is never silent about being
+                # superseded (marker in the JSON payload AND here).
+                mark = (" (superseded — transit)"
+                        if step.get("status") == "superseded" else "")
                 if edge:
                     ev = edge.get("e", "")
                     # The edge is stored in one direction; a path may walk
@@ -561,9 +565,10 @@ def _cmd_graph(args: argparse.Namespace) -> int:
                     if edge.get("_overlay"):
                         tail += ", pending proposal"
                     tail += f"; evidence: {ev}" if ev else "; no evidence"
-                    print(f"  → {step['title']} ({step['file']}){tail}]")
+                    print(f"  → {step['title']}{mark} "
+                          f"({step['file']}){tail}]")
                 else:
-                    print(f"  • {step['title']} ({step['file']})")
+                    print(f"  • {step['title']}{mark} ({step['file']})")
             return 0
         if status == "NOT_FOUND_EXHAUSTIVE":
             note = res.get("note", "")
@@ -576,6 +581,29 @@ def _cmd_graph(args: argparse.Namespace) -> int:
         print(f"{status} — visited {res['reached']} memories before the "
               f"budget ran out. {res['note']}")
         return 1
+    if mode == "transit":
+        # D3-bis: the ONLY attestation path for the reserved `transit` key.
+        # Human act, explicit, on one superseded memory at a time.
+        mem = _resolve_memory_ref(args.memory)
+        on = args.transit_action == "on"
+        try:
+            res = relations.set_transit(mem.id, on=on)
+        except relations.InvalidRelation as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+        except relations.RelationLockBusy as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+        if res["action"] == "noop":
+            print(f"nothing to do — transit is already "
+                  f"{'on' if res['transit'] else 'off'} for {mem.title!r}.")
+        elif on:
+            print(f"attested — {mem.title!r} may now act as a transit node "
+                  f"in `graph path` (superseded memories are still never "
+                  f"endpoints).")
+        else:
+            print(f"withdrawn — {mem.title!r} is no longer transit-eligible.")
+        return 0
     if mode == "doctor":
         action = getattr(args, "doctor_action", None) or "report"
         if action != "report":
@@ -841,6 +869,40 @@ def _cmd_roots(args: argparse.Namespace) -> int:
     return 0
 
 
+def _strip_reserved_transit(text: str) -> str:
+    """D3-bis trust boundary: drop the reserved ``transit`` key from one
+    memory's frontmatter, mirroring the parser EXACTLY.
+
+    Two parser behaviours this must match (GPT code-RT):
+    - schema._split_frontmatter partitions each frontmatter line on the
+      FIRST colon and strips the key, so ``transit:``, `` transit:``,
+      ``transit :`` all parse as the key ``transit`` — matching only the
+      literal prefix would let the spaced variants ride through.
+    - a frontmatter WITHOUT its closing ``---`` is still parsed to EOF
+      (body_start = len(parts)), so the strip must treat a missing closing
+      delimiter the same way — never interpret as body what the parser
+      treats as metadata.
+    """
+    if not text.startswith("---"):
+        return text
+    lines = text.split("\n")
+    if lines[0].strip() != "---":
+        return text
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    if end is None:
+        end = len(lines)          # parser: metadata runs to EOF
+    kept = []
+    for ln in lines[1:end]:
+        if ":" in ln and ln.partition(":")[0].strip() == "transit":
+            continue
+        kept.append(ln)
+    return "\n".join([lines[0]] + kept + lines[end:])
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     """Migrate a legacy engram install to foldcrumbs (non-destructive).
 
@@ -883,6 +945,13 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
                 target = dst / item.name
                 if item.is_dir():
                     shutil.copytree(item, target, dirs_exist_ok=True)
+                elif item.suffix == ".md":
+                    # D3-bis trust boundary: migrate is an automatic entry
+                    # path, so the reserved `transit` key never rides in with
+                    # a copied memory.
+                    text = _strip_reserved_transit(item.read_text(
+                        encoding="utf-8"))
+                    target.write_text(text, encoding="utf-8")
                 else:
                     shutil.copy2(item, target)
             print(f"memory: copied {src} -> {dst}")
@@ -1187,6 +1256,15 @@ def build_parser() -> argparse.ArgumentParser:
                       help="also suggest possibly-duplicate entities "
                            "(suggestion only — no automatic merging)")
     gent.set_defaults(func=_cmd_graph)
+    gtr = gsub.add_parser("transit", help="attest (or withdraw) ONE "
+                          "superseded memory as transit-eligible for "
+                          "`graph path` — the only human attestation for "
+                          "walking through superseded nodes (D3-bis)")
+    gtr.add_argument("memory", help="the superseded memory: id, title or "
+                                    "filename stem")
+    gtr.add_argument("transit_action", choices=["on", "off"],
+                     help="on = attest transit eligibility; off = withdraw it")
+    gtr.set_defaults(func=_cmd_graph)
 
     rl = sub.add_parser("relate", help="attach one explicit relation to a "
                         "memory (G1; writes are locked per memory)")

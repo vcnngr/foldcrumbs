@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Transit-only superseded nodes in graph path (D3-bis)** — a superseded
+  memory was previously excluded from every path, which broke causal chains
+  whose middle link had been superseded (a field-tested gap). Now a human
+  may attest ONE superseded memory at a time as transit-eligible:
+  `foldcrumbs graph transit <memory> on|off`. An attested superseded node is
+  walked THROUGH in `graph path` — but is never an endpoint, and every such
+  step is declared (`status: superseded` in the payload, `(superseded —
+  transit)` in the CLI/MCP rendering; never silent). Attestation is
+  fail-closed: only the CLI writes the reserved `transit` key, only on a
+  superseded memory, and the value must be exactly `true`. Automatic entry
+  paths (`import_store`, `migrate`) strip the key so a foreign or imported
+  attestation can never become a local one.
+- **Two-phase path search** — `graph path` runs phase 1 on the active-only
+  universe (exact prior behaviour), then phase 2 over active + attested
+  superseded nodes ONLY when phase 1 finished exhaustively. A phase-1
+  TRUNCATED stays TRUNCATED — so an active-only path always wins, and no
+  result that was correct before changes. Provenance containment is
+  orthogonal: agent/inferred/legacy arcs through a transit node still require
+  `--include-inferred`.
+
 ## [0.8.1] — 2026-08-23
 
 ### Fixed
