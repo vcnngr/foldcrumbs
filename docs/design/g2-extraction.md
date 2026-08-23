@@ -122,27 +122,6 @@ non li attesta. Il transito è una dichiarazione sulla memoria (il nodo),
 ortogonale alla provenienza degli archi (D1): `prov=manual` attesta chi
 scrisse l'arco, non la validità storica del nodo.
 
-**Campo riservato e trust boundary (GPT R2-P0-1).** `transit` è una chiave
-RISERVATA dello schema: il gate di idoneità consulta tre condizioni in AND —
-(1) la memoria è locale (non foreign/federata), (2) status `superseded` e
-non expired, (3) la chiave `transit` esiste con valore esattamente `true`
-(strip, case-sensitive). Ma la condizione (3) da sola non basta a provare
-l'atto umano: le chiavi ignote sopravvivono ai rewrite via `extra_meta` e
-`import_store` conserva i record importati con tutto il frontmatter. Quindi:
-- `graph transit <id> on|off` è l'UNICO mutatore applicativo del campo,
-  eseguito sotto il lock della memoria (stessa disciplina di `relate`),
-  e rifiuta i non-superseded con errore visibile.
-- I percorsi automatici (import, migrate, distill, MCP remember) che
-  incontrano la chiave `transit` in un record NON la creano: se il record
-  importato/migrato porta `transit: true` ma non è già superseded-attestato
-  localmente, la chiave è inerte finché un umano non esegue `graph transit`.
-- L'auto-supersede PRESERVA un'attestazione già valida (transit=true resta
-  transit=true dopo il supersede) ma non ne crea mai una nuova.
-- Editing diretto del file = amministrazione fuori API: foldcrumbs non la
-  distingue, ma il gate fail-closed (status+campo+locale) ne limita il
-  raggio. Il trust boundary dichiarato: solo `graph transit` eseguito
-  localmente su un record superseded è attestazione prodotta da foldcrumbs.
-
 **Semantica del campo (Kimi R2-F2):** il parser flat legge i valori come
 stringhe, quindi il gate è esatto: una memoria è transit-eligible sse la
 chiave `transit` esiste E il suo valore, dopo strip, è esattamente `true`
@@ -158,14 +137,18 @@ senza alcun atto umano locale. `transit` è quindi una chiave RISERVATA dello
 schema, con le regole seguenti:
 - `graph transit <id> on|off` è l'UNICO mutatore applicativo del campo,
   eseguito sotto il lock della memoria (stessa disciplina di `relate`), e
-  rifiuta i non-superseded con errore visibile.
+  rifiuta i non-superseded con errore visibile. Il comando è IDEMPOTENTE:
+  `on` su un record già attestato è un no-op valido (stesso stato, nessun
+  errore), idem `off` su un record senza chiave.
 - I percorsi automatici (import, migrate, distill, MCP remember) che
   incontrano la chiave `transit` in un record NON la creano e NON la
-  attivano: un record importato che porta `transit: true` resta intransit
-  finché un umano non esegue `graph transit` localmente. L'implementazione
-  distingue il gate di lettura (che consulta il campo) dal gate di
-  provenienza (che esige l'atto CLI locale), per esempio azzerando la chiave
-  riservata all'import o marcandone la provenienza non-attestata.
+  attivano. **Meccanismo fissato (opzione a, fail-closed): la chiave
+  riservata viene AZZERATA (rimossa) all'ingresso di ogni percorso
+  automatico** — un record importato che porta `transit: true` entra senza
+  la chiave; l'attestazione richiede `graph transit` locale. Si preferisce
+  l'azzeramento alla marca di provenienza perché perde solo un'informazione
+  non affidabile (un'attestazione che foldcrumbs non può verificare) e non
+  introduce un secondo campo riservato da specificare.
 - L'auto-supersede PRESERVA un'attestazione già valida (transit=true resta
   transit=true dopo il supersede) ma non ne crea mai una nuova.
 - Trust boundary dichiarato: solo `graph transit` eseguito localmente su un
