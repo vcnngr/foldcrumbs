@@ -318,10 +318,142 @@ def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
     return count
 
 
+# --- G2: model-proposed relations (opt-in; queue, never store) ------------- #
+
+_G2_MAX_MEMORIES = 50   # D4: the model sees id + title for at most 50 memories
+
+_G2_PROMPT = (
+    "You are proposing TYPED relations between the memories of a coding "
+    "assistant's store. You are given a list of memories (id + title) and a "
+    "session summary. Propose only relations the summary genuinely supports — "
+    "each must carry an exact evidence quote from the summary. Use ONLY these "
+    "predicates: caused_by (A because of B), depends_on (A needs B), "
+    "supersedes (A replaces B), contradicts (A and B cannot both hold), "
+    "supports (A is evidence for B), refines (A sharpens B), blocks (A "
+    "prevents B), precedes (A before B, temporal only — NOT causation). "
+    "Only connect memory ids from the list. Do not invent ids. Prefer fewer, "
+    "higher-confidence relations. If nothing is supported, reply [].\n"
+    "Reply with a JSON array and nothing else — no commentary, no code "
+    "fences. Each entry: {\"subject_id\": id, \"predicate\": one of the "
+    "predicates, \"target_id\": id, \"evidence\": exact quote from the "
+    "summary, \"confidence\": 0.0-1.0}."
+)
+
+
+def build_g2_question(memories: list, summary: str) -> str:
+    from . import redact
+    lines = "\n".join(
+        f"- id={m.id} :: {m.title}" for m in memories[:_G2_MAX_MEMORIES])
+    return (
+        "Memories in the store:\n"
+        f"{lines}\n\n"
+        "=== SESSION SUMMARY ===\n"
+        f"{redact.scrub((summary or '').strip())[-_MAX_SUMMARY_CHARS:]}\n"
+        "=== END SUMMARY ==="
+    )
+
+
+def parse_g2_relations(answer: str | None) -> list[dict]:
+    """Tolerant parse of the model's G2 answer. Invalid entries are dropped
+    (D4): unknown predicates, non-string ids, missing fields. This is the
+    safety net — the queue re-validates against the live store on submit."""
+    if not answer:
+        return []
+    cleaned = _FENCE_RE.sub("", answer).strip()
+    start, end = cleaned.find("["), cleaned.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        # structured-output object form: {"relations": [...]}
+        obj_start, obj_end = cleaned.find("{"), cleaned.rfind("}")
+        if obj_start == -1 or obj_end <= obj_start:
+            return []
+        try:
+            obj = json.loads(cleaned[obj_start:obj_end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return []
+        raw = obj.get("relations") if isinstance(obj, dict) else None
+        if not isinstance(raw, list):
+            return []
+    else:
+        try:
+            raw = json.loads(cleaned[start:end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    from . import relations as _rel
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        predicate = str(item.get("predicate") or "").strip()
+        subject = str(item.get("subject_id") or "").strip()
+        target = str(item.get("target_id") or "").strip()
+        if predicate not in _rel.PREDICATES:
+            continue
+        if not subject or not target or subject == target:
+            continue
+        evidence = str(item.get("evidence") or "").strip()
+        if not evidence:
+            continue          # no evidence quote = not a supported claim
+        try:
+            confidence = float(item.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        out.append({
+            "subject_id": subject, "predicate": predicate,
+            "target_id": target, "evidence": evidence,
+            "confidence": confidence,
+        })
+    return out
+
+
+def _extract_relations(summary: str, cwd: str | None = None) -> int:
+    """Ask the model for relation proposals and enqueue them. Returns the
+    number WRITTEN (not proposed) — dedup/caps are applied by the queue.
+    No LLM available → 0, silently (fail-soft, like the supersede pass)."""
+    from . import proposals as proposals_mod
+    mems = [m for m in store.load_all(cwd)
+            if m.status == "active" and not m.is_expired]
+    if not mems:
+        return 0
+    answer = llm.chat(
+        messages=[
+            {"role": "system", "content": _G2_PROMPT},
+            {"role": "user", "content": build_g2_question(mems, summary)},
+        ],
+        temperature=0.0,
+        max_tokens=1024,
+    )
+    if not answer:
+        return 0
+    candidates = parse_g2_relations(answer)
+    if not candidates:
+        return 0
+    stats = proposals_mod.submit(candidates, prov="inferred", cwd=cwd)
+    written = stats["written"]
+    if written or stats["capped"]:
+        config.log_event(
+            f"G2: {written} relation proposal(s) enqueued "
+            f"(invalid={stats['invalid']}, dup_store={stats['dup_store']}, "
+            f"dup_queue={stats['dup_queue']}, capped={stats['capped']})")
+    return written
+
+
 def distill_and_store(
     summary: str, cwd: str | None = None, source: str = "foldcrumbs-distill"
 ) -> dict[str, int]:
-    return persist(distill(summary, source=source), cwd)
+    counts = persist(distill(summary, source=source), cwd)
+    # G2 (design g2-extraction.md): with the memories now present, ask the
+    # model to PROPOSE relations between them. Opt-in (FOLDCRUMBS_G2=1);
+    # proposals land in the queue as pending — never in the store directly.
+    # Failures are silent and logged: a dead LLM must not break distill.
+    if config.g2_enabled():
+        try:
+            counts["relations_proposed"] = _extract_relations(summary, cwd)
+        except Exception as exc:  # noqa: BLE001 — distill must never die here
+            counts["relations_proposed"] = 0
+            config.log_event(f"G2 extraction failed (distill unaffected): {exc}")
+    return counts
 
 
 _HANDOFF_HEADER = (

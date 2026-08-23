@@ -127,6 +127,7 @@ def _dedup_key(predicate: str, norm_target: dict) -> str:
 
 def add_relation(mem_id: str, predicate: str, target: dict,
                  evidence: str = "", confidence: float = 0.8,
+                 prov: str | None = None, proposal_id: str | None = None,
                  cwd: str | Path | None = None) -> bool:
     """Attach one relation to memory ``mem_id``. Returns True when the edge
     was written, False when it already existed (same predicate + target).
@@ -134,6 +135,14 @@ def add_relation(mem_id: str, predicate: str, target: dict,
     Raises InvalidRelation for any violation; RelationLockBusy when the
     per-memory lock cannot be acquired — both are VISIBLE refusals, per the
     fail-closed rule.
+
+    Provenance (design g2-extraction.md D1/E5): callers that represent a
+    write path pass ``prov`` explicitly — ``manual`` (human CLI), ``agent``
+    (MCP), ``inferred`` (distill/promotion of a proposal). Non-human
+    provenance caps confidence at 0.5. A write without ``prov`` keeps the
+    legacy evidence-rule shape (prov absent = later migrated as ``legacy``,
+    never silently manual). ``proposal_id`` tags arcs materialized by the
+    proposal queue (E4-bis crash-recovery marker).
 
     Evidence rule (design §Trattamento dell'evidence): a direct write without
     evidence is accepted but records its own uncertainty — confidence capped
@@ -144,16 +153,25 @@ def add_relation(mem_id: str, predicate: str, target: dict,
         raise InvalidRelation(
             f"unknown predicate {predicate!r}; valid: "
             + ", ".join(sorted(PREDICATES)))
+    if prov is not None and prov not in ("manual", "agent", "inferred"):
+        raise InvalidRelation(f"unknown provenance {prov!r}")
     norm_t = _norm_target_shape(target)
 
     evidence = (evidence or "").strip()
     rel: dict = {"p": predicate, "t": norm_t,
                  "c": round(float(confidence), 2), "d": _now_iso()}
+    if prov is not None:
+        rel["prov"] = prov
+        if prov != "manual":
+            rel["c"] = min(rel["c"], 0.5)
     if not evidence:
         rel["c"] = min(rel["c"], 0.5)
-        rel["prov"] = "inferred"
+        if prov is None:
+            rel["prov"] = "inferred"
     else:
         rel["e"] = evidence
+    if proposal_id:
+        rel["proposal_id"] = proposal_id
 
     lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{mem_id}"
     lock_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -194,6 +212,7 @@ def _find_by_id(mem_id: str,
 
 def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
               max_nodes: int = DEFAULT_MAX_NODES,
+              include_inferred: bool = False,
               cwd: str | Path | None = None) -> dict:
     """Walk strong edges (target kind 'm') from src to dst. TRI-STATE result,
     never ambiguous (design §BFS):
@@ -203,6 +222,20 @@ def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
                               "reached" says how many nodes were visited
       TRUNCATED:<reason>    — budget ran out; NOT proof of absence, and the
                               output says so
+
+    Provenance containment (g2-extraction.md D1, approved amendment):
+    by default only ``prov=manual`` arcs are walked — full trust is reserved
+    for what a human attested. ``include_inferred=True`` is an explicit
+    per-query choice to also walk agent/inferred/legacy arcs and the pending
+    proposal overlay. There is deliberately NO environment variable for it:
+    opting in must stay a conscious act every time (R3 decision 3).
+
+    Node universe (D3/E3): every ACTIVE, non-expired memory is a node no
+    matter which arcs are walked — filters restrict EDGES, never NODES, so
+    the tri-state stays honest. An id absent from the store raises
+    InvalidRelation (MISSING); an id present but superseded/deleted/
+    provisional/expired yields NOT_FOUND_EXHAUSTIVE with an explanatory note
+    — it exists, it is just not traversable.
 
     Neighbors are visited in id order → same store, same path, every time.
     Weak edges (external entities, tags) are never walked here.
@@ -216,20 +249,52 @@ def find_path(src_id: str, dst_id: str, depth: int = DEFAULT_DEPTH,
     if dst_id not in by_id:
         raise InvalidRelation(f"no memory with id {dst_id!r}")
 
-    # Adjacency: strong, existing targets only, walked BOTH ways — a path
-    # query answers "how are these connected", not "was the edge stored in
-    # this direction". Direction is never lost: every step carries whether
-    # it follows the edge as stored or against it, and the CLI says so.
-    # A dangling target is skipped here and surfaced by `graph doctor`,
-    # never followed in silence.
+    # E3: endpoints that exist but are not traversable get an explicit
+    # NOT_FOUND_EXHAUSTIVE — never MISSING (they exist) and never an
+    # InvalidRelation (that would break the tri-state for callers).
+    for node_id in (src_id, dst_id):
+        m = by_id[node_id]
+        if m.status != "active" or m.is_expired:
+            why = (f"status={m.status}" if m.status != "active"
+                   else "expired")
+            return {"status": "NOT_FOUND_EXHAUSTIVE", "reached": 0,
+                    "note": f"node {node_id} exists but is not traversable "
+                            f"({why}); not MISSING — present, excluded from "
+                            "paths by design"}
+
+    universe = {m.id for m in mems
+                if m.status == "active" and not m.is_expired}
+
+    def _walkable(rel: dict) -> bool:
+        prov = rel.get("prov")
+        if prov == "manual":
+            return True
+        # include_inferred walks everything: agent, inferred, legacy
+        # (prov absent — E5), and overlay pending proposals. Default walks
+        # manual ONLY: legacy/inferred must be opted into, per query.
+        return include_inferred
+
+    # Adjacency: strong, existing, traversable targets only, walked BOTH
+    # ways — a path query answers "how are these connected", not "was the
+    # edge stored in this direction". Direction is never lost: every step
+    # carries whether it follows the edge as stored or against it, and the
+    # CLI says so. A dangling target is skipped here and surfaced by
+    # `graph doctor`, never followed in silence.
     adj: dict[str, list[tuple[str, dict, bool]]] = {}
     for m in mems:
         for r in parse(m.relations_json):
             t = r.get("t")
             if isinstance(t, dict) and t.get("k") == "m" \
-                    and t.get("id") in by_id:
+                    and t.get("id") in universe and _walkable(r):
                 adj.setdefault(m.id, []).append((t["id"], r, True))
                 adj.setdefault(t["id"], []).append((m.id, r, False))
+    # E4 overlay: pending proposals, read-only, only behind the explicit
+    # flag. The store is never touched.
+    if include_inferred:
+        from . import proposals as proposals_mod
+        for e in proposals_mod.overlay_edges(cwd):
+            adj.setdefault(e["_subject"], []).append((e["t"]["id"], e, True))
+            adj.setdefault(e["t"]["id"], []).append((e["_subject"], e, False))
     for node in adj:
         adj[node].sort(key=lambda e: (e[0], not e[2]))
 
@@ -293,6 +358,61 @@ def _assemble(src_id: str, dst_id: str, parent: dict,
 
 
 # --- maintenance views -----------------------------------------------------
+
+def legacy_arcs(cwd: str | Path | None = None) -> list[dict]:
+    """E5: arcs written before the provenance taxonomy existed — no ``prov``
+    field. They are NOT mapped to manual automatically (that would attest an
+    author we never observed); doctor counts them and a human attests each
+    one explicitly via ``promote_legacy_arc``. Sorted for determinism."""
+    out: list[dict] = []
+    for m in store.load_all(cwd):
+        for r in parse(m.relations_json):
+            if "prov" in r:
+                continue
+            t = r.get("t")
+            out.append({
+                "memory_id": m.id, "memory_title": m.title,
+                "predicate": r.get("p"),
+                "target_id": t.get("id") if isinstance(t, dict)
+                and t.get("k") == "m" else None,
+                "target": t,
+            })
+    out.sort(key=lambda a: (a["memory_id"], str(a["predicate"]),
+                            str(a["target_id"])))
+    return out
+
+
+def promote_legacy_arc(mem_id: str, predicate: str, target: dict,
+                       cwd: str | Path | None = None) -> bool:
+    """E5: a human attests one legacy arc as their own. Sets prov=manual in
+    place (read-modify-write under the memory lock, like every relation
+    write). Returns True when attested, False when nothing matched."""
+    lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{mem_id}"
+    lock_dir.parent.mkdir(parents=True, exist_ok=True)
+    norm_t = _norm_target_shape(target)
+    key = _dedup_key(predicate, norm_t)
+    with federation.file_lock(lock_dir, wait=_LOCK_WAIT_SECONDS) as held:
+        if not held:
+            raise RelationLockBusy(
+                f"memory {mem_id} is locked by another writer")
+        rec = _find_by_id(mem_id, cwd)
+        rels = parse(rec.relations_json)
+        changed = False
+        for r in rels:
+            if "prov" in r or r.get("p") != predicate:
+                continue
+            try:
+                rkey = _dedup_key(r.get("p", ""), _norm_target_shape(r.get("t", {})))
+            except InvalidRelation:
+                continue          # malformed target: doctor territory, not ours
+            if rkey == key:
+                r["prov"] = "manual"
+                changed = True
+        if changed:
+            rec.relations_json = canonical(rels)
+            store.write_memory(rec, cwd)
+        return changed
+
 
 def doctor(cwd: str | Path | None = None) -> dict:
     """Surface graph rot instead of hiding it: dangling memory targets

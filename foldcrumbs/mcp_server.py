@@ -26,6 +26,7 @@ from typing import Any
 
 from . import __version__, llm, store
 from .profile import format_context_block
+from .relations import PREDICATES
 from .schema import VALID_TYPES, MemoryRecord
 
 SERVER_NAME = "foldcrumbs"
@@ -104,8 +105,49 @@ TOOLS = [
                           "description": "Max hops (default 3, hard cap 4)."},
                 "max_nodes": {"type": "integer",
                               "description": "Max memories to visit (default 500)."},
+                "include_inferred": {
+                    "type": "boolean",
+                    "description": "Also walk agent/inferred/legacy arcs and "
+                                   "pending proposals. Default walks only "
+                                   "human-attested (manual) arcs — set this "
+                                   "only when you explicitly want model-"
+                                   "suggested connections."},
             },
             "required": ["from", "to"],
+        },
+    },
+    {
+        "name": "relate",
+        "description": (
+            "Propose a typed relation between two memories (or from a memory "
+            "to an external entity). Recorded with provenance 'agent' and "
+            "confidence capped at 0.5 — model-suggested edges are NOT walked "
+            "by graph_path unless the user explicitly opts in "
+            "(include_inferred). Use when the transcript makes a durable "
+            "link explicit (caused_by, supersedes, depends_on...). Do not "
+            "invent evidence: pass the exact supporting quote."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory": {"type": "string",
+                           "description": "Source memory: exact title, id, or filename stem."},
+                "predicate": {"type": "string",
+                              "enum": sorted(PREDICATES),
+                              "description": "Relation type."},
+                "to_memory": {"type": "string",
+                              "description": "Target memory (title/id/stem). "
+                                             "Use this OR to_entity, not both."},
+                "to_entity": {"type": "string",
+                              "description": "Target external entity label."},
+                "namespace": {"type": "string",
+                              "description": "Namespace for an external entity (default general)."},
+                "evidence": {"type": "string",
+                             "description": "Exact supporting quote from the transcript."},
+                "confidence": {"type": "number",
+                               "description": "0.0-1.0 (capped at 0.5 for agents)."},
+            },
+            "required": ["memory", "predicate"],
         },
     },
     {
@@ -250,7 +292,8 @@ def tool_graph_path(args: dict[str, Any]) -> str:
     res = relations.find_path(
         src.id, dst.id,
         depth=int(args.get("depth", 3)),
-        max_nodes=int(args.get("max_nodes", 500)))
+        max_nodes=int(args.get("max_nodes", 500)),
+        include_inferred=bool(args.get("include_inferred", False)))
     status = res["status"]
     if status == "FOUND":
         lines = [f"FOUND — {len(res['path'])} steps:"]
@@ -260,21 +303,76 @@ def tool_graph_path(args: dict[str, Any]) -> str:
                 arrow = "--" if step.get("forward", True) else "<--"
                 ev = edge.get("e", "")
                 tail = f"[{arrow} {edge['p']}, conf {edge['c']}"
+                prov = edge.get("prov")
+                if prov and prov != "manual":
+                    tail += f", {prov}"
+                if edge.get("_overlay"):
+                    tail += ", pending proposal"
                 tail += f"; evidence: {ev}" if ev else "; no evidence"
                 lines.append(f"  -> {step['title']} ({step['file']}) {tail}]")
             else:
                 lines.append(f"  * {step['title']} ({step['file']})")
         return "\n".join(lines)
     if status == "NOT_FOUND_EXHAUSTIVE":
-        return (f"NOT_FOUND_EXHAUSTIVE — search completed, no connection "
-                f"between these memories. Visited {res['reached']} memories.")
+        note = res.get("note", "")
+        out = (f"NOT_FOUND_EXHAUSTIVE — search completed, no connection "
+               f"between these memories. Visited {res['reached']} memories.")
+        if note:
+            out += f" Note: {note}"
+        return out
     return (f"{status} — visited {res['reached']} memories before the budget "
             f"ran out. {res['note']}")
 
 
+def tool_relate(args: dict[str, Any]) -> str:
+    """Agent-proposed relation (D1: prov=agent, confidence capped at 0.5).
+
+    The arc is written to the store immediately but is NOT default-traversable
+    in graph_path — it is a second-class citizen until a human promotes it.
+    Refusals are explicit, never silent.
+    """
+    from . import relations
+    try:
+        src = _resolve_local_ref(str(args["memory"]))
+    except ValueError as exc:
+        return str(exc)
+    predicate = str(args.get("predicate", ""))
+    to_memory = str(args.get("to_memory") or "")
+    to_entity = str(args.get("to_entity") or "")
+    if to_memory and to_entity:
+        return "refused: pass exactly one of to_memory / to_entity."
+    if to_memory:
+        try:
+            dst = _resolve_local_ref(to_memory)
+        except ValueError as exc:
+            return str(exc)
+        target = {"k": "m", "id": dst.id}
+    elif to_entity:
+        target = {"k": "x", "ns": str(args.get("namespace") or "general"),
+                  "l": to_entity}
+    else:
+        return "refused: pass one of to_memory / to_entity."
+    try:
+        added = relations.add_relation(
+            src.id, predicate, target,
+            evidence=str(args.get("evidence") or ""),
+            confidence=float(args.get("confidence", 0.5)),
+            prov="agent")           # D1: agents are capped, never manual
+    except relations.InvalidRelation as exc:
+        return f"refused: {exc}"
+    except relations.RelationLockBusy as exc:
+        return f"refused: {exc}"
+    if added:
+        return ("relation added with provenance 'agent' (confidence capped "
+                "0.5). It is NOT walked by graph_path unless include_inferred "
+                "is set — a human can promote it to manual via "
+                "`foldcrumbs graph doctor`.")
+    return "relation already present — nothing written."
+
+
 _DISPATCH = {"remember": tool_remember, "recall": tool_recall,
              "answer": tool_answer, "forget": tool_forget,
-             "graph_path": tool_graph_path}
+             "graph_path": tool_graph_path, "relate": tool_relate}
 
 
 # --- JSON-RPC / MCP plumbing ----------------------------------------------- #
