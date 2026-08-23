@@ -204,9 +204,13 @@ class TestCrashRecovery(G2Store):
         row = proposals.load_all()[0]
         pid = row["proposal_id"]
         # Simulate the crash: the arc made it to the store, the JSONL didn't.
+        # This is the INTERNAL promote write (proposals._decide path), which
+        # holds the queue lock and is the one deliberate exception to the
+        # queued-triple refusal — it materializes exactly that pending row.
         relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
                                evidence="e", confidence=0.4,
-                               prov="manual", proposal_id=pid)
+                               prov="manual", proposal_id=pid,
+                               _queue_lock_held=True)
         self.assertEqual(proposals.get(pid)["status"], "pending")
         # Retry: add_relation dedups (returns False), status converges.
         res = proposals.promote(pid)
@@ -222,7 +226,8 @@ class TestCrashRecovery(G2Store):
         proposals.submit([self._triple(a.id, "caused_by", b.id, evidence="e")])
         pid = proposals.load_all()[0]["proposal_id"]
         relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
-                               evidence="e", prov="manual", proposal_id=pid)
+                               evidence="e", prov="manual", proposal_id=pid,
+                               _queue_lock_held=True)
         self.assertEqual(proposals.overlay_edges(), [])
 
     def test_doctor_detects_promoted_without_arc(self):
@@ -555,7 +560,9 @@ class TestMcpRelate(G2Store):
 
 class TestP01Serialization(G2Store):
     """P0-1: submit/promote and direct writers must serialize on one lock;
-    promote must never declare success without the exact tagged arc."""
+    promote must never declare success without the exact tagged arc; and the
+    invariant is "one representation, not two" — a triple already queued as
+    an OPEN human matter (pending/rejected) refuses a direct write."""
 
     def _pending(self):
         a, b = self._put("A"), self._put("B")
@@ -563,14 +570,106 @@ class TestP01Serialization(G2Store):
                                        evidence="the cause")])
         return a, b, proposals.load_all()[0]["proposal_id"]
 
-    def test_promote_after_untagged_direct_write_refuses_visibly(self):
-        """GPT's second counterexample: pending proposal + untagged direct
-        arc on the same triple + promote. The old code marked promoted
-        anyway (doctor then screamed promoted_missing_arc). The fix:
-        refuse visibly, leave the queue row pending."""
+    def _inject_untagged_arc(self, rec, predicate, target_id, prov="agent"):
+        """Write an arc straight into the store record, bypassing the queue
+        (simulates a pre-G2 legacy arc or a half-finished write)."""
+        rels = relations.parse(rec.relations_json)
+        rels.append({"p": predicate, "t": {"k": "m", "id": target_id},
+                     "c": 0.5, "d": relations._now_iso(), "prov": prov,
+                     "e": "direct"})
+        rec.relations_json = relations.canonical(rels)
+        store.write_memory(rec)
+
+    def test_direct_write_refused_while_pending_in_queue(self):
+        """GPT re-review, P0-1 residual, submit→writer interleaving: once a
+        proposal is pending, a direct write of the same triple must be
+        refused visibly — answering an undecided human question silently
+        would leave queue + store both holding the edge."""
         a, b, pid = self._pending()
-        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
-                               evidence="direct", prov="agent")
+        with self.assertRaises(relations.InvalidRelation) as ctx:
+            relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                                   evidence="direct", prov="agent")
+        self.assertIn("proposal queue", str(ctx.exception))
+        rec = next(m for m in store.load_all() if m.id == a.id)
+        self.assertEqual(relations.parse(rec.relations_json), [])
+        self.assertEqual(proposals.get(pid)["status"], "pending")
+
+    def test_direct_write_refused_while_rejected_in_queue(self):
+        """A rejected triple is persistently suppressed (E1); a direct write
+        trying to revive it bypassing the human is refused the same way."""
+        a, b, pid = self._pending()
+        proposals.reject(pid)
+        with self.assertRaises(relations.InvalidRelation):
+            relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                                   evidence="direct", prov="agent")
+        rec = next(m for m in store.load_all() if m.id == a.id)
+        self.assertEqual(relations.parse(rec.relations_json), [])
+
+    def test_direct_write_after_promote_keeps_false_contract(self):
+        """A promoted row is NOT an open human matter: its arc is already in
+        the store, so the historical False contract applies (no exception)."""
+        a, b, pid = self._pending()
+        proposals.promote(pid)
+        ok = relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                                    evidence="direct", prov="agent")
+        self.assertFalse(ok)
+
+    def test_submit_first_then_writer_serialize_to_queue_only(self):
+        """Deterministic barrier for the submit→writer order: submit holds the
+        queue lock mid-flight; the writer blocks on the same lock, then — once
+        the proposal is committed — finds the triple in the queue and is
+        refused. Oracle: queue=1 pending, store=0, writer refused."""
+        import threading
+        a, b = self._put("A"), self._put("B")
+        submit_holds = threading.Event()
+        release = threading.Event()
+        outcome = {}
+
+        real_check = proposals._store_has_triple
+
+        def holds_lock_then(*args, **kw):
+            submit_holds.set()
+            release.wait(timeout=10)
+            return real_check(*args, **kw)
+
+        def writer():
+            try:
+                relations.add_relation(a.id, "caused_by",
+                                       {"k": "m", "id": b.id},
+                                       evidence="direct", prov="agent")
+                outcome["writer"] = "wrote"
+            except relations.InvalidRelation:
+                outcome["writer"] = "refused"
+
+        with mock.patch.object(proposals, "_store_has_triple",
+                               holds_lock_then):
+            t_submit = threading.Thread(
+                target=lambda: proposals.submit(
+                    [self._triple(a.id, "caused_by", b.id,
+                                  evidence="the cause")]))
+            t_submit.start()
+            self.assertTrue(submit_holds.wait(timeout=10),
+                            "submit never reached the queue lock")
+            t_writer = threading.Thread(target=writer)
+            t_writer.start()
+            release.set()
+            t_submit.join(timeout=15)
+            t_writer.join(timeout=15)
+
+        self.assertEqual(outcome.get("writer"), "refused")
+        self.assertEqual(proposals.counts()["pending"], 1)
+        rec = next(m for m in store.load_all() if m.id == a.id)
+        self.assertEqual(relations.parse(rec.relations_json), [],
+                         "writer must not have landed an arc")
+
+    def test_promote_after_untagged_direct_write_refuses_visibly(self):
+        """GPT's second counterexample (E4-bis): a pending proposal whose
+        triple already exists in the store as an UNTAGGED arc must not be
+        marked promoted. Construct the legacy/half-written arc directly, then
+        promote — it must refuse and leave the row pending."""
+        a, b, pid = self._pending()
+        rec = next(m for m in store.load_all() if m.id == a.id)
+        self._inject_untagged_arc(rec, "caused_by", b.id)
         with self.assertRaises(proposals.ProposalError) as ctx:
             proposals.promote(pid)
         self.assertIn("could not be attested", str(ctx.exception))
@@ -578,17 +677,18 @@ class TestP01Serialization(G2Store):
         self.assertEqual(proposals.doctor()["promoted_missing_arc"], [])
 
     def test_overlay_hides_pending_when_store_has_the_triple(self):
-        """GPT: with include_inferred the same triple appeared once from the
+        """With include_inferred the same triple must not appear once from the
         store and once from the overlay. Store copy is authoritative; the
-        overlay stays silent for that triple."""
+        overlay stays silent. Inject the untagged arc directly (a direct write
+        while pending is now refused by design)."""
         a, b, pid = self._pending()
-        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
-                               evidence="direct", prov="agent")
+        rec = next(m for m in store.load_all() if m.id == a.id)
+        self._inject_untagged_arc(rec, "caused_by", b.id)
         self.assertEqual(proposals.overlay_edges(), [])
 
     def test_submit_and_direct_write_serialize(self):
-        """Both writers take the queue lock; the triple lands exactly once,
-        as either a queued proposal OR a store arc — never both."""
+        """writer→submit order: the direct arc lands first; submit then sees
+        it in the store and dedups. The triple lands exactly once."""
         a, b = self._put("A"), self._put("B")
         relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
                                evidence="direct", prov="agent")
@@ -787,6 +887,29 @@ class TestP1Envelope(G2Store):
             [self._triple(a.id, "caused_by", b.id, evidence="   ")])
         self.assertEqual(stats["written"], 0)
         self.assertEqual(stats["invalid"], 1)
+
+    def test_overlay_drops_whitespace_evidence_row(self):
+        """GPT re-review P1-1, overlay side: the SAME validator runs on the
+        way out. A queue row whose evidence was hand-edited to whitespace
+        never enters the overlay — malformed rows stay silent."""
+        a, b = self._put("A"), self._put("B")
+        proposals.submit([self._triple(a.id, "caused_by", b.id,
+                                       evidence="the cause")])
+        pid = proposals.load_all()[0]["proposal_id"]
+        # Hand-corrupt the queue file: blank the evidence on disk.
+        path = proposals.queue_path()
+        rows = [json.loads(line) for line in
+                path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        rows[0]["evidence"] = "   "
+        path.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
+                                for r in rows), encoding="utf-8")
+        self.assertEqual(proposals.overlay_edges(), [],
+                         "malformed row must not surface through overlay")
+        # And the pending count still sees it (the row is there, just
+        # un-surfaceable through paths).
+        self.assertEqual(proposals.counts()["pending"], 1)
+        self.assertEqual(proposals.get(pid)["status"], "pending")
 
 
 if __name__ == "__main__":

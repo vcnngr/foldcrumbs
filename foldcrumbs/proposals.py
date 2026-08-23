@@ -160,6 +160,19 @@ def _store_has_proposal_tag(proposal_id: str, cwd=None) -> bool:
 
 # --- writing (always under the queue lock, E2 + P0-1 serialization) ---------
 
+def _envelope_valid(predicate: str | None, evidence: str | None) -> bool:
+    """ONE validator for the proposal envelope, used on the way in (submit)
+    and on the way out (overlay_edges) alike (GPT code-RT re-review P1-1):
+    a known predicate and a non-empty evidence quote. A queue row that is
+    malformed on disk (hand-edited, truncated) is dropped from the overlay —
+    never surfaced. A direct write without evidence is a different shape
+    (relations.py records its own uncertainty, prov=inferred) and does not
+    go through this validator."""
+    from . import relations
+    return bool(predicate) and predicate in relations.PREDICATES \
+        and bool(str(evidence or "").strip())
+
+
 def submit(raw: list[dict], prov: str = "inferred",
            cap: int = MAX_PER_SESSION, cwd=None) -> dict:
     """Validate + enqueue model proposals. Returns measurable counts (E6).
@@ -192,9 +205,9 @@ def submit(raw: list[dict], prov: str = "inferred",
             stats["invalid"] += 1
             continue
         # P1-1 (GPT code-RT): a model proposal without an evidence quote is
-        # not a supported claim — the envelope validator is the same on the
-        # way in as the overlay's on the way out.
-        if not evidence:
+        # not a supported claim — the envelope validator is ONE function,
+        # shared with overlay_edges on the way out.
+        if not _envelope_valid(predicate, evidence):
             stats["invalid"] += 1
             continue
         try:
@@ -360,6 +373,11 @@ def overlay_edges(cwd=None) -> list[dict]:
         if subject not in alive or target not in alive:
             continue
         if row.get("predicate") not in relations.PREDICATES:
+            continue
+        # P1-1 (GPT code-RT re-review): the SAME envelope validator as submit
+        # — a malformed queue row (hand-edited evidence blanked out) never
+        # surfaces through the overlay.
+        if not _envelope_valid(row.get("predicate"), row.get("evidence")):
             continue
         # GPT code-RT P0-1: if the triple already exists in the store (any
         # prov — e.g. a direct write that raced the proposal), the store copy

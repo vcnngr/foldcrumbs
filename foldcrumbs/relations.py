@@ -191,8 +191,30 @@ def _add_relation_locked(mem_id: str, rel: dict, norm_t: dict,
                          queue_lock_held: bool) -> bool:
     """The lock dance, split out so the queue lock wraps everything:
     queue lock first (unless the caller — proposals._decide — holds it
-    already), memory lock inside. Never the reverse."""
+    already), memory lock inside. Never the reverse.
+
+    Queue-side dedup (GPT code-RT re-review, P0-1 residual): holding the
+    queue lock serializes the writers in time, but the invariant is
+    "one representation, not two". So the PUBLIC path, once it holds the
+    queue lock, also consults the queue: if the same triple is already
+    queued in ANY status, the direct write is refused visibly — a pending
+    proposal is an undecided human question, and silently answering it with
+    a store arc would leave both representations alive. The internal
+    promote path (queue lock already held, tagged with proposal_id) is the
+    one deliberate exception: it materializes exactly that pending row."""
     from . import proposals as proposals_mod
+
+    def _queue_has_triple() -> bool:
+        """True when the triple sits in the queue as an OPEN human matter
+        (pending or rejected). A promoted row is not open: its arc already
+        lives in the store and the store-side check below answers it with
+        the historical False contract."""
+        if norm_t.get("k") != "m":
+            return False
+        key = (mem_id, rel["p"], norm_t.get("id"))
+        return any(proposals_mod._dedup_key(r) == key
+                   and r.get("status") in ("pending", "rejected")
+                   for r in proposals_mod.load_all(cwd))
 
     def _write_under_memory_lock() -> bool:
         lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{mem_id}"
@@ -219,6 +241,8 @@ def _add_relation_locked(mem_id: str, rel: dict, norm_t: dict,
         return True
 
     if queue_lock_held:
+        # Internal promote path: it materializes exactly the pending row it
+        # is materializing — the queue-side check does not apply to it.
         return _write_under_memory_lock()
     with federation.file_lock(proposals_mod._lock_path(cwd),
                               wait=_LOCK_WAIT_SECONDS) as held:
@@ -226,6 +250,17 @@ def _add_relation_locked(mem_id: str, rel: dict, norm_t: dict,
             raise RelationLockBusy(
                 "proposal queue is locked by another writer; the relation "
                 "was NOT added (refusing to race)")
+        # GPT code-RT re-review, P0-1 residual: a queued triple (ANY status)
+        # is a decided or undecided human matter. A direct write answering
+        # it silently would leave queue + store holding the same triple —
+        # two representations. Refuse visibly; the human decides via
+        # promote/reject/reopen instead.
+        if _queue_has_triple():
+            raise InvalidRelation(
+                "this triple is already in the proposal queue; a direct "
+                "write would leave two representations of the same edge — "
+                "decide it with `foldcrumbs proposals promote/reject` "
+                "(nothing was written)")
         return _write_under_memory_lock()
 
 
