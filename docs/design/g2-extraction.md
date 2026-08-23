@@ -91,6 +91,51 @@ Regole per graph_path:
 - Nessun arco viene copiato, spostato o cancellato su supersede/expire
   (confermato da REV-1, D6).
 
+### D3-bis — Transit-only per le memorie superseded (emendamento, field test
+2026-08-23, approvato dal titolare come direzione per la 0.9.0)
+
+[Assorbe: finding del field test G2 — catene causali reali si spezzano
+attraverso nodi superseded; D3 li esclude dall'universo, quindi un path
+A --precedes--> S --supersedes--> B risponde NOT_FOUND_EXHAUSTIVE anche
+quando la catena esiste ed è interamente attestata.]
+
+Il supersede è l'unico status che NON rappresenta un'obiezione alla memoria:
+una memoria superseded è stata vera, poi sostituita — il suo contenuto e le
+sue relazioni restano fattualmente corretti nel momento in cui furono scritti.
+deleted/provisional/expired invece sì (ritrattato / mai confermato / non più
+valido), e restano esclusi come oggi.
+
+Regole:
+- **Le memorie con status=superseded (non expired) entrano nell'universo
+  della BFS come nodi transit-only**: archi entranti e uscenti sono
+  attraversabili secondo le regole di prov vigenti (default manual-only,
+  include_inferred opt-in), ma il nodo NON può essere estremo di query.
+- **Gli estremi restano active+non-expired, come oggi**: `graph_path` con
+  src o dst superseded risponde NOT_FOUND_EXHAUSTIVE con nota esplicativa
+  (comportamento E3 invariato per gli estremi).
+- **L'output dichiara il transito**: ogni step FOUND su nodo superseded
+  porta `"status": "superseded"` e il rendering CLI/MCP lo marca (es.
+  `(superseded — transit)`). L'utente vede sempre che il cammino attraversa
+  una memoria sostituita; mai silenzioso.
+- **D1 invariato**: il containment di prov è ortogonale. Un arco
+  agent/inferred/legacy verso o attraverso un nodo superseded resta
+  attraversabile solo con include_inferred.
+- **Overlay proposte**: una pending proposal con estremo superseded è
+  scartata da overlay_edges (gli estremi proposti devono essere active);
+  il transito di overlay su nodo superseded esistente è permesso alle stesse
+  condizioni di prov dell'overlay.
+- **Nessun cambiamento agli archi**: nessun arco copiato/spostato/cancellato
+  (D6 confermato). Gli archi da/verso memorie superseded esistono già nei
+  frontmatter; prima erano semplicemente irraggiungibili.
+
+Tri-stato: invariato. FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED mantengono i
+loro significati; cambia solo l'insieme dei nodi attraversabili.
+
+Criterio di accettazione: le catene causali del field test (A --precedes-->
+S_superseded --supersedes--> B) rispondono FOUND con i prov corretti, e
+NOT_FOUND_EXHAUSTIVE se gli archi sono solo non-manual e il flag è assente.
+Estremi superseded: ancora NOT_FOUND_EXHAUSTIVE con nota.
+
 ## D4 — Formato eseguibile dal parser esistente
 
 [Assorbe: GPT-P0-4 da round 1, confermato in R2]
