@@ -5,6 +5,23 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] — 2026-08-23
+
+### Fixed
+
+- **graph path universe leak** — `foldcrumbs graph path` could walk THROUGH
+  superseded (and deleted/provisional) memories when their arcs happened to
+  be stored pointing outward from them: the adjacency filter checked only
+  the edge's target against the node universe, never its source, so an
+  excluded memory entered the graph through reverse adjacency. The answer
+  depended on which direction the arc was stored in — the same chain was
+  FOUND or NOT_FOUND depending on storage direction, contradicting D3
+  ("arcs touching excluded nodes are skipped"). The filter now checks both
+  endpoints; excluded nodes never contribute adjacency. No result that was
+  correct before changes; only the leaked paths disappear (which is what D3
+  always promised). Regression tests: `tests/test_relations.py
+  ::TestUniverseLeak` (born red against 0.8.0).
+
 ## [0.8.0] — 2026-08-23
 
 ### Added
@@ -451,7 +468,8 @@ can now be forgotten, superseded, and merged across stores.
 - Trust/decay model and typed-memory categories adapted from
   [memanto](https://github.com/moorcheh-ai/memanto) (MIT).
 
-[Unreleased]: https://github.com/vcnngr/foldcrumbs/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/vcnngr/foldcrumbs/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/vcnngr/foldcrumbs/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/vcnngr/foldcrumbs/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/vcnngr/foldcrumbs/compare/v0.6.1...v0.7.0
 [0.5.0]: https://github.com/vcnngr/foldcrumbs/compare/v0.4.0...v0.5.0
