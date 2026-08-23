@@ -119,6 +119,19 @@ non li attesta. Il transito è una dichiarazione sulla memoria (il nodo),
 ortogonale alla provenienza degli archi (D1): `prov=manual` attesta chi
 scrisse l'arco, non la validità storica del nodo.
 
+**Semantica del campo (Kimi R2-F2):** il parser flat legge i valori come
+stringhe, quindi il gate è esatto: una memoria è transit-eligible sse la
+chiave `transit` esiste E il suo valore, dopo strip, è esattamente `true`
+(case-sensitive). Ogni altro valore — `false`, `yes`, `1`, vuoto, assente —
+è intransit. Nessun coercimento, nessun case-insensitive: fail-closed.
+
+**Il comando rifiuta i non-superseded (Kimi R2-F1):** `graph transit <id>
+on|off` rifiuta con errore esplicito qualsiasi memoria il cui status non è
+`superseded` (fail-closed anche sul comando: attestare il transito su una
+memoria attiva non ha significato). Il campo `transit` presente per errore
+su memorie di altro status è inerte: il gate consulta lo status prima del
+campo, quindi non può avere effetto.
+
 Regole:
 1. **Universo ampliato = active + superseded transit-attestati**, tutti
    non-expired. I superseded transit-eligible sono nodi transit-only:
