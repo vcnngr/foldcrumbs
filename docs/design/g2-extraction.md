@@ -91,7 +91,7 @@ Regole per graph_path:
 - Nessun arco viene copiato, spostato o cancellato su supersede/expire
   (confermato da REV-1, D6).
 
-### D3-bis — Transit-only per le memorie superseded (REV-2, emendamento per la
+### D3-bis — Transit-only per le memorie superseded (REV-3, emendamento per la
 0.9.0; direzione approvata dal titolare, field test 2026-08-23)
 
 [Assorbe: finding del field test G2 — catene causali reali si spezzano
@@ -100,7 +100,10 @@ A --precedes--> S --supersedes--> B risponde NOT_FOUND_EXHAUSTIVE anche
 quando la catena esiste ed è interamente attestata.
 Red-team round 1: GPT BOCCIATO (P0 premessa, P0 overlay contraddittoria,
 P1 preferenza cammino, P1 matrice); Kimi APPROVATO CON MODIFICHE (F1-F3).
-Questa REV-2 chiude tutti i finding.]
+REV-2 ha chiuso tutto. Red-team round 2: GPT BOCCIATO (P0 campo transit
+pre-posizionabile via import/extra_meta, P0 fase-2-su-TRUNCATED
+contraddittoria); Kimi APPROVATO CON MODIFICHE (F1 CLI non-superseded,
+F2 semantica valore). Questa REV-3 chiude tutti i finding R1+R2.]
 
 **Premessa corretta (GPT P0-1):** lo status `superseded`, da solo, NON prova
 che la memoria sia stata vera. Il supersede copre due fatti distinti:
@@ -119,11 +122,57 @@ non li attesta. Il transito è una dichiarazione sulla memoria (il nodo),
 ortogonale alla provenienza degli archi (D1): `prov=manual` attesta chi
 scrisse l'arco, non la validità storica del nodo.
 
+**Campo riservato e trust boundary (GPT R2-P0-1).** `transit` è una chiave
+RISERVATA dello schema: il gate di idoneità consulta tre condizioni in AND —
+(1) la memoria è locale (non foreign/federata), (2) status `superseded` e
+non expired, (3) la chiave `transit` esiste con valore esattamente `true`
+(strip, case-sensitive). Ma la condizione (3) da sola non basta a provare
+l'atto umano: le chiavi ignote sopravvivono ai rewrite via `extra_meta` e
+`import_store` conserva i record importati con tutto il frontmatter. Quindi:
+- `graph transit <id> on|off` è l'UNICO mutatore applicativo del campo,
+  eseguito sotto il lock della memoria (stessa disciplina di `relate`),
+  e rifiuta i non-superseded con errore visibile.
+- I percorsi automatici (import, migrate, distill, MCP remember) che
+  incontrano la chiave `transit` in un record NON la creano: se il record
+  importato/migrato porta `transit: true` ma non è già superseded-attestato
+  localmente, la chiave è inerte finché un umano non esegue `graph transit`.
+- L'auto-supersede PRESERVA un'attestazione già valida (transit=true resta
+  transit=true dopo il supersede) ma non ne crea mai una nuova.
+- Editing diretto del file = amministrazione fuori API: foldcrumbs non la
+  distingue, ma il gate fail-closed (status+campo+locale) ne limita il
+  raggio. Il trust boundary dichiarato: solo `graph transit` eseguito
+  localmente su un record superseded è attestazione prodotta da foldcrumbs.
+
 **Semantica del campo (Kimi R2-F2):** il parser flat legge i valori come
 stringhe, quindi il gate è esatto: una memoria è transit-eligible sse la
 chiave `transit` esiste E il suo valore, dopo strip, è esattamente `true`
 (case-sensitive). Ogni altro valore — `false`, `yes`, `1`, vuoto, assente —
 è intransit. Nessun coercimento, nessun case-insensitive: fail-closed.
+
+**Campo riservato e trust boundary (GPT R2-P0-1).** La sola semantica del
+valore non basta: le chiavi ignote sopravvivono ai rewrite via `extra_meta`
+(schema.py) e `import_store` conserva i record importati con tutto il
+frontmatter (store.py), quindi un `transit: true` può essere pre-posizionato
+da un percorso automatico e poi reso eligibile da un successivo auto-supersede
+senza alcun atto umano locale. `transit` è quindi una chiave RISERVATA dello
+schema, con le regole seguenti:
+- `graph transit <id> on|off` è l'UNICO mutatore applicativo del campo,
+  eseguito sotto il lock della memoria (stessa disciplina di `relate`), e
+  rifiuta i non-superseded con errore visibile.
+- I percorsi automatici (import, migrate, distill, MCP remember) che
+  incontrano la chiave `transit` in un record NON la creano e NON la
+  attivano: un record importato che porta `transit: true` resta intransit
+  finché un umano non esegue `graph transit` localmente. L'implementazione
+  distingue il gate di lettura (che consulta il campo) dal gate di
+  provenienza (che esige l'atto CLI locale), per esempio azzerando la chiave
+  riservata all'import o marcandone la provenienza non-attestata.
+- L'auto-supersede PRESERVA un'attestazione già valida (transit=true resta
+  transit=true dopo il supersede) ma non ne crea mai una nuova.
+- Trust boundary dichiarato: solo `graph transit` eseguito localmente su un
+  record superseded è attestazione prodotta da foldcrumbs. L'editing diretto
+  del file è amministrazione fuori API: foldcrumbs non la distingue, ma il
+  gate fail-closed (locale + superseded + non-expired + valore esatto) ne
+  limita il raggio.
 
 **Il comando rifiuta i non-superseded (Kimi R2-F1):** `graph transit <id>
 on|off` rifiuta con errore esplicito qualsiasi memoria il cui status non è
@@ -155,17 +204,19 @@ Regole:
    overlay tra nodi active con archi di STORE che attraversano superseded
    transit-attestati (include_inferred richiesto per l'overlay, prov vigenti
    per gli archi di store).
-6. **Preferenza del cammino, due fasi deterministiche (GPT P1-3)**: fase 1 =
-   BFS shortest-hop sull'universo active-only (comportamento 0.8.0 esatto);
-   fase 2 solo se la fase 1 esaurisce senza FOUND: BFS sullo universo
-   ampliato (active + superseded attestati). Stesso ordinamento per id in
-   entrambe le fasi. Conseguenze dichiarate e testate: un cammino active-only
-   vince sempre su uno via superseded; il budget (depth/max_nodes) si applica
-   a ciascuna fase indipendentemente; se la fase 2 tronca, lo stato è
-   TRUNCATED con nota che il transito era in gioco. Nessun risultato 0.8.0
-   può cambiare: la fase 2 scatta solo dove oggi è NOT_FOUND_EXHAUSTIVE o
-   TRUNCATED — e sul TRUNCATED-oggi la fase 2 può solo aggiungere FOUND
-   (miglioramento dichiarato), mai togliere un FOUND.
+6. **Preferenza del cammino, due fasi deterministiche (GPT P1-3, GPT R2-P0-2):**
+   fase 1 = BFS shortest-hop sull'universo active-only (comportamento 0.8.0
+   esatto); fase 2 SOLO se la fase 1 termina con NOT_FOUND_EXHAUSTIVE: BFS
+   sull'universo ampliato (active + superseded attestati). Stesso ordinamento
+   per id in entrambe le fasi. Se la fase 1 termina con TRUNCATED, il
+   risultato è TRUNCATED e la fase 2 NON parte: TRUNCATED significa ricerca
+   non esaurita, e preferire un cammino via superseded a un cammino
+   active-only che potrebbe esistere oltre il budget violerebbe la promessa
+   "active-only vince sempre". Conseguenze dichiarate e testate: un cammino
+   active-only vince sempre su uno via superseded; il budget (depth/max_nodes)
+   si applica a ciascuna fase indipendentemente; se la fase 2 tronca, lo stato
+   è TRUNCATED con nota che il transito era in gioco. Nessun risultato 0.8.0
+   può cambiare: la fase 2 scatta solo dove oggi è NOT_FOUND_EXHAUSTIVE.
 7. **Nessun cambiamento agli archi** (D6): nessun arco copiato/spostato/
    cancellato. Gli archi da/verso memorie superseded esistono già; il campo
    `transit` è sulla memoria, non sull'arco.
@@ -173,8 +224,8 @@ Regole:
 Tri-stato: invariato nei significati. Cambia solo l'insieme attraversabile,
 e solo dietro attestazione umana.
 
-**Matrice di accettazione (GPT P1-4, Kimi F2)** — ogni riga ha lo stato
-atteso esatto:
+**Matrice di accettazione (GPT P1-4, Kimi F2, GPT R2)** — ogni riga ha lo
+stato atteso esatto:
 1. A --manual--> S(superseded, transit on) --manual--> B → FOUND, marker
    su S nel JSON e nei rendering.
 2. Come (1) ma archi agent/inferred/legacy: NOT_FOUND_EXHAUSTIVE senza
@@ -190,13 +241,25 @@ atteso esatto:
    transit) → FOUND in entrambe le direzioni di query.
 8. Diamante: cammino active-only lungo 3 vs cammino via S attestato lungo 2
    → FOUND sul cammino active-only (la fase 1 vince).
-9. Budget: store dove l'aggiunta dei nodi transit porta al limite
-   max_nodes → TRUNCATED con nota; stessi parametri → stesso risultato.
+9. Budget fase 2: store dove l'aggiunta dei nodi transit porta al limite
+   max_nodes della fase 2 → TRUNCATED con nota "transit in gioco"; stessi
+   parametri → stesso risultato.
 10. Overlay: pending A→B active con transito di store via S attestato →
     FOUND solo con include_inferred; pending con estremo superseded → mai
     nell'overlay.
 11. Nessun nodo escluso (deleted/provisional/expired/non attestato) compare
     mai in un path FOUND.
+12. Fase 1 TRUNCATED: esiste oltre il budget un path active-only e la fase 2
+    troverebbe un path transit entro budget → risultato TRUNCATED (fase 1),
+    la fase 2 NON parte, nessun FOUND via transit.
+13. Fase 1 NOT_FOUND_EXHAUSTIVE → fase 2 FOUND (via transit attestato).
+14. Fase 1 NOT_FOUND_EXHAUSTIVE → fase 2 TRUNCATED (budget fase 2 esaurito),
+    con nota che il transito era in gioco.
+15. Trust boundary: record importato con `transit: true` pre-posizionato,
+    poi auto-superseded → NOT_FOUND_EXHAUSTIVE (la chiave importata non è
+    attestazione); valori `false`/`yes`/`1`/vuoto → off; solo `graph transit`
+    locale su superseded porta FOUND; relate/rewrite/auto-supersede
+    preservano un on valido e non ne generano mai uno nuovo.
 
 
 ## D4 — Formato eseguibile dal parser esistente
