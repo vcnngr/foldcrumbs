@@ -24,6 +24,22 @@ from .profile import format_context_block
 from .schema import VALID_TYPES, MemoryRecord
 
 
+def _version_string() -> str:
+    """Single source of truth for the printed version.
+
+    Read from the package (foldcrumbs.__init__.__version__) so the CLI never
+    drifts from what pip installed. Importing the package only pulls in this
+    attribute — no store/config side effects.
+    """
+    from . import __version__
+    return f"foldcrumbs {__version__}"
+
+
+def _cmd_version(_: argparse.Namespace) -> int:
+    print(_version_string())
+    return 0
+
+
 def parse_expiry(value: str):
     """Parse ``--expires``: an ISO date/datetime or a relative ``Nd`` offset.
 
@@ -879,7 +895,12 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="foldcrumbs", description=__doc__)
+    p.add_argument("--version", action="version", version=_version_string(),
+                   help="show the installed version and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("version", help="show the installed version").set_defaults(
+        func=_cmd_version)
 
     r = sub.add_parser("remember", help="store a memory")
     r.add_argument("text")
