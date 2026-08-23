@@ -345,6 +345,20 @@ class TestTrustBoundary(TransitStore):
                 self.assertIn("transit: mentions in prose", body)
                 self.assertIn("status: active", text)
 
+    def test_migrate_strips_unclosed_frontmatter(self):
+        """GPT code-RT round 2 P0: a frontmatter WITHOUT its closing '---'
+        is still parsed by the schema to EOF. The strip must match: never
+        interpret as body what the parser treats as metadata."""
+        from foldcrumbs import cli
+        from foldcrumbs import schema
+        text = "---\nname: M\n transit : true\nstatus: active\n"
+        meta, _ = schema._split_frontmatter(text)
+        self.assertIn("transit", meta)      # premise: parser accepts it
+        stripped = cli._strip_reserved_transit(text)
+        meta2, _ = schema._split_frontmatter(stripped)
+        self.assertNotIn("transit", meta2)
+        self.assertEqual(meta2.get("status"), "active")
+
     def test_migrate_entry_never_imports_attestation(self):
         """Full migrate path: a copied memory carrying a pre-positioned
         transit attestation lands WITHOUT it; a later supersede cannot turn

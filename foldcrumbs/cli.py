@@ -873,12 +873,15 @@ def _strip_reserved_transit(text: str) -> str:
     """D3-bis trust boundary: drop the reserved ``transit`` key from one
     memory's frontmatter, mirroring the parser EXACTLY.
 
-    schema._split_frontmatter partitions each frontmatter line on the FIRST
-    colon and strips the key, so ``transit:``, `` transit:``, ``transit :``
-    all parse as the key ``transit``. Matching only the literal ``transit:``
-    prefix would let the spaced variants ride through migrate and survive as
-    a pre-positioned attestation (GPT code-RT P0). Body text is never
-    touched — only lines between the opening and closing ``---``.
+    Two parser behaviours this must match (GPT code-RT):
+    - schema._split_frontmatter partitions each frontmatter line on the
+      FIRST colon and strips the key, so ``transit:``, `` transit:``,
+      ``transit :`` all parse as the key ``transit`` — matching only the
+      literal prefix would let the spaced variants ride through.
+    - a frontmatter WITHOUT its closing ``---`` is still parsed to EOF
+      (body_start = len(parts)), so the strip must treat a missing closing
+      delimiter the same way — never interpret as body what the parser
+      treats as metadata.
     """
     if not text.startswith("---"):
         return text
@@ -891,7 +894,7 @@ def _strip_reserved_transit(text: str) -> str:
             end = i
             break
     if end is None:
-        return text
+        end = len(lines)          # parser: metadata runs to EOF
     kept = []
     for ln in lines[1:end]:
         if ":" in ln and ln.partition(":")[0].strip() == "transit":
