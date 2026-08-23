@@ -869,6 +869,37 @@ def _cmd_roots(args: argparse.Namespace) -> int:
     return 0
 
 
+def _strip_reserved_transit(text: str) -> str:
+    """D3-bis trust boundary: drop the reserved ``transit`` key from one
+    memory's frontmatter, mirroring the parser EXACTLY.
+
+    schema._split_frontmatter partitions each frontmatter line on the FIRST
+    colon and strips the key, so ``transit:``, `` transit:``, ``transit :``
+    all parse as the key ``transit``. Matching only the literal ``transit:``
+    prefix would let the spaced variants ride through migrate and survive as
+    a pre-positioned attestation (GPT code-RT P0). Body text is never
+    touched — only lines between the opening and closing ``---``.
+    """
+    if not text.startswith("---"):
+        return text
+    lines = text.split("\n")
+    if lines[0].strip() != "---":
+        return text
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    if end is None:
+        return text
+    kept = []
+    for ln in lines[1:end]:
+        if ":" in ln and ln.partition(":")[0].strip() == "transit":
+            continue
+        kept.append(ln)
+    return "\n".join([lines[0]] + kept + lines[end:])
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     """Migrate a legacy engram install to foldcrumbs (non-destructive).
 
@@ -914,18 +945,9 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
                 elif item.suffix == ".md":
                     # D3-bis trust boundary: migrate is an automatic entry
                     # path, so the reserved `transit` key never rides in with
-                    # a copied memory. Strip it from the frontmatter ONLY —
-                    # body text is never touched.
-                    text = item.read_text(encoding="utf-8")
-                    if text.startswith("---") and "\ntransit:" in text:
-                        lines = text.split("\n")
-                        end = next((i for i in range(1, len(lines))
-                                    if lines[i].strip() == "---"), None)
-                        if end is not None:
-                            head = [lines[0]] + [
-                                ln for ln in lines[1:end]
-                                if not ln.startswith("transit:")]
-                            text = "\n".join(head + lines[end:])
+                    # a copied memory.
+                    text = _strip_reserved_transit(item.read_text(
+                        encoding="utf-8"))
                     target.write_text(text, encoding="utf-8")
                 else:
                     shutil.copy2(item, target)

@@ -209,11 +209,27 @@ class TestTwoPhasePreference(TransitStore):
                          "phase 1 must find the active-only path")
 
     def test_phase1_truncated_stays_truncated_no_phase2(self):
-        """Row 12: phase-1 TRUNCATED returns TRUNCATED; phase 2 never runs."""
-        a, s, b = self._chain()
+        """Row 12: phase-1 TRUNCATED returns TRUNCATED; phase 2 never runs.
+        The fixture must truncate PHASE 1 itself: an active-only path that
+        exceeds the depth budget (A-X-Y-B, 3 hops at depth 2), while a
+        shorter transit path (A-S-B, 2 hops) exists for phase 2. If phase 2
+        ran, the answer would be FOUND — TRUNCATED:depth without the transit
+        note proves it did not."""
+        a, x, y, b = (self._put("A"), self._put("X"),
+                      self._put("Y"), self._put("B"))
+        self._link(a, x)
+        self._link(x, y)
+        self._link(y, b)
+        s = self._put("S")
+        self._link(a, s)
+        self._link(s, b)
+        self._supersede(s, b.id)
         self._attest(s)
-        res = relations.find_path(a.id, b.id, max_nodes=1)
-        self.assertTrue(res["status"].startswith("TRUNCATED"))
+        res = relations.find_path(a.id, b.id, depth=2)
+        self.assertEqual(res["status"], "TRUNCATED:depth")
+        self.assertNotIn("transit", res.get("note", ""),
+                         "phase 2 must not have run after a phase-1 "
+                         "TRUNCATED")
 
     def test_phase2_truncated_says_transit_in_play(self):
         """Row 14: phase 1 exhaustive, phase 2 budget exhausted → TRUNCATED
@@ -310,6 +326,83 @@ class TestTrustBoundary(TransitStore):
             res = relations.find_path(a.id, b.id)
             self.assertEqual(res["status"], "NOT_FOUND_EXHAUSTIVE",
                              f"value {bad!r} must stay intransit")
+
+    def test_migrate_strips_whitespace_key_variants(self):
+        """GPT code-RT P0: the parser partitions on the FIRST colon and
+        strips the key, so ' transit: true' and 'transit : true' both parse
+        as the key 'transit'. migrate must strip those variants too — a
+        literal 'transit:' prefix match lets them ride through."""
+        from foldcrumbs import cli
+        for variant in ("transit: true", " transit: true", "transit : true"):
+            with self.subTest(variant=variant):
+                text = cli._strip_reserved_transit(
+                    "---\nname: M\n" + variant + "\nstatus: active\n---\n\n"
+                    "Body keeps transit: mentions in prose.\n")
+                meta, body = __import__("foldcrumbs.schema", fromlist=["x"]) \
+                    ._split_frontmatter(text)
+                self.assertNotIn("transit", meta)
+                # Body untouched — a 'transit:' mention in prose survives.
+                self.assertIn("transit: mentions in prose", body)
+                self.assertIn("status: active", text)
+
+    def test_migrate_entry_never_imports_attestation(self):
+        """Full migrate path: a copied memory carrying a pre-positioned
+        transit attestation lands WITHOUT it; a later supersede cannot turn
+        it into a transit node."""
+        import os
+        import tempfile
+        from importlib import reload
+        from foldcrumbs import cli
+        from foldcrumbs import config as _c
+
+        # migrate --from derives the SOURCE store via memory_dir(from_dir)
+        # and the TARGET via memory_dir(). With FOLDCRUMBS_DIR set both
+        # collapse onto the same dir (migrate would skip), so clear the DIR
+        # overrides and let CLAUDE_CONFIG_DIR drive the layout — same
+        # pattern as TestP03PerStoreQueue.
+        cfg_dir = tempfile.mkdtemp(prefix="fc_mig_cfg_")
+        env_keys = ("FOLDCRUMBS_DIR", "ENGRAM_DIR", "CLAUDE_CONFIG_DIR")
+        saved = {k: os.environ.get(k) for k in env_keys}
+        os.environ.pop("FOLDCRUMBS_DIR", None)
+        os.environ.pop("ENGRAM_DIR", None)
+        os.environ["CLAUDE_CONFIG_DIR"] = cfg_dir
+        reload(_c)
+        try:
+            proj = tempfile.mkdtemp(prefix="fc_mig_proj_")
+            src_mem = Path(_c.memory_dir(proj))
+            src_mem.mkdir(parents=True, exist_ok=True)
+            rec = MemoryRecord(title="Mig", content="Body.")
+            text = rec.to_markdown().replace(
+                "---\n\n", "transit: true\n---\n\n", 1)
+            (src_mem / rec.filename()).write_text(text, encoding="utf-8")
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = cli.main(["migrate", "--from", proj, "--force"])
+            self.assertEqual(code, 0)
+            loaded = next(m for m in store.load_all() if m.id == rec.id)
+            self.assertNotIn("transit", loaded.extra_meta)
+            # Supersede + chain: still not traversable.
+            other = self._put("Other")
+            store.mark_superseded_on_disk(loaded, other.id)
+            a, b = self._put("MA"), self._put("MB")
+            relations.add_relation(a.id, "depends_on",
+                                   {"k": "m", "id": rec.id},
+                                   evidence="e", prov="manual")
+            relations.add_relation(rec.id, "depends_on",
+                                   {"k": "m", "id": b.id},
+                                   evidence="e", prov="manual")
+            fresh = next(m for m in store.load_all() if m.id == rec.id)
+            store.mark_superseded_on_disk(fresh, other.id)
+            res = relations.find_path(a.id, b.id)
+            self.assertEqual(res["status"], "NOT_FOUND_EXHAUSTIVE")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            reload(_c)
 
     def test_rewrite_preserves_valid_attestation(self):
         """Row 15: normal rewrites preserve a valid attestation."""
