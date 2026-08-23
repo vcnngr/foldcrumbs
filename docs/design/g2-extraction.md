@@ -91,50 +91,100 @@ Regole per graph_path:
 - Nessun arco viene copiato, spostato o cancellato su supersede/expire
   (confermato da REV-1, D6).
 
-### D3-bis — Transit-only per le memorie superseded (emendamento, field test
-2026-08-23, approvato dal titolare come direzione per la 0.9.0)
+### D3-bis — Transit-only per le memorie superseded (REV-2, emendamento per la
+0.9.0; direzione approvata dal titolare, field test 2026-08-23)
 
 [Assorbe: finding del field test G2 — catene causali reali si spezzano
 attraverso nodi superseded; D3 li esclude dall'universo, quindi un path
 A --precedes--> S --supersedes--> B risponde NOT_FOUND_EXHAUSTIVE anche
-quando la catena esiste ed è interamente attestata.]
+quando la catena esiste ed è interamente attestata.
+Red-team round 1: GPT BOCCIATO (P0 premessa, P0 overlay contraddittoria,
+P1 preferenza cammino, P1 matrice); Kimi APPROVATO CON MODIFICHE (F1-F3).
+Questa REV-2 chiude tutti i finding.]
 
-Il supersede è l'unico status che NON rappresenta un'obiezione alla memoria:
-una memoria superseded è stata vera, poi sostituita — il suo contenuto e le
-sue relazioni restano fattualmente corretti nel momento in cui furono scritti.
-deleted/provisional/expired invece sì (ritrattato / mai confermato / non più
-valido), e restano esclusi come oggi.
+**Premessa corretta (GPT P0-1):** lo status `superseded`, da solo, NON prova
+che la memoria sia stata vera. Il supersede copre due fatti distinti:
+"obsoleto temporalmente" (vera allora, sostituita) e "corretto perché
+sbagliata" (falsa anche quando fu scritta). Lo status non distingue i due
+casi, e il distill può marcare superseded senza intervento umano
+(mark_superseded_on_disk). Quindi l'idoneità al transito NON può derivare
+dallo status.
+
+**Attesto umano esplicito, fail-closed.** Una memoria superseded diventa
+transit-eligible SOLO con un atto umano esplicito: un campo `transit: true`
+nel frontmatter della memoria, impostabile esclusivamente via CLI
+(`foldcrumbs graph transit <id> on|off`). Auto-supersede, record legacy e
+supersede deciso dal modello restano esclusi dal transito finché un umano
+non li attesta. Il transito è una dichiarazione sulla memoria (il nodo),
+ortogonale alla provenienza degli archi (D1): `prov=manual` attesta chi
+scrisse l'arco, non la validità storica del nodo.
 
 Regole:
-- **Le memorie con status=superseded (non expired) entrano nell'universo
-  della BFS come nodi transit-only**: archi entranti e uscenti sono
-  attraversabili secondo le regole di prov vigenti (default manual-only,
-  include_inferred opt-in), ma il nodo NON può essere estremo di query.
-- **Gli estremi restano active+non-expired, come oggi**: `graph_path` con
-  src o dst superseded risponde NOT_FOUND_EXHAUSTIVE con nota esplicativa
-  (comportamento E3 invariato per gli estremi).
-- **L'output dichiara il transito**: ogni step FOUND su nodo superseded
-  porta `"status": "superseded"` e il rendering CLI/MCP lo marca (es.
-  `(superseded — transit)`). L'utente vede sempre che il cammino attraversa
-  una memoria sostituita; mai silenzioso.
-- **D1 invariato**: il containment di prov è ortogonale. Un arco
-  agent/inferred/legacy verso o attraverso un nodo superseded resta
-  attraversabile solo con include_inferred.
-- **Overlay proposte**: una pending proposal con estremo superseded è
-  scartata da overlay_edges (gli estremi proposti devono essere active);
-  il transito di overlay su nodo superseded esistente è permesso alle stesse
-  condizioni di prov dell'overlay.
-- **Nessun cambiamento agli archi**: nessun arco copiato/spostato/cancellato
-  (D6 confermato). Gli archi da/verso memorie superseded esistono già nei
-  frontmatter; prima erano semplicemente irraggiungibili.
+1. **Universo ampliato = active + superseded transit-attestati**, tutti
+   non-expired. I superseded transit-eligible sono nodi transit-only:
+   archi entranti e uscenti attraversabili secondo le regole di prov vigenti
+   (default manual-only, include_inferred opt-in), ma il nodo NON può essere
+   estremo di query. **deleted, provisional ed expired restano esclusi sia
+   come estremi sia come nodi di transito**, e gli archi che li toccano
+   restano tagliati dal filtro nodi (nessun cambiamento rispetto a D3).
+2. **Estremi invariati**: src o dst superseded risponde NOT_FOUND_EXHAUSTIVE
+   con nota esplicativa (comportamento E3 già in produzione).
+3. **L'output dichiara il transito, mai silenzioso**: ogni step FOUND su nodo
+   superseded porta `"status": "superseded"` nel payload JSON; il rendering
+   CLI e MCP marca lo step (es. `(superseded — transit)`). Un path che
+   attraversa un nodo superseded senza il marker è un bug e un test
+   fail-closed lo verifica.
+4. **D1 invariato**: archi agent/inferred/legacy verso o attraverso un nodo
+   transit-eligible restano attraversabili solo con include_inferred.
+5. **Overlay, una sola policy (GPT P0-2)**: overlay_edges accetta SOLO
+   proposte con subject e target active+non-expired; nessun arco overlay può
+   essere incidente a un nodo superseded. Un cammino può però combinare archi
+   overlay tra nodi active con archi di STORE che attraversano superseded
+   transit-attestati (include_inferred richiesto per l'overlay, prov vigenti
+   per gli archi di store).
+6. **Preferenza del cammino, due fasi deterministiche (GPT P1-3)**: fase 1 =
+   BFS shortest-hop sull'universo active-only (comportamento 0.8.0 esatto);
+   fase 2 solo se la fase 1 esaurisce senza FOUND: BFS sullo universo
+   ampliato (active + superseded attestati). Stesso ordinamento per id in
+   entrambe le fasi. Conseguenze dichiarate e testate: un cammino active-only
+   vince sempre su uno via superseded; il budget (depth/max_nodes) si applica
+   a ciascuna fase indipendentemente; se la fase 2 tronca, lo stato è
+   TRUNCATED con nota che il transito era in gioco. Nessun risultato 0.8.0
+   può cambiare: la fase 2 scatta solo dove oggi è NOT_FOUND_EXHAUSTIVE o
+   TRUNCATED — e sul TRUNCATED-oggi la fase 2 può solo aggiungere FOUND
+   (miglioramento dichiarato), mai togliere un FOUND.
+7. **Nessun cambiamento agli archi** (D6): nessun arco copiato/spostato/
+   cancellato. Gli archi da/verso memorie superseded esistono già; il campo
+   `transit` è sulla memoria, non sull'arco.
 
-Tri-stato: invariato. FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED mantengono i
-loro significati; cambia solo l'insieme dei nodi attraversabili.
+Tri-stato: invariato nei significati. Cambia solo l'insieme attraversabile,
+e solo dietro attestazione umana.
 
-Criterio di accettazione: le catene causali del field test (A --precedes-->
-S_superseded --supersedes--> B) rispondono FOUND con i prov corretti, e
-NOT_FOUND_EXHAUSTIVE se gli archi sono solo non-manual e il flag è assente.
-Estremi superseded: ancora NOT_FOUND_EXHAUSTIVE con nota.
+**Matrice di accettazione (GPT P1-4, Kimi F2)** — ogni riga ha lo stato
+atteso esatto:
+1. A --manual--> S(superseded, transit on) --manual--> B → FOUND, marker
+   su S nel JSON e nei rendering.
+2. Come (1) ma archi agent/inferred/legacy: NOT_FOUND_EXHAUSTIVE senza
+   include_inferred; FOUND con il flag.
+3. Come (1) ma S senza attestazione transit → NOT_FOUND_EXHAUSTIVE
+   (fail-closed, campo assente = off).
+4. Catena A - S1 - S2 - B con S1, S2 superseded attestati → FOUND, marker
+   su entrambi gli step intermedi.
+5. src superseded → NOT_FOUND_EXHAUSTIVE con nota; idem dst superseded.
+6. Arco incidente a deleted/provisional/expired → mai attraversato, in
+   nessuna fase e con nessun flag.
+7. Archi memorizzati in entrambe le direzioni (entrante/uscente sul nodo
+   transit) → FOUND in entrambe le direzioni di query.
+8. Diamante: cammino active-only lungo 3 vs cammino via S attestato lungo 2
+   → FOUND sul cammino active-only (la fase 1 vince).
+9. Budget: store dove l'aggiunta dei nodi transit porta al limite
+   max_nodes → TRUNCATED con nota; stessi parametri → stesso risultato.
+10. Overlay: pending A→B active con transito di store via S attestato →
+    FOUND solo con include_inferred; pending con estremo superseded → mai
+    nell'overlay.
+11. Nessun nodo escluso (deleted/provisional/expired/non attestato) compare
+    mai in un path FOUND.
+
 
 ## D4 — Formato eseguibile dal parser esistente
 
