@@ -170,6 +170,42 @@ Criteri fail-closed preregistrati:
 - rejected/malformata → mai FOUND in nessun modo;
 - promoted → FOUND via store una sola volta, overlay vuoto per quella chiave.
 
+### E4-bis — Protocollo promote crash-safe
+[GPT-R4 P0-1; APPROVATO DAL TITOLARE 2026-08-19]
+file_lock esclude concorrenti VIVI ma non rende atomiche due scritture
+persistenti distinte (arco in store + riga JSONL). E4 prometteva atomicità
+che il lock da solo non fornisce. Correzione: promote è un protocollo
+recoverable e idempotente, non una transazione.
+
+Ordine delle scritture, sempre sotto lock di coda; lock memoria acquisito
+dentro il lock coda (ordine globale coda → memoria, mai invertito):
+1. lock coda (federation.file_lock su state/relation_proposals.lock);
+2. lettura proposta: se status != pending → no-op idempotente (già decisa);
+3. scrittura dell'arco manual in store, con `proposal_id` dentro la
+   relazione (dedup-store di E1: se un arco con lo stesso proposal_id
+   esiste già, lo step è no-op);
+4. marcatura della riga JSONL: status=promoted, decided_at;
+5. rilascio lock.
+
+Recovery deterministica, eseguita a ogni retry di promote e da
+`graph doctor`:
+- arco con proposal_id presente + proposta ancora pending → completare lo
+  step 4 (converge a promoted; idempotente);
+- arco con proposal_id assente + proposta pending → ri-eseguire dal passo 3;
+- proposta promoted senza arco → impossibile by construction con l'ordine
+  3→4; se mai rilevata, report ERROR esplicito, nessuna correzione
+  automatica.
+L'overlay di E4 esclude una proposta pending il cui proposal_id risulta già
+materializzato in store (equivalente a promoted ai fini dell'attraversamento).
+
+Criterio di chiusura fail-closed (test, non prosa):
+- fault injection dopo ciascuna delle due scritture (interruzione simulata
+  tra step 3 e step 4);
+- al retry converge sempre a: esattamente una relazione manual + una
+  proposta promoted; nessuna pending attraversabile duplicata;
+- due promote concorrenti + un relate concorrente sulla stessa tripla
+  convergono allo stesso stato; lock non acquisito → nessuna mutazione.
+
 ### E5 — Migrazione fail-closed degli archi senza prov (legacy)
 [GPT bloccante 2]
 Verificato nel codice: relations.py scrive prov="inferred" solo con evidence
