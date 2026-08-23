@@ -669,6 +669,12 @@ def import_store(
         if rec.status != "active":
             plan["skipped"].append(path.name)
             continue
+        # D3-bis trust boundary: `transit` is a RESERVED key whose only
+        # legitimate writer is the local CLI (`graph transit`). An imported
+        # record may carry it pre-positioned — strip it at the entry so a
+        # later auto-supersede can never turn a foreign attestation into a
+        # local one. Fail-closed: what survives must come from this store.
+        rec.extra_meta.pop("transit", None)
         if apply:
             action, _ = upsert(rec, cwd)
         else:

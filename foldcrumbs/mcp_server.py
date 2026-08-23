@@ -320,6 +320,9 @@ def tool_graph_path(args: dict[str, Any]) -> str:
         lines = [f"FOUND — {len(res['path'])} steps:"]
         for step in res["path"]:
             edge = step.get("edge")
+            # D3-bis: a transit step is never silent about being superseded.
+            mark = (" (superseded — transit)"
+                    if step.get("status") == "superseded" else "")
             if edge:
                 arrow = "--" if step.get("forward", True) else "<--"
                 ev = edge.get("e", "")
@@ -330,9 +333,10 @@ def tool_graph_path(args: dict[str, Any]) -> str:
                 if edge.get("_overlay"):
                     tail += ", pending proposal"
                 tail += f"; evidence: {ev}" if ev else "; no evidence"
-                lines.append(f"  -> {step['title']} ({step['file']}) {tail}]")
+                lines.append(f"  -> {step['title']}{mark} "
+                             f"({step['file']}) {tail}]")
             else:
-                lines.append(f"  * {step['title']} ({step['file']})")
+                lines.append(f"  * {step['title']}{mark} ({step['file']})")
         return "\n".join(lines)
     if status == "NOT_FOUND_EXHAUSTIVE":
         note = res.get("note", "")

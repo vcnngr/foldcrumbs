@@ -244,7 +244,7 @@ class TestPhaseTransitions(TransitStore):
         self._link(c, b)
         before = relations.find_path(a.id, b.id)
         # Attesting an unrelated superseded chain must not alter it.
-        s1, s2 = self._put("S1"), self._put("S2")
+        s1 = self._put("S1")
         self._link(a, s1)
         self._link(s1, b)
         self._supersede(s1, b.id)
@@ -335,6 +335,75 @@ class TestTrustBoundary(TransitStore):
         # Nothing was written.
         rec = next(m for m in store.load_all() if m.id == s.id)
         self.assertNotIn("transit", rec.extra_meta)
+
+
+# ── CLI end-to-end: graph transit + markers ───────────────────────────────
+
+class TestTransitCLI(TransitStore):
+    """The commands the user actually types, run in-process."""
+
+    def _run(self, *argv):
+        import contextlib
+        import io
+        from foldcrumbs import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_transit_on_then_path_marker(self):
+        """Full loop: chain hidden, attest on, path FOUND with the marker."""
+        a, s, b = self._chain()
+        code, out, _ = self._run("graph", "path", "A", "B")
+        self.assertEqual(code, 1)
+        self.assertIn("NOT_FOUND_EXHAUSTIVE", out)
+
+        code, out, _ = self._run("graph", "transit", "S", "on")
+        self.assertEqual(code, 0, out)
+        self.assertIn("attested", out)
+
+        code, out, _ = self._run("graph", "path", "A", "B")
+        self.assertEqual(code, 0, out)
+        self.assertIn("FOUND", out)
+        self.assertIn("superseded — transit", out,
+                      "the transit step must be marked, never silent")
+
+    def test_transit_off_withdraws(self):
+        a, s, b = self._chain()
+        self._run("graph", "transit", "S", "on")
+        code, out, _ = self._run("graph", "transit", "S", "off")
+        self.assertEqual(code, 0, out)
+        self.assertIn("withdrawn", out)
+        code, out, _ = self._run("graph", "path", "A", "B")
+        self.assertEqual(code, 1)
+        self.assertIn("NOT_FOUND_EXHAUSTIVE", out)
+
+    def test_transit_refuses_active_memory(self):
+        self._put("Alive")
+        code, out, err = self._run("graph", "transit", "Alive", "on")
+        self.assertEqual(code, 1)
+        self.assertIn("refused", err)
+        self.assertIn("superseded", err)
+
+    def test_transit_idempotent_noop(self):
+        a, s, b = self._chain()
+        self._run("graph", "transit", "S", "on")
+        code, out, _ = self._run("graph", "transit", "S", "on")
+        self.assertEqual(code, 0, out)
+        self.assertIn("nothing to do", out)
+
+    def test_mcp_marker_present(self):
+        """The MCP graph_path rendering marks transit steps too."""
+        from foldcrumbs import mcp_server
+        a, s, b = self._chain()
+        self._attest(s)
+        r = mcp_server.handle({"jsonrpc": "2.0", "id": 1,
+                               "method": "tools/call",
+                               "params": {"name": "graph_path", "arguments": {
+                                   "from": "A", "to": "B"}}})
+        text = r["result"]["content"][0]["text"]
+        self.assertIn("FOUND", text)
+        self.assertIn("superseded — transit", text)
 
 
 if __name__ == "__main__":

@@ -518,12 +518,14 @@ def _assemble(src_id: str, dst_id: str, parent: dict,
     while cur != src_id:
         pred, edge, forward = parent[cur]
         m = by_id[cur]
+        # D3-bis: the node's own status travels with the step — a transit
+        # step on an attested superseded memory is NEVER silent about it.
         steps.append({"id": cur, "title": m.title, "file": m.filename(),
-                      "edge": edge, "forward": forward})
+                      "edge": edge, "forward": forward, "status": m.status})
         cur = pred
     m = by_id[src_id]
     steps.append({"id": src_id, "title": m.title, "file": m.filename(),
-                  "edge": None, "forward": True})
+                  "edge": None, "forward": True, "status": m.status})
     steps.reverse()
     return {"status": "FOUND", "path": steps}
 
