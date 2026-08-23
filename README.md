@@ -160,6 +160,7 @@ plus a read-only federated view of every shared store on the machine. Details un
 | `FOLDCRUMBS_NO_AUTO_SUPERSEDE` | – | set to disable the contradiction pass at distill time |
 | `FOLDCRUMBS_DIR` | derived from cwd | override the memory directory |
 | `FOLDCRUMBS_SEMANTIC` | off | set to `1` to add an optional embedding channel to recall |
+| `FOLDCRUMBS_G2` | off | set to `1` so distill proposes relations into the approval queue (never written to the store directly) |
 | `FOLDCRUMBS_EMBEDDING_ENDPOINT` | `FOLDCRUMBS_LLM_ENDPOINT` | OpenAI-compatible `/v1/embeddings` server |
 | `FOLDCRUMBS_EMBEDDING_MODEL` | `FOLDCRUMBS_LLM_MODEL` | embedding model name |
 | `FOLDCRUMBS_EMBEDDING_TIMEOUT` | `10` | seconds; a slow server falls back to lexical recall |
@@ -250,6 +251,37 @@ foldcrumbs graph entities --similar                        # external entities +
 `graph path` is tri-state and says which way each edge was walked: a path may
 follow an edge against its stored direction, and the output marks it (`<--`).
 Entity suggestions are hints only — merging entities is always your decision.
+
+### Model-proposed relations (G2)
+
+Relations born from a model never land in the store directly. With
+`FOLDCRUMBS_G2=1`, distill asks the LLM to *propose* relations between the
+memories it just produced; proposals enter a pending queue, and **only a human
+promotion** writes an arc into the store. Everything else is opt-in and
+visible (design: docs/design/g2-extraction.md):
+
+- every arc carries a provenance — `manual` (human CLI), `agent` (MCP),
+  `inferred` (distill) — and non-human provenance caps confidence at 0.5;
+- `graph path` walks manual arcs by default; agent/inferred/legacy arcs and
+  pending proposals are traversed only behind the explicit per-query
+  `--include-inferred` flag — no environment variable exists for it, on
+  purpose;
+- promoting is crash-safe: the arc is written first (tagged with the proposal
+  id), the queue status second; an interruption in between converges on retry;
+- arcs written before the provenance taxonomy are counted as *legacy* by
+  `graph doctor` and attested one by one — never silently relabelled manual.
+
+```bash
+FOLDCRUMBS_G2=1 foldcrumbs distill transcript.txt   # propose relations (LLM)
+foldcrumbs graph proposals                           # the pending queue
+foldcrumbs graph doctor promote <proposal-id>        # human: write the arc (prov=manual)
+foldcrumbs graph doctor reject  <proposal-id>        # persistent suppression
+foldcrumbs graph path A B --include-inferred         # opt-in traversal, per query
+```
+
+The MCP server exposes the same posture: a `relate` tool (provenance `agent`,
+confidence capped at 0.5) and an `include_inferred` parameter on `graph_path`,
+off by default.
 
 ## CLI
 
