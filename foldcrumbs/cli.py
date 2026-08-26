@@ -5,6 +5,7 @@ Commands:
   recall     search the store (substring + fuzzy) and render a context block
   index      rebuild MEMORY.md
   distill    distill a transcript/text file into memories (uses the LLM)
+  ingest     ingest a document file or URL into memories (provenance: imported)
   status     show config + store stats
   roots      list/add/remove the memory roots federated into the shared view
   install    merge hooks into Claude Code settings.json
@@ -152,6 +153,20 @@ def _cmd_distill(args: argparse.Namespace) -> int:
               file=sys.stderr)
     res = distill.distill_and_store(text, source="cli-distill")
     print(f"distilled: {res}")
+    return 0
+
+
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    from . import ingest as ingest_mod
+    try:
+        if not llm.available():
+            print("warning: LLM endpoint unreachable — using heuristic fallback",
+                  file=sys.stderr)
+        res = ingest_mod.ingest(args.source)
+    except ingest_mod.IngestError as exc:
+        print(f"ingest failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"ingested: {res}")
     return 0
 
 
@@ -1135,6 +1150,11 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("distill", help="distill a transcript/text into memories")
     d.add_argument("file", nargs="?", help="path to text file (default: stdin)")
     d.set_defaults(func=_cmd_distill)
+
+    ig = sub.add_parser("ingest",
+                        help="ingest a document file or URL into memories")
+    ig.add_argument("source", help="local file path or http(s) URL")
+    ig.set_defaults(func=_cmd_ingest)
 
     sub.add_parser("status", help="show config + stats").set_defaults(func=_cmd_status)
 

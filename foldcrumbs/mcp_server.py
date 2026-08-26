@@ -183,6 +183,23 @@ TOOLS = [
             "required": ["question"],
         },
     },
+    {
+        "name": "ingest",
+        "description": (
+            "Ingest an external document (local file path or http(s) URL) into "
+            "the store as typed memories with provenance 'imported' and source "
+            "'ingest:<origin>'. Use for design docs, ADRs, articles, specs — "
+            "NOT for session transcripts (use distill for those)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string",
+                           "description": "Local file path or http(s) URL."},
+            },
+            "required": ["source"],
+        },
+    },
 ]
 
 
@@ -395,9 +412,21 @@ def tool_relate(args: dict[str, Any]) -> str:
     return "relation already present — nothing written."
 
 
+def tool_ingest(args: dict[str, Any]) -> str:
+    from . import ingest as ingest_mod
+    try:
+        res = ingest_mod.ingest(str(args["source"]))
+    except ingest_mod.IngestError as exc:
+        return f"error: {exc}"
+    return (f"ingested {res['created']} memories "
+            f"({res['validated']} validated, {res['superseded']} superseded) "
+            f"from {args['source']}")
+
+
 _DISPATCH = {"remember": tool_remember, "recall": tool_recall,
              "answer": tool_answer, "forget": tool_forget,
-             "graph_path": tool_graph_path, "relate": tool_relate}
+             "graph_path": tool_graph_path, "relate": tool_relate,
+             "ingest": tool_ingest}
 
 
 # --- JSON-RPC / MCP plumbing ----------------------------------------------- #
