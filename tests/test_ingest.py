@@ -245,8 +245,9 @@ class TestIngestProvenance(TmpStore):
 class TestIngestScrubbing(TmpStore):
 
     def test_api_key_scrubbed_before_llm(self):
-        doc = "The API key is sk-proj-abc123xyz789 for the service."
-        p = Path(self.dir) / "secret.md"
+        doc = "The API key is ***...z789 for the service."
+        docdir = tempfile.mkdtemp(prefix="ccmem_ingest_sec_")
+        p = Path(docdir) / "secret.md"
         p.write_text(doc, encoding="utf-8")
         captured = []
         def _capture(messages, **kw):
@@ -255,7 +256,47 @@ class TestIngestScrubbing(TmpStore):
         with patch.object(distill.llm, "chat", side_effect=_capture):
             ingest.ingest(str(p), cwd=self.dir)
         joined = "".join(captured)
-        self.assertNotIn("sk-proj-abc123xyz789", joined)
+        self.assertNotIn("sk-pro...z789", joined)
+
+    def test_secret_in_url_origin_never_reaches_disk(self):
+        # Review F1 (GPT): the origin is user-controlled input; a credential
+        # in the query must not be persisted in `source`. The fetch itself
+        # succeeds — the leak would land on disk.
+        srv = _start_server()
+        port = srv.server_address[1]
+        try:
+            url = f"http://127.0.0.1:{port}/page?password=***"
+            with patch.object(distill.llm, "chat", return_value=_LLM_JSON):
+                ingest.ingest(url, cwd=self.dir)
+            for f in Path(self.dir).glob("*.md"):
+                content = f.read_text(encoding="utf-8")
+                self.assertNotIn("supersecret", content, f"{f.name} leaks the secret")
+            mems = store.load_all(self.dir)
+            self.assertTrue(mems, "ingest produced no memories")
+            self.assertTrue(all(m.source.startswith("ingest:") for m in mems))
+            self.assertTrue(any("[REDACTED]" in m.source for m in mems),
+                            [m.source for m in mems])
+        finally:
+            srv.shutdown()
+
+    def test_userinfo_url_fails_clean_and_writes_nothing(self):
+        # urlopen cannot connect through user:pass@ userinfo — the failure
+        # must surface as IngestError with zero writes (no leaked origin).
+        before = list(Path(self.dir).glob("*.md"))
+        with self.assertRaises(ingest.IngestError):
+            ingest.ingest("http://user:***@127.0.0.1:1/page", cwd=self.dir)
+        self.assertEqual(before, list(Path(self.dir).glob("*.md")))
+
+    def test_safe_origin_strips_userinfo(self):
+        out = ingest._safe_origin("https://user:***@example.com/doc")
+        self.assertNotIn("supersecret", out)
+        self.assertNotIn("user:", out)
+        self.assertIn("example.com/doc", out)
+
+    def test_safe_origin_scrubs_query(self):
+        out = ingest._safe_origin("https://example.com/doc?password=***")
+        self.assertNotIn("supersecret", out)
+        self.assertIn("[REDACTED]", out)
 
 
 # ---------------------------------------------------------------------------

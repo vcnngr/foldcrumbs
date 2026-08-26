@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import http.client
 import urllib.error
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import config, distill, llm, redact
+from . import config, distill, llm
+from .redact import scrub
 from .schema import MemoryRecord
 
 # Documents are longer than session summaries; still bounded so one giant page
@@ -135,6 +137,39 @@ def _read_url(url: str) -> str:
     return text  # plain text / markdown served over http
 
 
+# --- origin sanitization ----------------------------------------------------
+
+# Query keys whose values must never be persisted — provenance is
+# user-controlled input, and URLs routinely carry credentials in the query.
+_SENSITIVE_KEYS = (
+    "password", "passwd", "pwd", "secret", "token", "api_key", "apikey",
+    "access_key", "accesskey", "client_secret", "auth", "auth_token",
+    "authtoken", "key", "credential", "session",
+)
+
+
+def _safe_origin(origin: str) -> str:
+    """Origins are user-controlled input — they must never carry a secret to
+    disk. For URLs: userinfo (user:pass@host) is dropped wholesale and the
+    values of sensitive-looking query keys are redacted. Whatever remains is
+    then scrubbed like any other text (token-shaped strings inside paths).
+    """
+    if origin.startswith(("http://", "https://")):
+        parts = urllib.parse.urlsplit(origin)
+        netloc = parts.netloc.rsplit("@", 1)[-1]  # drop userinfo if present
+        if parts.query:
+            pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+            scrubbed = [
+                (k, "[REDACTED]" if k.strip().lower() in _SENSITIVE_KEYS else v)
+                for k, v in pairs
+            ]
+            parts = parts._replace(query=urllib.parse.urlencode(scrubbed)
+                                     .replace("%5BREDACTED%5D", "[REDACTED]"))
+        parts = parts._replace(netloc=netloc)
+        origin = urllib.parse.urlunsplit(parts)
+    return scrub(origin)
+
+
 # --- truncation -------------------------------------------------------------
 
 def _truncate_doc(text: str) -> str:
@@ -170,7 +205,7 @@ def ingest(source: str, cwd: str | None = None) -> dict[str, int]:
     record stays traceable to the document it came from.
     """
     text, origin = read_document(source)  # may raise IngestError; no writes yet
-    text = redact.scrub(text.strip())
+    text = scrub(text.strip())
     if not text:
         return {"created": 0, "validated": 0, "superseded": 0, "total": 0}
     text = _truncate_doc(text)
@@ -185,12 +220,12 @@ def ingest(source: str, cwd: str | None = None) -> dict[str, int]:
             continue
         records.append(
             MemoryRecord(
-                title=redact.scrub(item["title"]),
-                content=redact.scrub(item["content"]),
+                title=scrub(item["title"]),
+                content=scrub(item["content"]),
                 type=item["type"],
                 confidence=item["confidence"],
                 provenance="imported",
-                source=f"ingest:{origin}",
+                source=f"ingest:{_safe_origin(origin)}",
                 tags=item.get("tags", []),
             )
         )
