@@ -5,6 +5,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Document ingestion with provenance** — `foldcrumbs ingest <file|url>`
+  (CLI) and the MCP `ingest` tool turn an external document — a markdown ADR,
+  a design note, an article fetched by URL — into typed memories. Every
+  ingested memory carries `provenance: imported` and `source: ingest:<origin>`
+  so it stays traceable to the document it came from. HTML pages are reduced
+  to visible text with the stdlib parser (scripts/styles dropped). Documents
+  are bounded by deterministic head+tail truncation (24k chars). Secrets are
+  scrubbed before the LLM and before the disk, exactly like distill — and the
+  origin itself is sanitized (URL userinfo dropped, sensitive query keys
+  redacted) so user-controlled provenance can never carry a credential into
+  the store; a dead
+  LLM degrades to the keyword heuristic; an unreachable URL or missing file
+  fails BEFORE writing anything. Deliberate boundary: text/markdown files and
+  http(s) pages only — PDF, OCR and JS-rendered pages stay out of scope,
+  because binary parsers and headless browsers are the dependency weight
+  foldcrumbs refuses. `foldcrumbs distill` remains the tool for SESSION
+  transcripts; ingest is for standalone documents.
+
 ## [0.9.0] — 2026-08-23
 
 ### Added

@@ -277,6 +277,8 @@ python3 -m foldcrumbs remember "试用许可证覆盖 staging" --expires 2026-09
 python3 -m foldcrumbs recall "vector db" --type decision --tag arch   # 过滤器，可重复
 python3 -m foldcrumbs index
 python3 -m foldcrumbs distill transcript.txt    # 蒸馏持久记忆（LLM）
+python3 -m foldcrumbs ingest spec.md            # 摄取一个文档（来源：imported）
+python3 -m foldcrumbs ingest https://example.com/design-note.html   # 或一个 URL
 python3 -m foldcrumbs checkpoint transcript.txt # 写入一份恢复用交接（LLM）
 python3 -m foldcrumbs handoff                   # 打印当前交接
 python3 -m foldcrumbs answer "how does recall work?"
@@ -311,6 +313,14 @@ python3 -m foldcrumbs profile env kimi               # 选中它所需的那一�
 什么已过期、下一个到期的是什么，而移除或移动文件里的日期就是你说它仍然有效的方式。
 只有用户的明确意图才会设置过期时间：蒸馏从不猜测日期，因此任何记忆都不会
 得到一个它未曾要求的静默定时器。
+
+**`ingest` 摄取文档，`distill` 摄取会话。** 一份设计笔记、一个 ADR、一篇
+通过 URL 获取的文章：`ingest <file|url>` 把文档变成带类型的记忆，其
+`provenance: imported` 与 `source: ingest:<来源>`，使每条导入的记忆都能
+追溯到它的出处。HTML 页面被简化为可见文本（脚本与样式被丢弃）；机密信息
+在送给 LLM 之前和写入磁盘之前都会被清洗；无法访问的来源会在写入任何内容
+之前失败。PDF、OCR 和 JS 渲染的页面被刻意排除在外 — 那正是 foldcrumbs
+拒绝的依赖重量。
 
 ### Profile — 每个 agent 一个存储
 

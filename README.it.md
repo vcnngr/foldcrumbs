@@ -300,6 +300,8 @@ python3 -m foldcrumbs remember "La licenza trial copre staging" --expires 2026-0
 python3 -m foldcrumbs recall "vector db" --type decision --tag arch   # filtri, ripetibili
 python3 -m foldcrumbs index
 python3 -m foldcrumbs distill transcript.txt    # distilla memorie durevoli (LLM)
+python3 -m foldcrumbs ingest spec.md            # ingerisci un documento (provenienza: imported)
+python3 -m foldcrumbs ingest https://example.com/design-note.html   # oppure un URL
 python3 -m foldcrumbs checkpoint transcript.txt # scrive un handoff di ripresa (LLM)
 python3 -m foldcrumbs handoff                   # stampa l'handoff corrente
 python3 -m foldcrumbs answer "come funziona il recall?"
@@ -335,6 +337,15 @@ archiviata — indice, recall, federazione, dedup — mentre il file resta intat
 è scaduto e cosa scadrà dopo, e rimuovere o spostare la data nel file è il modo per dire
 che vale ancora. Solo l'intento esplicito dell'utente imposta una scadenza: la distillazione
 non indovina mai date, così nessuna memoria riceve mai un timer silenzioso che non ha chiesto.
+
+**`ingest` cattura documenti, `distill` cattura sessioni.** Una nota di design,
+un ADR, un articolo via URL: `ingest <file|url>` trasforma il documento in memorie
+tipizzate con `provenance: imported` e `source: ingest:<origine>`, così ogni memoria
+importata resta rintracciabile alla sua provenienza. Le pagine HTML sono ridotte al testo
+visibile (script e stili scartati); i segreti sono ripuliti prima dell'LLM e prima del
+disco; una sorgente irraggiungibile fallisce prima di scrivere alcunché. PDF, OCR e pagine
+renderizzate via JS sono deliberatamente fuori scope — è il peso di dipendenze che
+foldcrumbs rifiuta.
 
 ### Profili — uno store per agent
 
