@@ -152,6 +152,13 @@ class TestReadDocumentUrl(TmpStore):
         with self.assertRaises(ingest.IngestError):
             ingest.read_document("http://127.0.0.1:1/dead")
 
+    def test_malformed_url_raises_ingest_error_not_traceback(self):
+        # Spaces in a URL make Request() raise InvalidURL (a ValueError) at
+        # construction time. It must surface as IngestError, never a raw
+        # traceback (regression test for review F1).
+        with self.assertRaises(ingest.IngestError):
+            ingest.read_document("http://host/bad path")
+
 
 # ---------------------------------------------------------------------------
 # truncation

@@ -21,6 +21,7 @@ Fail-soft contract, same as distill:
 
 from __future__ import annotations
 
+import http.client
 import urllib.error
 import urllib.request
 from html.parser import HTMLParser
@@ -115,12 +116,16 @@ def read_document(source: str) -> tuple[str, str]:
 
 
 def _read_url(url: str) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": "foldcrumbs-ingest"})
     try:
+        # Request() and the connection layer can raise http.client.InvalidURL
+        # on malformed URLs (spaces, control chars). It subclasses
+        # HTTPException, NOT OSError/ValueError — without it in the except
+        # tuple a bad URL escapes as a raw traceback instead of IngestError.
+        req = urllib.request.Request(url, headers={"User-Agent": "foldcrumbs-ingest"})
         with urllib.request.urlopen(req, timeout=_URL_TIMEOUT_S) as resp:  # noqa: S310
             raw = resp.read(_URL_MAX_BYTES + 1)
             ctype = (resp.headers.get("Content-Type") or "").lower()
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
         raise IngestError(f"cannot fetch {url}: {exc}") from exc
     if len(raw) > _URL_MAX_BYTES:
         raise IngestError(f"document too large (> {_URL_MAX_BYTES} bytes): {url}")

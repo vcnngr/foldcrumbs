@@ -292,6 +292,8 @@ python3 -m foldcrumbs remember "Trial license covers staging" --expires 2026-09-
 python3 -m foldcrumbs recall "vector db" --type decision --tag arch   # filters, repeatable
 python3 -m foldcrumbs index
 python3 -m foldcrumbs distill transcript.txt    # distil durable memories (LLM)
+python3 -m foldcrumbs ingest spec.md            # ingest a document file (provenance: imported)
+python3 -m foldcrumbs ingest https://example.com/design-note.html   # or a URL
 python3 -m foldcrumbs checkpoint transcript.txt # write a resume handoff (LLM)
 python3 -m foldcrumbs handoff                   # print the current handoff
 python3 -m foldcrumbs answer "how does recall work?"
@@ -329,6 +331,15 @@ untouched on disk. `decay` is then the sweep that archives it (and labels it
 removing or moving the date in the file is how you say it still holds. Only
 explicit user intent sets an expiry: distillation never guesses a date, so no
 memory ever gets a silent timer it didn't ask for.
+
+**`ingest` captures documents, `distill` captures sessions.** A design note,
+an ADR, an article by URL: `ingest <file|url>` turns the document into typed
+memories with `provenance: imported` and `source: ingest:<origin>`, so every
+imported memory stays traceable to where it came from. HTML pages are reduced
+to visible text (scripts and styles dropped); secrets are scrubbed before the
+LLM and before the disk; an unreachable source fails before writing anything.
+PDFs, OCR and JS-rendered pages are deliberately out of scope — that is the
+dependency weight foldcrumbs refuses.
 
 ### Profiles — one store per agent
 
