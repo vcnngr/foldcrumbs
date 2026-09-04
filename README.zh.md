@@ -268,6 +268,28 @@ foldcrumbs graph path A B --include-inferred         # 按查询显式开启的�
 MCP 服务器暴露同样的姿态：一个 `relate` 工具（来源 `agent`，confidence
 上限 0.5）以及 `graph_path` 上的 `include_inferred` 参数，默认关闭。
 
+### 穿越 superseded 记忆（transit）
+
+`graph path` 默认从不穿越 `superseded`（或 `deleted`/`provisional`）记忆
+— 这是 D3 规则。但因果链可能经过一条后来被取代的记忆（一份被 fix 细化
+的早期设计、一个被后续版本取代的已发布版本）。对这些情况，人可以逐一
+将一条 superseded 记忆认证为可穿越（transit-eligible）（设计 §D3-bis，
+docs/design/g2-extraction.md）：
+
+```bash
+foldcrumbs graph transit <记忆> on     # 认证：该 superseded 记忆可被穿越
+foldcrumbs graph transit <记忆> off    # 撤销认证
+foldcrumbs graph path A B              # 若第一阶段无结果，第二阶段穿越被认证节点
+```
+
+穿越是两阶段的，绝不会让你意外：第一阶段只在活跃图上搜索（与认证前
+行为完全一致）；只有当它以 `NOT_FOUND_EXHAUSTIVE` 结束时，第二阶段
+才会在被认证的 superseded 节点上运行。任何 transit 步骤都会在输出中标记
+`(superseded — transit)`，因此穿过历史的路径始终清晰可见。认证是
+fail-closed 的：只有本地的、superseded 的、未过期的记忆才符合条件，且
+frontmatter 中的值必须恰好为 `true`。导入与 `migrate` 会剥离保留的
+`transit` 键，因此任何自动化路径都无法夹带认证。
+
 ## CLI
 
 ```bash
@@ -288,6 +310,7 @@ python3 -m foldcrumbs relate "发布延期" caused_by --to-memory "供应商延�
 python3 -m foldcrumbs graph path "供应商延迟" "发布延期"   # FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED
 python3 -m foldcrumbs graph doctor                 # 悬空目标、未知谓词
 python3 -m foldcrumbs graph entities --similar     # 外部实体 + 合并建议
+python3 -m foldcrumbs graph transit "早期设计" on   # 认证一条 superseded 记忆为可穿越
 python3 -m foldcrumbs forget fact_wrong.md --apply   # 软删除（--hard 直接删除文件）
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # 对账队列（含糊的对、主张）
@@ -531,7 +554,8 @@ python3 -m unittest discover -s tests -v
 ## MCP 服务器
 
 foldcrumbs 附带一个极简 MCP 服务器（stdio、仅标准库 — 不依赖 `mcp` SDK），向任何
-MCP 客户端提供 `remember`、`recall`、`answer` 和 `forget`：
+MCP 客户端提供七个工具 — `remember`、`recall`、`answer`、`forget`、
+`graph_path`、`relate` 和 `ingest`：
 
 ```bash
 foldcrumbs-mcp            # 或：python3 -m foldcrumbs.mcp_server
@@ -562,7 +586,13 @@ Codex 和 OpenCode 由 `foldcrumbs install --agent …` 接入它。注册上面
 - **阶段 2.7 ✓** — 记忆工程：召回强化与排序中的新鲜度、执行归档的 decay
   清扫、具名 profile（每个 agent 一个存储），以及 `/remember` `/recall`
   `/forget` `/foldcrumbs` slash 命令。
-- **阶段 3** — embeddings + 开放向量数据库，仅在规模超出 grep 时引入；通过 OCR 摄取文档。
+- **阶段 2.8 ✓** — 图（graph）层：带来源的类型化关系（`relate`、
+  `graph path`/`doctor`/`entities`）、置于人工审批队列之后的模型提议关系
+  （G2）、对被认证 superseded 记忆的 transit-only 穿越（D3-bis），以及
+  带来源的文档摄取（`ingest`）。
+- **阶段 3** — 舰队级记忆共享（联邦存储之间的采用）；embeddings 保持
+  opt-in，grep 保持默认 — 在规模真正需要之前不引入向量数据库。PDF/OCR/
+  JS 渲染页面的摄取仍刻意排除在外（stdlib 边界）。
 
 发布历史：[CHANGELOG.md](CHANGELOG.md)。
 
@@ -583,7 +613,7 @@ foldcrumbs 由一名人类指挥多个大语言模型共同构建，每个模型
 | 模型 | 贡献 |
 |--|--|
 | Claude Opus 4.8 · Opus 5 · Fable 5 | 代码，0.1 → 0.6.1：存储、蒸馏、hook、联邦 |
-| Qwen 3.8 Max | 代码，0.7.0：语义召回、过期机制、对账队列、仪表盘、发布 |
+| Qwen 3.8 Max | 代码，0.7.0 → 0.9.0：语义召回、过期机制、对账队列、仪表盘、图（graph）层（G0–G2）、superseded 记忆的 transit-only 路径、文档摄取、发布 |
 | GPT-5.5 · GPT-5.6-sol | 代码审查与红队测试 |
 | Kimi K3 | 开发循环的独立审查者（对每个实现给出 GREEN/RED 裁决） |
 
