@@ -291,6 +291,31 @@ Il server MCP espone la stessa postura: un tool `relate` (provenienza `agent`,
 confidence limitata a 0.5) e un parametro `include_inferred` su `graph_path`,
 spento di default.
 
+### Attraversare le memorie superseded (transit)
+
+Di default `graph path` non attraversa mai le memorie `superseded` (o
+`deleted`/`provisional`) — è la regola D3. Ma una catena causale può passare
+attraverso una memoria superseded in seguito (un design iniziale che un fix ha
+raffinato, una release sostituita da una successiva). Per questi casi un umano
+può attestare UNA memoria superseded alla volta come transit-eligible (design
+§D3-bis, docs/design/g2-extraction.md):
+
+```bash
+foldcrumbs graph transit <memoria> on    # attesta: questa memoria superseded può essere attraversata
+foldcrumbs graph transit <memoria> off   # revoca l'attestazione
+foldcrumbs graph path A B                # se la fase 1 non trova nulla, la fase 2 attraversa i nodi attestati
+```
+
+Il cammino è a due fasi e non sorprende mai: la fase 1 cerca solo nel grafo
+attivo (comportamento identico a prima dell'attestazione); solo se termina con
+`NOT_FOUND_EXHAUSTIVE` parte la fase 2, sui nodi superseded attestati. Ogni
+passo in transit è marcato `(superseded — transit)` nell'output, così un
+cammino attraverso la storia è sempre visibile come tale. L'attestazione è
+fail-closed: solo una memoria locale, superseded e non scaduta è idonea, e il
+valore nel frontmatter deve essere esattamente `true`. Import e `migrate`
+rimuovono la chiave riservata `transit`, così nessun percorso automatizzato può
+contrabbandare un'attestazione dall'esterno.
+
 ## CLI
 
 ```bash
@@ -311,6 +336,7 @@ python3 -m foldcrumbs relate "Release slittata" caused_by --to-memory "Ritardo f
 python3 -m foldcrumbs graph path "Ritardo fornitore" "Release slittata"   # FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED
 python3 -m foldcrumbs graph doctor                 # target penzolanti, predicati sconosciuti
 python3 -m foldcrumbs graph entities --similar     # entità esterne + suggerimenti merge
+python3 -m foldcrumbs graph transit "Design iniziale" on   # attesta una memoria superseded come attraversabile
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard rimuove il file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # coda di riconciliazione (coppie ambigue, rivendicazioni)
@@ -570,7 +596,8 @@ python3 -m unittest discover -s tests -v
 ## Server MCP
 
 foldcrumbs include un server MCP minimale (stdio, solo stdlib — nessuna dipendenza dall'SDK `mcp`)
-che espone `remember`, `recall`, `answer` e `forget` a qualsiasi client MCP:
+che espone sette tool — `remember`, `recall`, `answer`, `forget`, `graph_path`, `relate` e `ingest` —
+a qualsiasi client MCP:
 
 ```bash
 foldcrumbs-mcp            # oppure: python3 -m foldcrumbs.mcp_server
@@ -602,7 +629,14 @@ restringere una ricerca.
 - **Fase 2.7 ✓** — ingegneria della memoria: rinforzo del recall e freschezza nel
   ranking, una passata di decay che archivia, profili con nome (uno store per agent) e
   comandi slash `/remember` `/recall` `/forget` `/foldcrumbs`.
-- **Fase 3** — embeddings + vector DB aperto solo se la scala supera il grep; ingest di documenti via OCR.
+- **Fase 2.8 ✓** — graph layer: relazioni tipizzate con provenienza (`relate`,
+  `graph path`/`doctor`/`entities`), relazioni proposte dal modello dietro una coda
+  di approvazione umana (G2), attraversamento transit-only delle memorie superseded
+  attestate (D3-bis) e ingest documentale con provenienza (`ingest`).
+- **Fase 3** — condivisione della memoria a livello di flotta (adozione tra store
+  federati); gli embeddings restano opt-in e il grep resta il default — nessun vector
+  DB finché la scala non lo richiede davvero. L'ingest di PDF/OCR/pagine renderizzate
+  via JS resta deliberatamente fuori scope (confine stdlib).
 
 Storico dei rilasci: [CHANGELOG.md](CHANGELOG.md).
 
@@ -624,7 +658,7 @@ ruolo distinto. Git attribuisce i modelli Claude (i loro strumenti scrivono i tr
 | Modello | Contributo |
 |--|--|
 | Claude Opus 4.8 · Opus 5 · Fable 5 | codice, 0.1 → 0.6.1: store, distillazione, hook, federazione |
-| Qwen 3.8 Max | codice, 0.7.0: semantic recall, expiry, coda di riconciliazione, dashboard, release |
+| Qwen 3.8 Max | codice, 0.7.0 → 0.9.0: semantic recall, expiry, coda di riconciliazione, dashboard, graph layer (G0–G2), path transit-only su superseded, ingest documentale, release |
 | GPT-5.5 · GPT-5.6-sol | review e red-teaming del codice |
 | Kimi K3 | revisore indipendente del loop di sviluppo (verdetto GREEN/RED su ogni implementazione) |
 
