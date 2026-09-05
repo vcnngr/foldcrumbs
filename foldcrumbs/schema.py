@@ -62,6 +62,20 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+VALID_OUTCOMES = ("good", "bad")
+
+
+def _parse_outcome(value: str | None) -> str | None:
+    """FL-2: tolerant outcome read — only the closed vocabulary survives.
+
+    A hand-edited or imported ``outcome: bogus`` degrades to None (no
+    verdict) rather than passing through: the value feeds trust decisions,
+    so an unknown word must not masquerade as one.
+    """
+    v = (value or "").strip().lower()
+    return v if v in VALID_OUTCOMES else None
+
+
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
@@ -229,6 +243,17 @@ class MemoryRecord:
     # added after 0.6.0.
     extra_meta: dict = field(default_factory=dict, compare=False)
 
+    # FL-2 outcome loop (design fleet-learning.md §F2). `outcome` is the
+    # user's verdict on this memory: "good" (it held) or "bad" (it burned
+    # us). Written ONLY by the local `foldcrumbs outcome` command — a
+    # RESERVED key stripped at import/migrate like `transit`, so no foreign
+    # validation or dispute can be smuggled in. None means "no verdict
+    # recorded": the file carries no outcome line at all (zero noise on the
+    # millions of memories that predate this field).
+    outcome: str | None = None
+    outcome_at: datetime | None = None
+    outcome_note: str | None = None
+
     @property
     def is_foreign(self) -> bool:
         return self.origin_root is not None
@@ -266,7 +291,12 @@ class MemoryRecord:
 
     def compute_confidence(self) -> float:
         if self.contradiction_detected:
-            return max(0.1, self.confidence * 0.3)
+            # FL-2 (RT F5): a penalty must never promote. The 0.1 floor
+            # alone would RAISE a very low confidence (0.15 * 0.3 = 0.045
+            # -> 0.1); cap at the non-contradicted value so "bad" can only
+            # ever lower the effective weight.
+            base = self.confidence * _PROVENANCE_WEIGHTS.get(self.provenance, 0.8)
+            return round(min(base, max(0.1, self.confidence * 0.3)), 2)
         if self.status == "superseded":
             return 0.0
         base = self.confidence * _PROVENANCE_WEIGHTS.get(self.provenance, 0.8)
@@ -332,6 +362,21 @@ class MemoryRecord:
             fm.append(f"expires_at: {_iso(self.expires_at)}")
         if self.relations_json:
             fm.append(f"relations_json: {self.relations_json}")
+        # FL-2: contradiction_detected finally round-trips (RT F5 proved it
+        # was lost before). Serialized only when True — False is the default
+        # and millions of files must stay byte-identical.
+        if self.contradiction_detected:
+            fm.append("contradiction_detected: true")
+        # outcome keys: present only when a verdict was recorded. The note is
+        # flattened to one line — a multiline value would forge frontmatter
+        # keys on the next parse (FL-1 F1 lesson, applied by construction).
+        if self.outcome in ("good", "bad"):
+            fm.append(f"outcome: {self.outcome}")
+            if self.outcome_at is not None:
+                fm.append(f"outcome_at: {_iso(self.outcome_at)}")
+            if self.outcome_note:
+                fm.append("outcome_note: "
+                          + " ".join(str(self.outcome_note).split()))
         # Unknown keys go back into the file verbatim: a rewrite must never
         # erase frontmatter this code does not own (design REV-2, GPT-F6).
         for key in sorted(self.extra_meta):
@@ -375,6 +420,15 @@ class MemoryRecord:
             # foldcrumbs.relations, so here it is stored as read. A malformed
             # line degrades to None, never to an error — same posture.
             relations_json=(meta.get("relations_json") or "").strip() or None,
+            # FL-2: contradiction_detected finally round-trips (RT F5).
+            # Tolerant read: only the literal "true" sets it — any other
+            # value degrades to False, never to an error.
+            contradiction_detected=(
+                (meta.get("contradiction_detected") or "").strip().lower()
+                == "true"),
+            outcome=_parse_outcome(meta.get("outcome")),
+            outcome_at=_parse_dt_opt(meta.get("outcome_at")),
+            outcome_note=(meta.get("outcome_note") or "").strip() or None,
         )
         # Frontmatter this code does not own: preserved verbatim so a
         # rewrite cannot erase it (design REV-2, GPT-F6).
@@ -382,7 +436,8 @@ class MemoryRecord:
             "name", "description", "type", "id", "confidence", "provenance",
             "status", "source", "tags", "validation_count", "created_at",
             "updated_at", "superseded_by", "supersedes_external",
-            "expires_at", "relations_json",
+            "expires_at", "relations_json", "contradiction_detected",
+            "outcome", "outcome_at", "outcome_note",
         }
         rec.extra_meta = {k: v for k, v in meta.items() if k not in _known}
         # Remember that the timestamp was invented rather than read — which

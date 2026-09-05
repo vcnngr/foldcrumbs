@@ -675,6 +675,14 @@ def import_store(
         # later auto-supersede can never turn a foreign attestation into a
         # local one. Fail-closed: what survives must come from this store.
         rec.extra_meta.pop("transit", None)
+        # FL-2 trust boundary (RT F6): the outcome loop's keys are reserved
+        # the same way — an imported validation_count is pre-existing debt
+        # (out of scope by design), but outcome*/contradiction_detected are
+        # NEW typed fields and must never ride in from another store.
+        rec.outcome = None
+        rec.outcome_at = None
+        rec.outcome_note = None
+        rec.contradiction_detected = False
         if apply:
             action, _ = upsert(rec, cwd)
         else:
