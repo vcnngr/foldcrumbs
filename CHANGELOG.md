@@ -17,11 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ingested memory carries `provenance: imported` and `source: ingest:<origin>`
   so it stays traceable to the document it came from. HTML pages are reduced
   to visible text with the stdlib parser (scripts/styles dropped). Documents
-  are bounded by deterministic head+tail truncation (24k chars). Secrets are
+  are bounded by deterministic head+tail truncation (24k chars plus a
+  truncation marker). Secrets are
   scrubbed before the LLM and before the disk, exactly like distill — and the
-  origin itself is sanitized (URL userinfo dropped, sensitive query keys
-  redacted) so user-controlled provenance can never carry a credential into
-  the store; a dead
+  origin itself is sanitized (URL userinfo dropped, recognized sensitive query
+  keys redacted, secret scrubber applied) before user-controlled provenance
+  reaches the store; a dead
   LLM degrades to the keyword heuristic; an unreachable URL or missing file
   fails BEFORE writing anything. Deliberate boundary: text/markdown files and
   http(s) pages only — PDF, OCR and JS-rendered pages stay out of scope,
