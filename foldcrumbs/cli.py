@@ -199,6 +199,55 @@ def _cmd_adopt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _outcome_ref(ref: str) -> str:
+    """Resolve id/title/filename to the REAL on-disk filename for outcome.
+
+    RT round-1 F4: the help promises id/title resolution; store.get alone
+    only takes filenames. _resolve_memory_ref already does exact-id,
+    exact-title and unique-stem resolution with visible ambiguity errors —
+    reuse it, and fall back to the raw ref so store.get can report
+    not-found uniformly.
+    """
+    from . import relations as _rel
+    try:
+        mem = _resolve_memory_ref(ref)
+    except _rel.InvalidRelation:
+        return ref   # let set_outcome report not-found uniformly
+    return mem.source_path or mem.filename()
+
+
+def _cmd_outcome(args: argparse.Namespace) -> int:
+    from . import outcome as outcome_mod
+    if getattr(args, "list", False):
+        rows = outcome_mod.list_outcomes()
+        if not rows:
+            print("no outcomes recorded yet — "
+                  "`foldcrumbs outcome <memory> good|bad`")
+            return 0
+        for r in rows:
+            mark = "✓" if r["outcome"] == "good" else "✗"
+            src = f"  [adopted from {r['adopted_from']}]" \
+                if r.get("adopted_from") else ""
+            note = f"  — {r['note']}" if r["note"] else ""
+            print(f"  {mark} {r['outcome']:4}  {r['filename']}{src}{note}")
+        return 0
+    res = outcome_mod.set_outcome(_outcome_ref(args.memory), args.verdict,
+                                  note=args.note or "")
+    if not res["ok"]:
+        print(f"outcome refused: {res['reason']}", file=sys.stderr)
+        raise SystemExit(1)
+    if res["outcome"] == "good":
+        print(f"recorded good — validation_count={res['validation_count']} "
+              f"(effective-weight paths: answer/audit; search ranking is "
+              f"relevance-based and unchanged)")
+    else:
+        print("recorded bad — contradiction detected; effective weight is "
+              "penalized (never below its non-contradicted value: a "
+              "penalty does not promote). The flag survives disk; only "
+              "`supersede` clears the history.")
+    return 0
+
+
 def _cmd_doctor(_: argparse.Namespace) -> int:
     from foldcrumbs import audit
     a = audit.audit()
@@ -913,9 +962,19 @@ def _cmd_roots(args: argparse.Namespace) -> int:
     return 0
 
 
-def _strip_reserved_transit(text: str) -> str:
-    """D3-bis trust boundary: drop the reserved ``transit`` key from one
-    memory's frontmatter, mirroring the parser EXACTLY.
+#: Reserved frontmatter keys whose only legitimate writer is a local human
+#: command: ``transit`` (D3-bis attestation) and the FL-2 outcome loop keys
+#: (RT F6). Automatic entry paths (migrate) strip all of them — what
+#: survives must come from this store.
+_RESERVED_FRONTMATTER_KEYS = frozenset({
+    "transit", "outcome", "outcome_at", "outcome_note",
+    "contradiction_detected",
+})
+
+
+def _strip_reserved_keys(text: str) -> str:
+    """Trust boundary: drop the reserved keys from one memory's frontmatter,
+    mirroring the parser EXACTLY.
 
     Two parser behaviours this must match (GPT code-RT):
     - schema._split_frontmatter partitions each frontmatter line on the
@@ -941,10 +1000,15 @@ def _strip_reserved_transit(text: str) -> str:
         end = len(lines)          # parser: metadata runs to EOF
     kept = []
     for ln in lines[1:end]:
-        if ":" in ln and ln.partition(":")[0].strip() == "transit":
+        if ":" in ln and ln.partition(":")[0].strip() in _RESERVED_FRONTMATTER_KEYS:
             continue
         kept.append(ln)
     return "\n".join([lines[0]] + kept + lines[end:])
+
+
+# Back-compat alias: transit-only callers (and the D3-bis test suite) keep
+# working; the boundary now covers the outcome keys too.
+_strip_reserved_transit = _strip_reserved_keys
 
 
 def _cmd_migrate(args: argparse.Namespace) -> int:
@@ -1195,6 +1259,17 @@ def build_parser() -> argparse.ArgumentParser:
     ad.add_argument("--note", help="adoption note stored in the ledger (evidence)")
     ad.add_argument("--as-type", dest="as_type", help="re-type the copy on adoption")
     ad.set_defaults(func=_cmd_adopt)
+
+    oc = sub.add_parser("outcome",
+                        help="record good|bad on a memory (the fleet outcome loop)")
+    oc.add_argument("memory", nargs="?",
+                    help="memory to judge: id, title or filename")
+    oc.add_argument("verdict", nargs="?", choices=["good", "bad"],
+                    help="good = it held (bumps validation), bad = it burned us")
+    oc.add_argument("--note", help="evidence for the verdict (flattened to one line)")
+    oc.add_argument("--list", action="store_true",
+                    help="list recorded outcomes (adoptions annotated)")
+    oc.set_defaults(func=_cmd_outcome)
 
     sub.add_parser("status", help="show config + stats").set_defaults(func=_cmd_status)
 
