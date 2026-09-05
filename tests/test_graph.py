@@ -115,6 +115,83 @@ class TestGraphBuild(TmpStore):
         self.assertEqual(first, second, "same store must render identical bytes")
 
 
+class TestExplicitEdges(TmpStore):
+    """G1 relations (relations_json frontmatter) must show up in the G0
+    derived graph as 'explicit' edges labelled with the predicate."""
+
+    def _put(self, title, body, type_="fact", tags=None):
+        rec = MemoryRecord(title=title, content=body, type=type_,
+                           tags=list(tags or []))
+        store.write_memory(rec)
+        return rec
+
+    def _pair(self):
+        from foldcrumbs import relations
+        a = self._put("Supplier delay", "Late shipment.", type_="event")
+        b = self._put("Release slipped", "Moved to next week.", type_="event")
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="postmortem", prov="manual")
+        return a, b
+
+    def test_explicit_memory_edge_rendered(self):
+        a, b = self._pair()
+        g = graph.build()
+        self.assertEqual(g.counts()["explicit"], 1)
+        edge = [e for e in g.edges if e.kind == "explicit"][0]
+        self.assertEqual((edge.src, edge.dst), (a.id, b.id),
+                         "explicit edges are directed: source -> target")
+        self.assertEqual(edge.label, "caused_by")
+
+    def test_explicit_edges_are_strong_not_weak(self):
+        self._pair()
+        g = graph.build()
+        kinds = {e.kind for e in g.strong_edges()}
+        self.assertIn("explicit", kinds)
+        self.assertNotIn("explicit", {e.kind for e in g.weak_edges()})
+
+    def test_explicit_edge_dropped_when_target_missing(self):
+        from foldcrumbs import relations
+        a = self._put("Cause", "x", type_="event")
+        b = self._put("Effect", "y", type_="event")
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="e", prov="manual")
+        store.forget(b.filename(), hard=True)
+        g = graph.build()
+        self.assertEqual(g.counts()["explicit"], 0,
+                         "no dangling arrows, same rule as superseded_by")
+
+    def test_explicit_external_target_out_of_scope(self):
+        from foldcrumbs import relations
+        a = self._put("Vendor call", "x", type_="event")
+        relations.add_relation(a.id, "depends_on",
+                               {"k": "x", "ns": "org", "l": "acme corp"},
+                               evidence="e", prov="manual")
+        g = graph.build()
+        self.assertEqual(g.counts()["explicit"], 0,
+                         "external entities belong to graph entities, not G0 edges")
+
+    def test_explicit_malformed_relations_json_ignored(self):
+        a = self._put("Broken rel", "x")
+        # Malformed JSON straight into the frontmatter field, rewritten.
+        a.relations_json = "{not json"
+        store.write_memory(a)
+        g = graph.build()  # must not raise
+        self.assertEqual(g.counts()["explicit"], 0)
+
+    def test_explicit_determinism(self):
+        from foldcrumbs import relations
+        ms = [self._put(f"M{i}", "x", type_="event") for i in range(4)]
+        relations.add_relation(ms[0].id, "caused_by", {"k": "m", "id": ms[1].id},
+                               evidence="e", prov="manual")
+        relations.add_relation(ms[2].id, "precedes", {"k": "m", "id": ms[3].id},
+                               evidence="e", prov="manual")
+        first = graph.render_text(graph.build())
+        second = graph.render_text(graph.build())
+        self.assertEqual(first, second)
+        self.assertIn("caused_by", first)
+        self.assertIn("precedes", first)
+
+
 class TestRenderers(TmpStore):
     def _seed(self):
         old = MemoryRecord(title="Old rule", content="Do A.",
@@ -130,6 +207,28 @@ class TestRenderers(TmpStore):
         out = graph.render_text(graph.build())
         self.assertIn("superseded_by", out)
         self.assertIn("nodes", out)
+
+    def test_text_lists_explicit_predicate(self):
+        from foldcrumbs import relations
+        a = MemoryRecord(title="Cause X", content="x", type="event")
+        b = MemoryRecord(title="Effect Y", content="y", type="event")
+        store.write_memory(a)
+        store.write_memory(b)
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="e", prov="manual")
+        out = graph.render_text(graph.build())
+        self.assertIn("caused_by", out)
+
+    def test_mermaid_labels_explicit_predicate(self):
+        from foldcrumbs import relations
+        a = MemoryRecord(title="Cause X2", content="x", type="event")
+        b = MemoryRecord(title="Effect Y2", content="y", type="event")
+        store.write_memory(a)
+        store.write_memory(b)
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="e", prov="manual")
+        out = graph.render_mermaid(graph.build())
+        self.assertIn("caused_by", out)
 
     def test_text_empty_store_says_so(self):
         out = graph.render_text(graph.build())
