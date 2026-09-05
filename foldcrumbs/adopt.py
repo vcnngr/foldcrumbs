@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config, federation, redact, store
-from .schema import MemoryRecord
+from .schema import VALID_TYPES, MemoryRecord
 
 LEDGER = ".adoptions.json"
 _LOCK_WAIT_SECONDS = 10.0
@@ -365,6 +365,13 @@ def adopt(ref: str, cwd=None, note: str = "",
 
 def _adopt(ref: str, cwd=None, note: str = "",
            as_type: str | None = None) -> dict:
+    # RT Kimi F1 (parity): validate as_type at the CORE, not just in the CLI —
+    # MCP and any future caller get the same explicit refusal instead of the
+    # schema's silent degradation to "fact".
+    if as_type is not None and as_type not in VALID_TYPES:
+        raise AdoptError(
+            f"as_type {as_type!r} is not a memory type — must be one of "
+            f"{', '.join(sorted(VALID_TYPES))}")
     root_id, mem_ref = _split_ref(ref)
     if not federation.valid_id(root_id):
         raise AdoptError(f"root id {root_id!r} is not a valid registry id")

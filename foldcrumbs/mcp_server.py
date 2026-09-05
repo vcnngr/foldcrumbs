@@ -491,15 +491,20 @@ def tool_adopt(args: dict[str, Any]) -> str:
         if not from_root:
             return "refused: 'search' needs 'from_root' — the root id to search in."
         try:
-            cands = adopt_mod.search_candidates(search, from_root,
-                                                limit=int(args.get("limit", 10)))
+            limit = int(args.get("limit", 10))
+        except (TypeError, ValueError):
+            return "refused: 'limit' must be a non-negative integer."
+        if limit < 0:
+            return "refused: 'limit' must be >= 0."
+        try:
+            cands = adopt_mod.search_candidates(search, from_root, limit=limit)
         except adopt_mod.AdoptError as exc:
             return f"refused: {exc}"
         if not cands:
             return "no live candidates in that root."
         lines = [f"  {c['filename']}  [{c['type']}]  {c['title']}"
                  for c in cands]
-        lines.append(f"adopt one with ref='{from_root[:8]}…:<filename>'")
+        lines.append(f"adopt one with ref='{from_root}:<filename>'")
         return "\n".join(lines)
     ref = str(args.get("ref") or "")
     if not ref:

@@ -139,6 +139,14 @@ class TestOutcomeTool(unittest.TestCase):
 class TestAdoptTool(unittest.TestCase):
     """adopt through MCP — refusals identical to the CLI (no extra powers)."""
 
+    def test_as_type_outside_vocabulary_refused_like_cli(self):
+        # RT Kimi F1 (P0): the CLI validates --as-type, the MCP tool passed
+        # it raw and schema silently degraded it to "fact" — a parity hole.
+        from foldcrumbs import adopt as adopt_mod
+        res = adopt_mod.adopt("0123456789abcdef:x.md", as_type="nonsense")
+        self.assertFalse(res["ok"], "invalid as_type must refuse at the core")
+        self.assertIn("as_type", res["reason"])
+
     def setUp(self):
         import os
         import tempfile
@@ -177,6 +185,18 @@ class TestAdoptTool(unittest.TestCase):
         # either an explicit refusal or a visible hint — never a traceback
         self.assertTrue(r["result"]["isError"] or "from_root" in text
                         or "root" in text.lower())
+
+    def test_adopt_search_limit_validated_like_cli(self):
+        # RT Kimi P1 notes: negative/non-numeric limit must refuse visibly,
+        # and the suggested command carries the FULL root id.
+        r = _call(5, "adopt", search="x", from_root="0123456789abcdef",
+                  limit=-1)
+        text = _text(r)
+        self.assertIn("limit", text)
+        self.assertIn("refused", text)
+        r2 = _call(6, "adopt", search="x", from_root="0123456789abcdef",
+                   limit="abc")
+        self.assertIn("limit", _text(r2))
 
     def test_adopt_agent_provenance_lands_in_ledger_note(self):
         # A call without an explicit note is recorded as coming from an
