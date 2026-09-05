@@ -502,7 +502,8 @@ class TestP1Backlog(_AdoptEnv):
         from foldcrumbs import cli
         # --limit negative → visible refusal
         buf, ebuf = io.StringIO(), io.StringIO()
-        old = os.getcwd(); os.chdir(self.proj)
+        old = os.getcwd()
+        os.chdir(self.proj)
         try:
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(ebuf):
                 with self.assertRaises(SystemExit) as ctx:
