@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Fleet learning (Phase 3)** — explicit one-memory adoption from
+  federated roots plus an outcome loop, with no central store and no
+  auto-sync (design: docs/design/fleet-learning.md).
+  - `foldcrumbs adopt <root_id>:<memory-file>` copies ONE memory at a time:
+    fresh local id, `provenance: imported`, `source: adopted:<root>:<id>`
+    (inert declaration), confidence capped at 0.8, validation count reset,
+    future expiry preserved, secrets scrubbed before the write, relations
+    dropped (they would dangle cross-store). The source root is never
+    written to. Refusals are explicit and fail-before-write: unknown or
+    unavailable root, unstable/ambiguous original identity, non-live
+    originals (superseded/deleted/provisional/expired), and ANY occupied
+    destination filename — adoption never overwrites.
+  - Attestation lives in a local ledger (`.adoptions.json`), not in the
+    declared frontmatter: a forged `source: adopted:` arriving via import
+    blocks nothing and attests nothing. The ledger is fail-closed — a
+    corrupt or field-incomplete ledger refuses adoption instead of
+    guessing, and incomplete store scans refuse to decide uniqueness or
+    removal.
+  - `foldcrumbs outcome <memory> good|bad [--note]` records what actually
+    happened: `good` bumps `validation_count`; `bad` sets the now-persisted
+    `contradiction_detected` flag. A penalty never promotes — the
+    contradicted weight is capped at the full non-contradicted value (age
+    decay included). `bad` then `good` keeps the contradiction: only
+    `supersede` clears history. Effects apply to effective-weight paths
+    (answer/audit/trust level), not to search ranking.
+  - `outcome`/`outcome_at`/`outcome_note`/`contradiction_detected` are
+    reserved keys, stripped at `import` and `migrate` like `transit`.
+  - `adopt --search Q --from <root_id>` lists live candidates read-only.
+  - MCP parity: `adopt` and `outcome` tools — the server now exposes nine
+    tools.
+  - The G0 `graph` renderer now draws explicit G1 relations (predicate-
+    labelled edges in text/mermaid/dot/html), hostile-label-safe.
+
+### Fixed
+
+- `compute_confidence` with `contradiction_detected` could RAISE a very low
+  effective weight via the 0.1 floor; it is now capped at the
+  non-contradicted value.
+- `contradiction_detected` was never serialized — the flag was lost on
+  every write→read round-trip. It now round-trips (written only when true,
+  so existing files stay byte-identical).
+
 ## [0.10.0] — 2026-09-05
 
 ### Added

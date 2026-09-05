@@ -152,7 +152,11 @@ def _resolve_in_root(root: federation.RootRef, mem_ref: str,
             f"{memdir} is not a directory")
     matches: list[MemoryRecord] = []
     for rec in store.iter_memories_in(memdir):
-        if rec.filename() == mem_ref:
+        # FL-1 P1 F6: match on the REAL on-disk filename (source_path), not
+        # the one recomputed from the title — a renamed file must stay
+        # addressable by the name it actually has.
+        real = rec.source_path or rec.filename()
+        if real == mem_ref:
             matches = [rec]  # exact filename wins outright
             break
         if rec.title == mem_ref:
@@ -246,6 +250,22 @@ def _copy_of(src: MemoryRecord, root_id: str, note: str = "",
     return copy
 
 
+def _dest_filename(src: MemoryRecord, copy: MemoryRecord) -> str:
+    """Deterministic destination name for the copy (FL-1 P1 F5).
+
+    For degenerate titles (empty/Untitled/"memory" slug) filename() mixes in
+    the LOCAL id — which is fresh on every attempt, so a retry after a
+    failed ledger write would land on a DIFFERENT filename instead of
+    colliding, leaving two unattested copies. Key the degenerate case on the
+    SOURCE id instead: same original → same destination, always.
+    """
+    from .schema import slugify
+    slug = slugify(copy.title)
+    if slug == "memory" or copy.title == "Untitled":
+        return f"{copy.type}_memory_{src.id[:8]}.md"
+    return copy.filename()
+
+
 def _dedup_hit(ledger: dict, root_id: str, src_id: str,
                cwd=None) -> str | None:
     """Ledger-keyed dedup (RT F1): returns the live local filename or None.
@@ -269,7 +289,7 @@ def _dedup_hit(ledger: dict, root_id: str, src_id: str,
                 break
         if found is not None:
             if found.status == "active" and not found.is_expired:
-                return found.filename()
+                return found.source_path or found.filename()
             # dead (superseded/expired/deleted): free the key
             stale.append(local_id)
             continue
@@ -289,7 +309,7 @@ def _dedup_hit(ledger: dict, root_id: str, src_id: str,
     return None
 
 
-def _create_only(memdir: Path, rec: MemoryRecord) -> Path:
+def _create_only(memdir: Path, rec: MemoryRecord, dest_name: str) -> Path:
     """Atomic create-ONLY write: refuses an occupied destination.
 
     ``write_memory`` would ``os.replace`` over an unrelated homonym
@@ -300,9 +320,13 @@ def _create_only(memdir: Path, rec: MemoryRecord) -> Path:
     destination between the check and the replace. No fallback: a create-only
     guarantee is only as strong as its weakest path. The tmp file is removed
     on every path.
+
+    ``dest_name`` is the deterministic destination (see _dest_filename):
+    for degenerate titles it keys on the SOURCE id, so a retry lands on the
+    same filename and collides instead of scattering unattested copies.
     """
     memdir.mkdir(parents=True, exist_ok=True)
-    target = memdir / rec.filename()
+    target = memdir / dest_name
     fd, tmp = tempfile.mkstemp(dir=str(memdir), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -364,9 +388,10 @@ def _adopt(ref: str, cwd=None, note: str = "",
     if hit:
         raise AdoptError(f"already adopted as {hit}")
     copy = _copy_of(src, root.id, note=note, as_type=as_type)
-    if (my_dir / copy.filename()).exists():
+    dest = _dest_filename(src, copy)
+    if (my_dir / dest).exists():
         raise AdoptError(
-            f"destination collision: {copy.filename()} already exists in "
+            f"destination collision: {dest} already exists in "
             f"this store — rename or supersede the local memory first "
             f"(adoption never overwrites)")
 
@@ -381,11 +406,11 @@ def _adopt(ref: str, cwd=None, note: str = "",
         hit = _dedup_hit(ledger, root.id, src.id, cwd)
         if hit:
             raise AdoptError(f"already adopted as {hit}")
-        path = _create_only(my_dir, copy)   # create-only: collision = refuse
+        path = _create_only(my_dir, copy, dest)  # create-only: collision = refuse
         ledger[copy.id] = {
             "root_id": root.id,
             "memory_id": src.id,
-            "filename": copy.filename(),
+            "filename": dest,
             "adopted_at": _now_iso(),
         }
         if note:
@@ -400,7 +425,7 @@ def _adopt(ref: str, cwd=None, note: str = "",
                 f"memory written to {path.name} but the ledger write failed "
                 f"({exc}); the copy exists unattested — inspect "
                 f"{LEDGER} before retrying") from exc
-    return {"ok": True, "filename": copy.filename(), "id": copy.id,
+    return {"ok": True, "filename": dest, "id": copy.id,
             "source": copy.source}
 
 
@@ -425,7 +450,7 @@ def search_candidates(query: str, root_id: str, limit: int = 10,
         score = sum(1 for w in words if w in hay)
         if not words or score:
             out.append({"score": score, "id": rec.id, "title": rec.title,
-                        "filename": rec.filename(), "type": rec.type,
-                        "root": root.label})
+                        "filename": rec.source_path or rec.filename(),
+                        "type": rec.type, "root": root.label})
     out.sort(key=lambda d: (-d["score"], d["filename"]))
     return out[:limit]
