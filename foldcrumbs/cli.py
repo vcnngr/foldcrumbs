@@ -172,10 +172,28 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 
 def _cmd_adopt(args: argparse.Namespace) -> int:
     from . import adopt as adopt_mod
-    if args.search:
+    from .schema import VALID_TYPES
+    if args.as_type and args.as_type not in VALID_TYPES:
+        print(f"adopt refused: --as-type must be one of "
+              f"{', '.join(sorted(VALID_TYPES))} (got {args.as_type!r})",
+              file=sys.stderr)
+        raise SystemExit(1)
+    if args.search is not None:
+        if not args.from_root:
+            print("adopt refused: --search needs --from <root_id>",
+                  file=sys.stderr)
+            raise SystemExit(1)
+        if not args.search.strip():
+            print("adopt refused: --search query is empty", file=sys.stderr)
+            raise SystemExit(1)
+        limit = args.limit if args.limit is not None else 10
+        if limit < 0:
+            print(f"adopt refused: --limit must be >= 0 (got {limit})",
+                  file=sys.stderr)
+            raise SystemExit(1)
         try:
             cands = adopt_mod.search_candidates(args.search, args.from_root,
-                                                limit=args.limit or 10)
+                                                limit=limit)
         except adopt_mod.AdoptError as exc:
             print(f"adopt: {exc}", file=sys.stderr)
             raise SystemExit(1)
@@ -184,14 +202,15 @@ def _cmd_adopt(args: argparse.Namespace) -> int:
             return 0
         for c in cands:
             print(f"  {c['filename']}  [{c['type']}]  {c['title']}")
-        print(f"\nadopt one with: foldcrumbs adopt {args.from_root[:8]}…:<filename>")
+        print(f"\nadopt one with: foldcrumbs adopt {args.from_root}:"
+              f"<filename>")
         return 0
     if not args.ref:
         print("adopt: expected <root_id>:<memory-file> (see `foldcrumbs roots`)",
               file=sys.stderr)
         raise SystemExit(2)
     res = adopt_mod.adopt(args.ref, note=args.note or "",
-                          as_type=getattr(args, "as_type", None))
+                          as_type=args.as_type)
     if not res["ok"]:
         print(f"adopt refused: {res['reason']}", file=sys.stderr)
         raise SystemExit(1)

@@ -456,6 +456,73 @@ class TestLedgerFailClosed(_AdoptEnv):
                          "a refusal must leave the ledger byte-identical")
 
 
+class TestP1Backlog(_AdoptEnv):
+    """FL-1 RT P1 backlog (card t_64da90fa F5-F7), closed in FL-3."""
+
+    def test_f5_degenerate_title_retry_collides_not_scatters(self):
+        # A CJK/degenerate title slugifies to "memory", and filename() mixes
+        # in the LOCAL id — fresh per attempt, so a retry after a failed
+        # ledger write used to scatter copies. Destination now keys on the
+        # SOURCE id: retry must collide, not create a second file.
+        src = self._theirs(title="部署窗口", content="deploy notes.")
+        # simulate: file written, ledger write fails → visible error
+        import unittest.mock as mock
+        with mock.patch.object(adopt_mod, "_write_ledger",
+                               side_effect=OSError(5, "disk full")):
+            res1 = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}",
+                                   cwd=self.proj)
+        self.assertFalse(res1["ok"])
+        self.assertIn("ledger", res1["reason"].lower())
+        # retry: must collide on the SAME deterministic destination
+        res2 = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}",
+                               cwd=self.proj)
+        self.assertFalse(res2["ok"])
+        self.assertIn("collision", res2["reason"].lower())
+        files = [p.name for p in self.my_dir.glob("*.md")]
+        self.assertEqual(len(files), 1,
+                         f"one unattested copy, no scattering: {files}")
+
+    def test_f6_renamed_source_file_resolves_by_real_name(self):
+        src = self._theirs(title="Renamed me", content="x.")
+        real = self.their_dir / src.filename()
+        renamed = self.their_dir / "custom_name.md"
+        real.rename(renamed)
+        # the REAL name resolves...
+        res = adopt_mod.adopt(f"{self.theirs.id}:custom_name.md", cwd=self.proj)
+        self.assertTrue(res["ok"], res.get("reason"))
+        # ...and search reports the real locator, not the recomputed one
+        cands = adopt_mod.search_candidates("renamed", self.theirs.id,
+                                            cwd=self.proj)
+        self.assertTrue(cands)
+        self.assertEqual(cands[0]["filename"], "custom_name.md")
+
+    def test_f7_cli_validates_limit_and_as_type(self):
+        import contextlib
+        import io
+        from foldcrumbs import cli
+        # --limit negative → visible refusal
+        buf, ebuf = io.StringIO(), io.StringIO()
+        old = os.getcwd()
+        os.chdir(self.proj)
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(ebuf):
+                with self.assertRaises(SystemExit) as ctx:
+                    cli.main(["adopt", "--search", "x",
+                              "--from", self.theirs.id, "--limit", "-1"])
+            self.assertEqual(ctx.exception.code, 1)
+            self.assertIn("--limit", ebuf.getvalue())
+            # --as-type outside vocabulary → visible refusal
+            buf2, ebuf2 = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(buf2), contextlib.redirect_stderr(ebuf2):
+                with self.assertRaises(SystemExit) as ctx2:
+                    cli.main(["adopt", f"{self.theirs.id}:x.md",
+                              "--as-type", "nonsense"])
+            self.assertEqual(ctx2.exception.code, 1)
+            self.assertIn("--as-type", ebuf2.getvalue())
+        finally:
+            os.chdir(old)
+
+
 class TestAdoptCLI(_AdoptEnv):
 
     def _run(self, *argv):

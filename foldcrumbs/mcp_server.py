@@ -200,6 +200,66 @@ TOOLS = [
             "required": ["source"],
         },
     },
+    {
+        "name": "adopt",
+        "description": (
+            "Adopt ONE memory from a federated root into this store — "
+            "explicit, never sync. The copy carries provenance 'imported' "
+            "and source 'adopted:<root_id>:<memory_id>'; the attestation "
+            "lives in the local adoption ledger. Refusals are explicit: "
+            "unknown root, unstable/ambiguous id, non-live original, "
+            "destination collision, already adopted. Pass 'search' + "
+            "'from_root' instead of 'ref' to list live candidates without "
+            "adopting."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string",
+                        "description": "<root_id>:<memory-file> — ids via "
+                                       "the roots tool / `foldcrumbs roots`."},
+                "note": {"type": "string",
+                         "description": "Adoption evidence, stored in the "
+                                        "ledger (one memory at a time)."},
+                "as_type": {"type": "string",
+                            "description": "Re-type the copy on adoption."},
+                "search": {"type": "string",
+                           "description": "List live candidates matching "
+                                          "this query (adopts nothing)."},
+                "from_root": {"type": "string",
+                              "description": "Root id to search in "
+                                             "(with 'search')."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "outcome",
+        "description": (
+            "Record the fleet outcome loop verdict on a memory: 'good' (it "
+            "held — bumps validation) or 'bad' (it burned us — sets the "
+            "persisted contradiction flag; a penalty never promotes). "
+            "Effects apply to effective-weight paths (answer/audit), not "
+            "to search ranking. Pass 'list' instead to see recorded "
+            "outcomes with adoption annotations."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory": {"type": "string",
+                           "description": "Memory to judge: id, title or "
+                                          "filename."},
+                "verdict": {"type": "string", "enum": ["good", "bad"],
+                            "description": "The verdict."},
+                "note": {"type": "string",
+                         "description": "Evidence for the verdict "
+                                        "(flattened to one line)."},
+                "list": {"type": "boolean",
+                         "description": "List recorded outcomes instead."},
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -423,10 +483,79 @@ def tool_ingest(args: dict[str, Any]) -> str:
             f"from {args['source']}")
 
 
+def tool_adopt(args: dict[str, Any]) -> str:
+    from . import adopt as adopt_mod
+    search = str(args.get("search") or "")
+    if search:
+        from_root = str(args.get("from_root") or "")
+        if not from_root:
+            return "refused: 'search' needs 'from_root' — the root id to search in."
+        try:
+            limit = int(args.get("limit", 10))
+        except (TypeError, ValueError):
+            return "refused: 'limit' must be a non-negative integer."
+        if limit < 0:
+            return "refused: 'limit' must be >= 0."
+        try:
+            cands = adopt_mod.search_candidates(search, from_root, limit=limit)
+        except adopt_mod.AdoptError as exc:
+            return f"refused: {exc}"
+        if not cands:
+            return "no live candidates in that root."
+        lines = [f"  {c['filename']}  [{c['type']}]  {c['title']}"
+                 for c in cands]
+        lines.append(f"adopt one with ref='{from_root}:<filename>'")
+        return "\n".join(lines)
+    ref = str(args.get("ref") or "")
+    if not ref:
+        return ("refused: adopt needs 'ref' (<root_id>:<memory-file>) — "
+                "or 'search' + 'from_root' to list candidates.")
+    note = str(args.get("note") or "") or "adopted via MCP (agent)"
+    res = adopt_mod.adopt(ref, note=note,
+                          as_type=args.get("as_type"))
+    if not res["ok"]:
+        return f"refused: {res['reason']}"
+    return (f"adopted: {res['filename']}  ({res['source']}) — attested in "
+            f"the local ledger")
+
+
+def tool_outcome(args: dict[str, Any]) -> str:
+    from . import outcome as outcome_mod
+    if args.get("list"):
+        rows = outcome_mod.list_outcomes()
+        if not rows:
+            return "no outcomes recorded yet."
+        lines = []
+        for r in rows:
+            mark = "✓" if r["outcome"] == "good" else "✗"
+            src = f"  [adopted from {r['adopted_from']}]" \
+                if r.get("adopted_from") else ""
+            note = f"  — {r['note']}" if r["note"] else ""
+            lines.append(f"  {mark} {r['outcome']:4}  {r['filename']}{src}{note}")
+        return "\n".join(lines)
+    memory = str(args.get("memory") or "")
+    verdict = str(args.get("verdict") or "")
+    if not memory or not verdict:
+        return ("refused: outcome needs 'memory' and 'verdict' "
+                "(good|bad) — or 'list' to see recorded outcomes.")
+    res = outcome_mod.set_outcome(memory, verdict,
+                                  note=str(args.get("note") or ""))
+    if not res["ok"]:
+        return f"refused: {res['reason']}"
+    if res["outcome"] == "good":
+        return (f"recorded good — validation_count={res['validation_count']} "
+                f"(effective-weight paths: answer/audit; search ranking "
+                f"unchanged)")
+    return ("recorded bad — contradiction persisted; effective weight "
+            "penalized (a penalty never promotes). Only supersede clears "
+            "the history.")
+
+
 _DISPATCH = {"remember": tool_remember, "recall": tool_recall,
              "answer": tool_answer, "forget": tool_forget,
              "graph_path": tool_graph_path, "relate": tool_relate,
-             "ingest": tool_ingest}
+             "ingest": tool_ingest, "adopt": tool_adopt,
+             "outcome": tool_outcome}
 
 
 # --- JSON-RPC / MCP plumbing ----------------------------------------------- #

@@ -311,6 +311,8 @@ python3 -m foldcrumbs graph path "供应商延迟" "发布延期"   # FOUND / NO
 python3 -m foldcrumbs graph doctor                 # 悬空目标、未知谓词
 python3 -m foldcrumbs graph entities --similar     # 外部实体 + 合并建议
 python3 -m foldcrumbs graph transit "早期设计" on   # 认证一条 superseded 记忆为可穿越
+python3 -m foldcrumbs adopt <root_id>:fact_deploy.md --note "对我们也成立"  # 从联邦根采用一条记忆
+python3 -m foldcrumbs outcome fact_deploy.md good      # 结果回路：它成立
 python3 -m foldcrumbs forget fact_wrong.md --apply   # 软删除（--hard 直接删除文件）
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # 对账队列（含糊的对、主张）
@@ -468,6 +470,39 @@ root 会保留它最后发布的条目并加以标记，而不是显得被清空
 要重新运行 `foldcrumbs install`** — hook 运行在安装时准备好的运行时快照上，
 所以仅升级包不会更新它们。
 
+## 从舰队学习：`adopt` 与 `outcome`
+
+联邦在设计上是只读的 — 而你从另一个实例的存储中*学到*的东西会在会话结束时蒸发。
+舰队层让它留存下来，靠两个显式命令，没有任何同步：
+
+```bash
+foldcrumbs roots                                   # 谁在联邦中（id）
+foldcrumbs adopt --search "部署窗口" --from <root_id>   # 列出活跃候选，不采用任何东西
+foldcrumbs adopt <root_id>:<记忆文件> --note "对我们也成立"
+foldcrumbs outcome <记忆> good|bad --note 证据       # 结果回路
+foldcrumbs outcome --list                            # 判定结果，标注采用来源
+```
+
+`adopt` **一次只复制一条记忆** — 批量采用就是同步，而同步正是它拒绝的。
+副本属于你：新 id、`provenance: imported`、`source: adopted:<root_id>:<memory_id>`、
+置信度上限 0.8、验证计数清零、密钥已擦除、关系被丢弃（跨存储会悬空）。
+原件及其根存储永远不会被写入。
+
+采用记录在**本地台账**（`.adoptions.json`）中认证，而不是在声明式的
+frontmatter 里：文件可以在自己的 `source` 上说谎，台账无法被导入。
+台账损坏时拒绝采用而不是猜测；目标文件名冲突一律拒绝 — 采用永不覆盖；
+只有*活跃*的原件可被采用（superseded、deleted、provisional 或已过期的记忆留在原处）。
+
+`outcome` 记录实际发生了什么：`good` 增加 `validation_count`，
+`bad` 设置持久化的矛盾标志 — 且惩罚永不提升（被矛盾后的权重上限为
+无矛盾时的权重）。先 `bad` 后 `good` 仍保留矛盾：重新验证不抹去历史，
+`supersede` 才抹去。效果作用于有效权重路径（`answer`、audit、信任级别）—
+search 排序仍基于相关性。`outcome*` 键是保留键：import 和 migrate 会剥离它们，
+因此外部判定无法被走私进来。
+
+设计原理与完整的信任边界表：
+[docs/design/fleet-learning.md](docs/design/fleet-learning.md)。
+
 ## 在存储之间共享记忆：`import`
 
 存储按 **实例 × 项目** 划分命名空间：记忆位于
@@ -554,8 +589,8 @@ python3 -m unittest discover -s tests -v
 ## MCP 服务器
 
 foldcrumbs 附带一个极简 MCP 服务器（stdio、仅标准库 — 不依赖 `mcp` SDK），向任何
-MCP 客户端提供七个工具 — `remember`、`recall`、`answer`、`forget`、
-`graph_path`、`relate` 和 `ingest`：
+MCP 客户端提供九个工具 — `remember`、`recall`、`answer`、`forget`、
+`graph_path`、`relate`、`ingest`、`adopt` 和 `outcome`：
 
 ```bash
 foldcrumbs-mcp            # 或：python3 -m foldcrumbs.mcp_server
@@ -590,9 +625,12 @@ Codex 和 OpenCode 由 `foldcrumbs install --agent …` 接入它。注册上面
   `graph path`/`doctor`/`entities`）、置于人工审批队列之后的模型提议关系
   （G2）、对被认证 superseded 记忆的 transit-only 穿越（D3-bis），以及
   带来源的文档摄取（`ingest`）。
-- **阶段 3** — 舰队级记忆共享（联邦存储之间的采用）；embeddings 保持
-  opt-in，grep 保持默认 — 在规模真正需要之前不引入向量数据库。PDF/OCR/
-  JS 渲染页面的摄取仍刻意排除在外（stdlib 边界）。
+- **阶段 3 ✓** — 舰队级记忆共享：从联邦根显式地逐条 `adopt` 记忆，
+  配以本地认证台账，以及 `outcome` 回路（good/bad 判定，效果持久化）—
+  无中心存储、无自动同步、无云。
+- **阶段 4** — embeddings 保持 opt-in，grep 保持默认 — 在规模真正需要
+  之前不引入向量数据库。PDF/OCR/JS 渲染页面的摄取仍刻意排除在外
+  （stdlib 边界）。
 
 发布历史：[CHANGELOG.md](CHANGELOG.md)。
 

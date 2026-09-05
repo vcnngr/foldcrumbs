@@ -337,6 +337,8 @@ python3 -m foldcrumbs graph path "Ritardo fornitore" "Release slittata"   # FOUN
 python3 -m foldcrumbs graph doctor                 # target penzolanti, predicati sconosciuti
 python3 -m foldcrumbs graph entities --similar     # entità esterne + suggerimenti merge
 python3 -m foldcrumbs graph transit "Design iniziale" on   # attesta una memoria superseded come attraversabile
+python3 -m foldcrumbs adopt <root_id>:fact_deploy.md --note "ha retto da noi"  # adotta UNA memoria da una root federata
+python3 -m foldcrumbs outcome fact_deploy.md good      # il ciclo degli esiti: ha retto
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard rimuove il file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # coda di riconciliazione (coppie ambigue, rivendicazioni)
@@ -506,6 +508,48 @@ voci pubblicate, segnalate, invece di sembrare svuotata; e **dopo aver aggiornat
 esegui di nuovo `foldcrumbs install`** — gli hook girano da uno snapshot runtime preparato al
 momento dell'installazione, quindi un aggiornamento da solo non li raggiunge.
 
+## Imparare dalla flotta: `adopt` e `outcome`
+
+La federazione è read-only per design — e ciò che *impari* dallo store di
+un'altra istanza evapora a fine sessione. Il livello fleet lo rende
+duraturo, con due comandi espliciti e nessuna sincronizzazione:
+
+```bash
+foldcrumbs roots                                   # chi è federato (id)
+foldcrumbs adopt --search "finestra di deploy" --from <root_id>   # candidati vivi, non adotta nulla
+foldcrumbs adopt <root_id>:<file-memoria> --note "ha retto anche da noi"
+foldcrumbs outcome <memoria> good|bad --note EVIDENZA  # il ciclo degli esiti
+foldcrumbs outcome --list                            # verdetti, adozioni annotate
+```
+
+`adopt` copia **una memoria alla volta** — l'adozione in massa è sync, ed è
+esattamente ciò che questo rifiuta. La copia è tua: id nuovo,
+`provenance: imported`, `source: adopted:<root_id>:<memory_id>`, confidenza
+limitata a 0.8, validation count azzerato, secret scrubbati, relazioni
+scartate (penzolerebbero tra store). L'originale e la sua root non vengono
+mai scritti.
+
+Le adozioni sono **attestate in un ledger locale** (`.adoptions.json`), non
+nel frontmatter dichiarato: un file può mentire sul proprio `source`, il
+ledger non può essere importato. Un ledger corrotto rifiuta l'adozione
+invece di tirare a indovinare; una collisione sul filename di destinazione
+è sempre rifiutata — l'adozione non sovrascrive mai; e solo gli originali
+*vivi* sono adottabili (memorie superseded, deleted, provisional o scadute
+restano dove sono).
+
+`outcome` registra ciò che è successo davvero: `good` incrementa
+`validation_count`, `bad` imposta il flag di contraddizione persistente — e
+una penalità non promuove mai (il peso contraddetto è limitato a quanto la
+memoria peserebbe senza contraddizione). `bad` poi `good` mantiene la
+contraddizione: la rivalidazione non cancella la storia, `supersede` sì.
+Gli effetti si applicano ai percorsi a peso effettivo (`answer`, audit,
+livelli di trust) — il ranking di search resta basato sulla rilevanza. Le
+chiavi `outcome*` sono riservate: import e migrate le rimuovono, quindi
+nessun verdetto esterno può essere contrabbandato.
+
+Razionale del design e tabella completa del trust boundary:
+[docs/design/fleet-learning.md](docs/design/fleet-learning.md).
+
 ## Condividere memoria tra store: `import`
 
 Gli store sono con namespace **per istanza × per progetto**: la memoria vive in
@@ -596,7 +640,8 @@ python3 -m unittest discover -s tests -v
 ## Server MCP
 
 foldcrumbs include un server MCP minimale (stdio, solo stdlib — nessuna dipendenza dall'SDK `mcp`)
-che espone sette tool — `remember`, `recall`, `answer`, `forget`, `graph_path`, `relate` e `ingest` —
+che espone nove tool — `remember`, `recall`, `answer`, `forget`, `graph_path`, `relate`, `ingest`,
+`adopt` e `outcome` —
 a qualsiasi client MCP:
 
 ```bash
@@ -633,10 +678,14 @@ restringere una ricerca.
   `graph path`/`doctor`/`entities`), relazioni proposte dal modello dietro una coda
   di approvazione umana (G2), attraversamento transit-only delle memorie superseded
   attestate (D3-bis) e ingest documentale con provenienza (`ingest`).
-- **Fase 3** — condivisione della memoria a livello di flotta (adozione tra store
-  federati); gli embeddings restano opt-in e il grep resta il default — nessun vector
-  DB finché la scala non lo richiede davvero. L'ingest di PDF/OCR/pagine renderizzate
-  via JS resta deliberatamente fuori scope (confine stdlib).
+- **Fase 3 ✓** — condivisione della memoria a livello di flotta: `adopt`
+  esplicito di una memoria alla volta dalle root federate con un ledger di
+  attestazione locale, e il ciclo `outcome` (verdetti good/bad con effetto
+  persistente) — nessuno store centrale, nessun auto-sync, nessun cloud.
+- **Fase 4** — gli embeddings restano opt-in e il grep resta il default —
+  nessun vector DB finché la scala non lo richiede davvero. L'ingest di
+  PDF/OCR/pagine renderizzate via JS resta deliberatamente fuori scope
+  (confine stdlib).
 
 Storico dei rilasci: [CHANGELOG.md](CHANGELOG.md).
 

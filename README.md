@@ -328,6 +328,8 @@ python3 -m foldcrumbs graph path "Supplier delay" "Release slipped"   # FOUND / 
 python3 -m foldcrumbs graph doctor                 # dangling targets, unknown predicates
 python3 -m foldcrumbs graph entities --similar     # external entities + merge hints
 python3 -m foldcrumbs graph transit "Early design" on   # attest a superseded memory as walk-through
+python3 -m foldcrumbs adopt <root_id>:fact_deploy.md --note "held for us"  # adopt ONE memory from a federated root
+python3 -m foldcrumbs outcome fact_deploy.md good      # the outcome loop: it held
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # reconciliation queue (ambiguous pairs, claims)
@@ -502,6 +504,45 @@ published entries, flagged, rather than appearing to have been emptied; and
 a runtime snapshot staged at install time, so an upgrade alone does not reach
 them.
 
+## Learning from the fleet: `adopt` and `outcome`
+
+Federation is read-only by design — and what you *learn* from another
+instance's store evaporates at the end of the session. The fleet layer makes
+it stick, with two explicit commands and no sync of any kind:
+
+```bash
+foldcrumbs roots                                   # who is federated (ids)
+foldcrumbs adopt --search "deploy window" --from <root_id>   # live candidates, adopts nothing
+foldcrumbs adopt <root_id>:<memory-file> --note "held for us too"
+foldcrumbs outcome <memory> good|bad --note EVIDENCE # the outcome loop
+foldcrumbs outcome --list                            # verdicts, adoptions annotated
+```
+
+`adopt` copies **one memory at a time** — batch adoption is sync, and sync
+is what this refuses. The copy is yours: fresh id, `provenance: imported`,
+`source: adopted:<root_id>:<memory_id>`, confidence capped at 0.8,
+validation count reset, secrets scrubbed, relations dropped (they would
+dangle across stores). The original and its root are never written to.
+
+Adoptions are **attested in a local ledger** (`.adoptions.json`), not in the
+declared frontmatter: a file can lie about its `source`, the ledger cannot
+be imported. A corrupt ledger refuses adoption rather than guessing; a
+destination filename collision is always refused — adoption never
+overwrites; and only *live* originals are adoptable (superseded, deleted,
+provisional or expired memories stay where they are).
+
+`outcome` records what actually happened: `good` bumps `validation_count`,
+`bad` sets the persisted contradiction flag — and a penalty never promotes
+(the contradicted weight is capped at what the memory would weigh
+uncontradicted). `bad` then `good` keeps the contradiction: revalidation
+does not erase history, `supersede` does. Effects apply to the
+effective-weight paths (`answer`, audit, trust levels) — search ranking
+stays relevance-based. `outcome*` keys are reserved: import and migrate
+strip them, so no foreign verdict can be smuggled in.
+
+Design rationale and the full trust-boundary table:
+[docs/design/fleet-learning.md](docs/design/fleet-learning.md).
+
 ## Sharing memory between stores: `import`
 
 Stores are namespaced **per instance × per project**: memory lives in
@@ -591,7 +632,8 @@ python3 -m unittest discover -s tests -v
 ## MCP server
 
 foldcrumbs ships a minimal MCP server (stdio, stdlib only — no `mcp` SDK dependency) exposing
-seven tools — `remember`, `recall`, `answer`, `forget`, `graph_path`, `relate` and `ingest` —
+nine tools — `remember`, `recall`, `answer`, `forget`, `graph_path`, `relate`, `ingest`,
+`adopt` and `outcome` —
 to any MCP client:
 
 ```bash
@@ -628,10 +670,13 @@ search at all.
   `graph path`/`doctor`/`entities`), model-proposed relations behind a human
   approval queue (G2), transit-only walking of attested superseded memories
   (D3-bis), and document ingestion with provenance (`ingest`).
-- **Phase 3** — fleet-level memory sharing (adoption between federated stores);
-  embeddings stay opt-in and grep stays the default — no vector DB until scale
-  actually demands it. PDF/OCR/JS-rendered ingestion remains deliberately out
-  of scope (stdlib boundary).
+- **Phase 3 ✓** — fleet-level memory sharing: explicit one-memory `adopt`
+  from federated roots with a local attestation ledger, and the `outcome`
+  loop (good/bad verdicts with persisted effect) — no central store, no
+  auto-sync, no cloud.
+- **Phase 4** — embeddings stay opt-in and grep stays the default — no
+  vector DB until scale actually demands it. PDF/OCR/JS-rendered ingestion
+  remains deliberately out of scope (stdlib boundary).
 
 Release history: [CHANGELOG.md](CHANGELOG.md).
 
