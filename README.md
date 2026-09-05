@@ -283,6 +283,30 @@ The MCP server exposes the same posture: a `relate` tool (provenance `agent`,
 confidence capped at 0.5) and an `include_inferred` parameter on `graph_path`,
 off by default.
 
+### Walking through superseded memories (transit)
+
+`graph path` never walks through `superseded` (or `deleted`/`provisional`)
+memories by default — that is the D3 rule. But a causal chain can run through
+a memory that was later superseded (an early design that a fix refined, a
+released version that a later one replaced). For those cases a human may
+attest ONE superseded memory at a time as transit-eligible (design §D3-bis,
+docs/design/g2-extraction.md):
+
+```bash
+foldcrumbs graph transit <memory> on     # attest: this superseded memory may be walked through
+foldcrumbs graph transit <memory> off    # withdraw the attestation
+foldcrumbs graph path A B                # if phase 1 finds nothing, phase 2 walks attested nodes
+```
+
+The walk is two-phase and never surprises you: phase 1 searches the active
+graph only (exact pre-attestation behaviour); only if it ends
+`NOT_FOUND_EXHAUSTIVE` does phase 2 run, over the attested superseded nodes.
+Any transit step is marked `(superseded — transit)` in the output, so a path
+through history is always visible as such. The attestation is fail-closed:
+only a local, superseded, non-expired memory qualifies, and the frontmatter
+value must be exactly `true`. Imports and `migrate` strip the reserved
+`transit` key, so no automated path can smuggle an attestation in.
+
 ## CLI
 
 ```bash
@@ -303,6 +327,7 @@ python3 -m foldcrumbs relate "Release slipped" caused_by --to-memory "Supplier d
 python3 -m foldcrumbs graph path "Supplier delay" "Release slipped"   # FOUND / NOT_FOUND_EXHAUSTIVE / TRUNCATED
 python3 -m foldcrumbs graph doctor                 # dangling targets, unknown predicates
 python3 -m foldcrumbs graph entities --similar     # external entities + merge hints
+python3 -m foldcrumbs graph transit "Early design" on   # attest a superseded memory as walk-through
 python3 -m foldcrumbs forget fact_wrong.md --apply   # soft-delete (--hard removes the file)
 python3 -m foldcrumbs supersede decision_old.md --by decision_new.md
 python3 -m foldcrumbs conflicts                      # reconciliation queue (ambiguous pairs, claims)
@@ -566,7 +591,8 @@ python3 -m unittest discover -s tests -v
 ## MCP server
 
 foldcrumbs ships a minimal MCP server (stdio, stdlib only — no `mcp` SDK dependency) exposing
-`remember`, `recall`, `answer` and `forget` to any MCP client:
+seven tools — `remember`, `recall`, `answer`, `forget`, `graph_path`, `relate` and `ingest` —
+to any MCP client:
 
 ```bash
 foldcrumbs-mcp            # or: python3 -m foldcrumbs.mcp_server
@@ -598,7 +624,14 @@ search at all.
 - **Phase 2.7 ✓** — memory engineering: recall reinforcement and freshness in the
   ranking, a decay pass that archives, named profiles (one store per agent), and
   `/remember` `/recall` `/forget` `/foldcrumbs` slash commands.
-- **Phase 3** — embeddings + open vector DB only if scale outgrows grep; document ingest via OCR.
+- **Phase 2.8 ✓** — graph layer: typed relations with provenance (`relate`,
+  `graph path`/`doctor`/`entities`), model-proposed relations behind a human
+  approval queue (G2), transit-only walking of attested superseded memories
+  (D3-bis), and document ingestion with provenance (`ingest`).
+- **Phase 3** — fleet-level memory sharing (adoption between federated stores);
+  embeddings stay opt-in and grep stays the default — no vector DB until scale
+  actually demands it. PDF/OCR/JS-rendered ingestion remains deliberately out
+  of scope (stdlib boundary).
 
 Release history: [CHANGELOG.md](CHANGELOG.md).
 
@@ -620,7 +653,7 @@ the rest of the team is credited here:
 | Model | Contribution |
 |--|--|
 | Claude Opus 4.8 · Opus 5 · Fable 5 | code, 0.1 → 0.6.1: store, distillation, hooks, federation |
-| Qwen 3.8 Max | code, 0.7.0: semantic recall, expiry, reconciliation queue, dashboard, release |
+| Qwen 3.8 Max | code, 0.7.0 → 0.9.0: semantic recall, expiry, reconciliation queue, dashboard, graph layer (G0–G2), transit-only superseded paths, document ingestion, releases |
 | GPT-5.5 · GPT-5.6-sol | code review and red-teaming |
 | Kimi K3 | independent reviewer of the development loop (GREEN/RED verdict on every implementation) |
 
