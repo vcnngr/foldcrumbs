@@ -14,6 +14,10 @@ Edges derived:
   * ``tag``            — WEAK edge: two memories sharing 2+ tags. Kept out of
     path queries entirely (design §BFS); rendered here so the reader can see
     clusters form, nothing more.
+  * ``explicit``       — G1 relations written in frontmatter (relations_json),
+    labelled with the predicate (caused_by, depends_on, ...). Memory targets
+    only and only when both ends exist; external entities belong to
+    `graph entities`. Malformed JSON degrades to no edge, never to an error.
 
 Determinism is a design principle (REV-2 §5): same store, same bytes. Every
 collection is sorted on stable keys before rendering — no dict-order leaks,
@@ -25,7 +29,7 @@ import html
 import os
 from dataclasses import dataclass, field
 
-from . import conflicts, store
+from . import conflicts, relations, store
 
 # The weak-tag edge is noise below this: sharing one tag is the norm for any
 # coherent project, sharing two starts meaning the memories move together.
@@ -49,15 +53,18 @@ class Node:
 
 @dataclass
 class Edge:
-    """A directed relation. ``kind``: superseded_by | conflict | tag.
+    """A directed relation. ``kind``: superseded_by | conflict | tag | explicit.
 
     ``weight`` matters only for weak tag edges (count of shared tags).
+    ``label`` matters only for explicit G1 edges (the predicate, e.g.
+    ``caused_by``); for every other kind it stays empty.
     """
 
     kind: str
     src: str   # node id
     dst: str   # node id
     weight: int = 1
+    label: str = ""
 
 
 @dataclass
@@ -80,6 +87,7 @@ class Graph:
             "superseded": sum(1 for e in self.edges if e.kind == "superseded_by"),
             "conflict": sum(1 for e in self.edges if e.kind == "conflict"),
             "tag": len(self.weak_edges()),
+            "explicit": sum(1 for e in self.edges if e.kind == "explicit"),
         }
 
 
@@ -128,7 +136,25 @@ def build(cwd: str | os.PathLike[str] | None = None) -> Graph:
             if shared >= TAG_EDGE_MIN_SHARED:
                 edges.append(Edge("tag", a.id, b.id, weight=shared))
 
-    edges.sort(key=lambda e: (e.kind, e.src, e.dst))
+    # 4) explicit G1 relations from frontmatter (relations_json). Memory
+    # targets only, and only when the target still exists — same no-dangling
+    # rule as superseded_by. External entities (k:"x") belong to
+    # `graph entities`, not to this edge set. relations.parse() is tolerant:
+    # malformed JSON degrades to [], never to an error.
+    for m in mems:
+        for r in relations.parse(m.relations_json):
+            t = r.get("t")
+            # parse() only checks truthiness of "t": hand-written frontmatter
+            # can carry any JSON value here. A non-dict target is one
+            # malformed relation — skip it, never blind the whole graph (RT F1).
+            if not isinstance(t, dict) or t.get("k") != "m":
+                continue
+            dst = str(t.get("id") or "")
+            if dst in ids and dst != m.id:
+                edges.append(Edge("explicit", m.id, dst,
+                                  label=str(r.get("p") or "")))
+
+    edges.sort(key=lambda e: (e.kind, e.src, e.dst, e.label))
     return Graph(nodes=nodes, edges=edges)
 
 
@@ -143,7 +169,8 @@ def render_text(g: Graph) -> str:
     c = g.counts()
     lines = [
         f"# graph: {c['nodes']} nodes | {c['superseded']} superseded_by | "
-        f"{c['conflict']} conflict | {c['tag']} tag (weak)"
+        f"{c['conflict']} conflict | {c['tag']} tag (weak) | "
+        f"{c['explicit']} explicit"
     ]
     nodes = g.by_id()
     if not g.edges:
@@ -151,7 +178,12 @@ def render_text(g: Graph) -> str:
         return "\n".join(lines) + "\n"
     for e in g.edges:
         a, b = nodes[e.src], nodes[e.dst]
-        extra = f" (x{e.weight})" if e.kind == "tag" else ""
+        if e.kind == "tag":
+            extra = f" (x{e.weight})"
+        elif e.kind == "explicit":
+            extra = f" ({e.label})" if e.label else ""
+        else:
+            extra = ""
         lines.append(f"{a.label()} --{e.kind}{extra}--> {b.label()}")
     return "\n".join(lines) + "\n"
 
@@ -159,6 +191,22 @@ def render_text(g: Graph) -> str:
 def _esc_mermaid(label: str) -> str:
     # mermaid labels inside "..." must not contain a quote
     return label.replace('"', "'")
+
+
+def _mermaid_edge_label(label: str) -> str:
+    # Edge labels sit between pipes (==>|text|): a pipe or a newline in a
+    # hand-written predicate would escape the label and inject syntax
+    # (RT F2). Quote the label and flatten newlines — mermaid accepts
+    # ==>|"text"| and treats the content as literal text.
+    flat = " ".join(label.split())
+    return f'"{_esc_mermaid(flat)}"'
+
+
+def _esc_dot(label: str) -> str:
+    # DOT quoted strings: escape backslashes FIRST, then quotes — a
+    # predicate ending in a backslash would otherwise eat the closing
+    # quote and produce an unparsable document (RT F3, Graphviz rc=1).
+    return label.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
 
 
 def render_mermaid(g: Graph) -> str:
@@ -170,6 +218,9 @@ def render_mermaid(g: Graph) -> str:
             lines.append(f"    {_short(e.src)} -->|superseded by| {_short(e.dst)}")
         elif e.kind == "conflict":
             lines.append(f"    {_short(e.src)} -.->|conflict| {_short(e.dst)}")
+        elif e.kind == "explicit":
+            pred = _mermaid_edge_label(e.label or "related")
+            lines.append(f"    {_short(e.src)} ==>|{pred}| {_short(e.dst)}")
         else:
             lines.append(f"    {_short(e.src)} -.-|tag x{e.weight}| {_short(e.dst)}")
     return "\n".join(lines) + "\n"
@@ -182,8 +233,12 @@ def render_dot(g: Graph) -> str:
         label = n.label().replace('"', '\\"')
         lines.append(f'    "{_short(n.id)}" [label="{label}"];')
     for e in g.edges:
-        style = {"superseded_by": "", "conflict": ' [style=dashed, color=red]',
-                 "tag": ' [style=dotted, color=gray]'}[e.kind]
+        if e.kind == "explicit":
+            pred = _esc_dot(e.label or "related")
+            style = f' [penwidth=2, color=orange, label="{pred}"]'
+        else:
+            style = {"superseded_by": "", "conflict": ' [style=dashed, color=red]',
+                     "tag": ' [style=dotted, color=gray]'}[e.kind]
         lines.append(f'    "{_short(e.src)}" -> "{_short(e.dst)}"{style};')
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -216,9 +271,14 @@ def render_html(g: Graph, project: str = "") -> str:
 
     def row_edge(ed: Edge) -> str:
         a, b = nodes[ed.src], nodes[ed.dst]
-        w = f" x{ed.weight}" if ed.kind == "tag" else ""
+        if ed.kind == "tag":
+            w = f" x{ed.weight}"
+        elif ed.kind == "explicit" and ed.label:
+            w = f" ({ed.label})"
+        else:
+            w = ""
         return (f"<tr><td>{e(a.label())}</td>"
-                f"<td class='kind'>{e(ed.kind)}{w}</td>"
+                f"<td class='kind'>{e(ed.kind)}{e(w)}</td>"
                 f"<td>{e(b.label())}</td>"
                 f"<td>{e(a.type)} / {e(b.type)}</td></tr>")
 
@@ -235,15 +295,16 @@ def render_html(g: Graph, project: str = "") -> str:
 <style>{_CSS}</style></head><body>
 <h1>foldcrumbs graph</h1>
 <div class="sub">{e(project)} — derived from relations the store already has
-(supersede chains, reconciliation queue, tag co-occurrence). Read-only: this
-page writes nothing.</div>
+(supersede chains, reconciliation queue, explicit frontmatter relations, tag
+co-occurrence). Read-only: this page writes nothing.</div>
 <div class="panel"><h2>Summary</h2>
 <span class="badge">{c['nodes']} memories</span>
 <span class="badge">{c['superseded']} supersede edges</span>
 <span class="badge">{c['conflict']} conflict edges</span>
+<span class="badge">{c['explicit']} explicit relations</span>
 <span class="badge">{c['tag']} weak tag edges</span>
 </div>
-<div class="panel"><h2>Strong edges (supersede + conflict)</h2>
+<div class="panel"><h2>Strong edges (supersede + conflict + explicit relations)</h2>
 <table><tr><th>from</th><th>relation</th><th>to</th><th>types</th></tr>
 {strong_rows}</table></div>
 <div class="panel"><h2>Weak tag edges (2+ shared tags — clustering hint only)</h2>

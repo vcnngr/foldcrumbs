@@ -115,6 +115,140 @@ class TestGraphBuild(TmpStore):
         self.assertEqual(first, second, "same store must render identical bytes")
 
 
+class TestExplicitEdges(TmpStore):
+    """G1 relations (relations_json frontmatter) must show up in the G0
+    derived graph as 'explicit' edges labelled with the predicate."""
+
+    def _put(self, title, body, type_="fact", tags=None):
+        rec = MemoryRecord(title=title, content=body, type=type_,
+                           tags=list(tags or []))
+        store.write_memory(rec)
+        return rec
+
+    def _pair(self):
+        from foldcrumbs import relations
+        a = self._put("Supplier delay", "Late shipment.", type_="event")
+        b = self._put("Release slipped", "Moved to next week.", type_="event")
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="postmortem", prov="manual")
+        return a, b
+
+    def test_explicit_memory_edge_rendered(self):
+        a, b = self._pair()
+        g = graph.build()
+        self.assertEqual(g.counts()["explicit"], 1)
+        edge = [e for e in g.edges if e.kind == "explicit"][0]
+        self.assertEqual((edge.src, edge.dst), (a.id, b.id),
+                         "explicit edges are directed: source -> target")
+        self.assertEqual(edge.label, "caused_by")
+
+    def test_explicit_edges_are_strong_not_weak(self):
+        self._pair()
+        g = graph.build()
+        kinds = {e.kind for e in g.strong_edges()}
+        self.assertIn("explicit", kinds)
+        self.assertNotIn("explicit", {e.kind for e in g.weak_edges()})
+
+    def test_explicit_edge_dropped_when_target_missing(self):
+        from foldcrumbs import relations
+        a = self._put("Cause", "x", type_="event")
+        b = self._put("Effect", "y", type_="event")
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="e", prov="manual")
+        store.forget(b.filename(), hard=True)
+        g = graph.build()
+        self.assertEqual(g.counts()["explicit"], 0,
+                         "no dangling arrows, same rule as superseded_by")
+
+    def test_explicit_external_target_out_of_scope(self):
+        from foldcrumbs import relations
+        a = self._put("Vendor call", "x", type_="event")
+        relations.add_relation(a.id, "depends_on",
+                               {"k": "x", "ns": "org", "l": "acme corp"},
+                               evidence="e", prov="manual")
+        g = graph.build()
+        self.assertEqual(g.counts()["explicit"], 0,
+                         "external entities belong to graph entities, not G0 edges")
+
+    def test_explicit_malformed_relations_json_ignored(self):
+        a = self._put("Broken rel", "x")
+        # Malformed JSON straight into the frontmatter field, rewritten.
+        a.relations_json = "{not json"
+        store.write_memory(a)
+        g = graph.build()  # must not raise
+        self.assertEqual(g.counts()["explicit"], 0)
+
+    def test_explicit_determinism(self):
+        from foldcrumbs import relations
+        ms = [self._put(f"M{i}", "x", type_="event") for i in range(4)]
+        relations.add_relation(ms[0].id, "caused_by", {"k": "m", "id": ms[1].id},
+                               evidence="e", prov="manual")
+        relations.add_relation(ms[2].id, "precedes", {"k": "m", "id": ms[3].id},
+                               evidence="e", prov="manual")
+        first = graph.render_text(graph.build())
+        second = graph.render_text(graph.build())
+        self.assertEqual(first, second)
+        self.assertIn("caused_by", first)
+        self.assertIn("precedes", first)
+
+    def test_non_dict_target_degrades_to_no_edge(self):
+        # RT F1 (P0): hand-written frontmatter can carry t as any truthy
+        # JSON value (string/list/int/bool) — relations.parse only checks
+        # truthiness. graph.build() must skip the malformed relation, not
+        # raise AttributeError and blind the whole graph.
+        a = self._put("Hostile rel", "x")
+        b = self._put("Good target", "y")
+        import json
+        a.relations_json = json.dumps([
+            {"p": "caused_by", "t": "not-a-dict"},
+            {"p": "depends_on", "t": ["k", "m"]},
+            {"p": "blocks", "t": 42},
+            {"p": "supports", "t": {"k": "m", "id": b.id}},
+        ])
+        store.write_memory(a)
+        g = graph.build()  # must not raise
+        self.assertEqual(g.counts()["explicit"], 1,
+                         "the one well-formed relation still renders")
+
+    def test_mermaid_predicate_confined_to_label(self):
+        # RT F2 (P1): pipes/newlines in a hand-written predicate must not
+        # leak into mermaid syntax — every output line must be a well-formed
+        # node or edge definition, never injected fragments.
+        a = self._put("Src M", "x", type_="event")
+        b = self._put("Dst M", "y", type_="event")
+        import json
+        a.relations_json = json.dumps(
+            [{"p": "evil|label\nA-->|B", "t": {"k": "m", "id": b.id},
+              "c": 0.8, "d": "2026-01-01T00:00:00Z"}])
+        store.write_memory(a)
+        out = graph.render_mermaid(graph.build())
+        import re
+        valid = re.compile(
+            r'^(\s*graph LR\s*|\s*[0-9a-f]{8}\[".*"\]\s*'
+            r'|\s*[0-9a-f]{8} (==>|-\.->|-->|-\.)(\|.*\|)? [0-9a-f]{8}\s*)$')
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            self.assertRegex(line, valid,
+                             f"line escapes the mermaid grammar: {line!r}")
+
+    def test_dot_predicate_backslash_safe(self):
+        # RT F3 (P1): a predicate ending in a backslash must not eat the
+        # closing quote and break the DOT document.
+        a = self._put("Src D", "x", type_="event")
+        b = self._put("Dst D", "y", type_="event")
+        import json
+        a.relations_json = json.dumps(
+            [{"p": "\\", "t": {"k": "m", "id": b.id},
+              "c": 0.8, "d": "2026-01-01T00:00:00Z"}])
+        store.write_memory(a)
+        out = graph.render_dot(graph.build())
+        self.assertNotIn('\\"]', out.replace('\\\\"', ""),
+                         "unescaped trailing backslash breaks DOT")
+        self.assertTrue(out.startswith("digraph"))
+        self.assertTrue(out.rstrip().endswith("}"))
+
+
 class TestRenderers(TmpStore):
     def _seed(self):
         old = MemoryRecord(title="Old rule", content="Do A.",
@@ -130,6 +264,28 @@ class TestRenderers(TmpStore):
         out = graph.render_text(graph.build())
         self.assertIn("superseded_by", out)
         self.assertIn("nodes", out)
+
+    def test_text_lists_explicit_predicate(self):
+        from foldcrumbs import relations
+        a = MemoryRecord(title="Cause X", content="x", type="event")
+        b = MemoryRecord(title="Effect Y", content="y", type="event")
+        store.write_memory(a)
+        store.write_memory(b)
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="e", prov="manual")
+        out = graph.render_text(graph.build())
+        self.assertIn("caused_by", out)
+
+    def test_mermaid_labels_explicit_predicate(self):
+        from foldcrumbs import relations
+        a = MemoryRecord(title="Cause X2", content="x", type="event")
+        b = MemoryRecord(title="Effect Y2", content="y", type="event")
+        store.write_memory(a)
+        store.write_memory(b)
+        relations.add_relation(a.id, "caused_by", {"k": "m", "id": b.id},
+                               evidence="e", prov="manual")
+        out = graph.render_mermaid(graph.build())
+        self.assertIn("caused_by", out)
 
     def test_text_empty_store_says_so(self):
         out = graph.render_text(graph.build())
