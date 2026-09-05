@@ -199,6 +199,23 @@ def _cmd_adopt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _outcome_ref(ref: str) -> str:
+    """Resolve id/title/filename to the REAL on-disk filename for outcome.
+
+    RT round-1 F4: the help promises id/title resolution; store.get alone
+    only takes filenames. _resolve_memory_ref already does exact-id,
+    exact-title and unique-stem resolution with visible ambiguity errors —
+    reuse it, and fall back to the raw ref so store.get can report
+    not-found uniformly.
+    """
+    from . import relations as _rel
+    try:
+        mem = _resolve_memory_ref(ref)
+    except _rel.InvalidRelation:
+        return ref   # let set_outcome report not-found uniformly
+    return mem.source_path or mem.filename()
+
+
 def _cmd_outcome(args: argparse.Namespace) -> int:
     from . import outcome as outcome_mod
     if getattr(args, "list", False):
@@ -214,7 +231,7 @@ def _cmd_outcome(args: argparse.Namespace) -> int:
             note = f"  — {r['note']}" if r["note"] else ""
             print(f"  {mark} {r['outcome']:4}  {r['filename']}{src}{note}")
         return 0
-    res = outcome_mod.set_outcome(args.memory, args.verdict,
+    res = outcome_mod.set_outcome(_outcome_ref(args.memory), args.verdict,
                                   note=args.note or "")
     if not res["ok"]:
         print(f"outcome refused: {res['reason']}", file=sys.stderr)

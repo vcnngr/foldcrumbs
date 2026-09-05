@@ -80,7 +80,24 @@ def set_outcome(name: str, verdict: str, note: str = "",
     rec.outcome_at = _now()
     rec.outcome_note = note.strip() or None
     rec.updated_at = _now()
-    store.write_memory(rec, cwd)
+    # RT round-1 F3: rewrite the RESOLVED file, not the slug destination.
+    # store.get() resolves by real filename and records it in source_path;
+    # write_memory would recompute type_slug(title).md and could clobber an
+    # unrelated homonym when the file was renamed on disk. Same atomic
+    # tmp+os.replace as write_memory — but on the file that was judged.
+    if rec.source_path:
+        target = config.memory_dir(cwd) / rec.source_path
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(rec.to_markdown())
+            os.replace(tmp, target)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    else:
+        store.write_memory(rec, cwd)
     return {"ok": True, "outcome": v, "filename": rec.filename(),
             "validation_count": rec.validation_count,
             "contradiction_detected": rec.contradiction_detected}
@@ -102,7 +119,7 @@ def list_outcomes(cwd: str | os.PathLike[str] | None = None) -> list[dict]:
     except Exception:
         ledger = {}
     rows: list[dict] = []
-    for m in store.iter_memories(config.memory_dir(cwd)):
+    for m in store.iter_memories(cwd):
         if m.outcome not in VALID_OUTCOMES:
             continue
         row = {"id": m.id, "title": m.title, "filename": m.filename(),

@@ -291,14 +291,22 @@ class MemoryRecord:
 
     def compute_confidence(self) -> float:
         if self.contradiction_detected:
-            # FL-2 (RT F5): a penalty must never promote. The 0.1 floor
-            # alone would RAISE a very low confidence (0.15 * 0.3 = 0.045
-            # -> 0.1); cap at the non-contradicted value so "bad" can only
-            # ever lower the effective weight.
-            base = self.confidence * _PROVENANCE_WEIGHTS.get(self.provenance, 0.8)
-            return round(min(base, max(0.1, self.confidence * 0.3)), 2)
+            # FL-2 (RT F5, refined by RT round-1 F1): a penalty must never
+            # promote. The cap is the FULL non-contradicted effective value
+            # — validation boost and age decay included — otherwise an old
+            # low-confidence observation (0.15 − 0.2 age penalty → floor)
+            # could be RAISED to the 0.1 contradiction floor. "bad" can
+            # only ever lower the effective weight.
+            uncontradicted = self._effective_uncontradicted()
+            return round(min(uncontradicted,
+                             max(0.1, self.confidence * 0.3)), 2)
         if self.status == "superseded":
             return 0.0
+        return round(min(1.0, self._effective_uncontradicted()), 2)
+
+    def _effective_uncontradicted(self) -> float:
+        """The effective weight this record would have WITHOUT the
+        contradiction flag — the true ceiling for the penalty branch."""
         base = self.confidence * _PROVENANCE_WEIGHTS.get(self.provenance, 0.8)
         validation_boost = min(0.15, self.validation_count * 0.03)
         if self.type in ("preference", "observation"):
@@ -306,7 +314,7 @@ class MemoryRecord:
             age_penalty = 0.2 if age_days > 90 else 0.1 if age_days > 30 else 0.0
         else:
             age_penalty = 0.0
-        return round(min(1.0, base + validation_boost - age_penalty), 2)
+        return base + validation_boost - age_penalty
 
     def validate(self) -> None:
         self.validation_count += 1

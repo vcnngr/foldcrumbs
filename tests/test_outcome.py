@@ -27,6 +27,7 @@ RT obligations from card t_6057c04e F5/F6 and r2 t_6922bf5b):
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -245,6 +246,68 @@ class TestOutcomeList(TmpStore):
     def test_list_empty_when_no_adoptions(self):
         rows = outcome_mod.list_outcomes()
         self.assertEqual(rows, [])
+
+    def test_list_sees_recorded_outcomes_without_env_override(self):
+        # RT round-1 F2 (P0): list_outcomes resolved the store twice
+        # (memory_dir passed where a cwd was expected) and returned []
+        # even with a verdict on disk.
+        m = MemoryRecord(title="Listed", content="x.")
+        store.write_memory(m)
+        res = outcome_mod.set_outcome(m.filename(), "bad")
+        self.assertTrue(res["ok"], res.get("reason"))
+        rows = outcome_mod.list_outcomes()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "bad")
+        self.assertEqual(rows[0]["filename"], m.filename())
+
+
+class TestRtP0Round1(TmpStore):
+    """RT GPT round 1 on dc14993 (card t_5e3dad23): F1-F3."""
+
+    def test_f1_age_penalized_observation_not_promoted_by_bad(self):
+        # PoC: old observation whose NON-contradicted effective value (with
+        # age penalty) is BELOW the contradiction branch's 0.1 floor — bad
+        # must not raise it.
+        old = datetime.now(timezone.utc) - timedelta(days=200)
+        rec = MemoryRecord(title="Old observation", content="x.",
+                           type="observation", confidence=0.15,
+                           created_at=old)
+        store.write_memory(rec)
+        before = store.get(rec.filename()).compute_confidence()
+        # 0.15*1.0 - 0.2 (age>90d) = -0.05 → floor? current code: base only
+        res = outcome_mod.set_outcome(rec.filename(), "bad")
+        self.assertTrue(res["ok"], res.get("reason"))
+        after = store.get(rec.filename()).compute_confidence()
+        self.assertLessEqual(after, before,
+                             "F1: bad must never raise the effective weight, "
+                             f"age penalty included (before={before}, after={after})")
+
+    def test_f3_renamed_file_is_rewritten_in_place(self):
+        # PoC: store.get resolves the REAL filename; write_memory would
+        # recompute the destination from the title slug. A renamed file
+        # plus an existing homonym of the slug must not clobber anything:
+        # the judged file is rewritten where it lives.
+        rec = MemoryRecord(title="Original title", content="body.")
+        store.write_memory(rec)
+        real = store._resolve_in_store(rec.filename())
+        renamed = real.parent / "custom_name.md"
+        real.rename(renamed)
+        # a different memory now occupies the slug destination
+        other = MemoryRecord(title="Original title", content="OTHER truth.",
+                             type="decision")
+        store.write_memory(other)
+        other_bytes = (store._resolve_in_store(other.filename())).read_bytes()
+        res = outcome_mod.set_outcome("custom_name.md", "good")
+        self.assertTrue(res["ok"], res.get("reason"))
+        # the renamed file carries the outcome
+        judged = MemoryRecord.from_markdown(
+            renamed.read_text(encoding="utf-8"))
+        self.assertEqual(judged.outcome, "good")
+        self.assertEqual(judged.validation_count, 1)
+        # the homonym is untouched
+        self.assertEqual(
+            (store._resolve_in_store(other.filename())).read_bytes(),
+            other_bytes, "F3: the slug-homonym must not be clobbered")
 
 
 if __name__ == "__main__":
