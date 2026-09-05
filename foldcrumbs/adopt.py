@@ -74,9 +74,12 @@ def read_ledger(cwd=None) -> dict:
     Present but unreadable / not a dict / structurally invalid == refuse:
     unlike the recalls sidecar, this is attestation data — degrading it to
     {} would let a corrupt ledger authorize a second live copy.
+
+    "Present" is checked with lexists (RT F2): a dangling symlink is a
+    present-but-unreadable ledger, not an absent one.
     """
     path = _ledger_path(cwd)
-    if not path.exists():
+    if not os.path.lexists(path):
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -89,10 +92,27 @@ def read_ledger(cwd=None) -> dict:
             f"adoption ledger structurally invalid ({path.name}): expected "
             f"an object, refusing to adopt")
     for key, entry in data.items():
-        if not isinstance(key, str) or not isinstance(entry, dict):
+        if not isinstance(key, str) or not _ID_RE.match(key):
+            raise AdoptError(
+                f"adoption ledger structurally invalid ({path.name}): "
+                f"key {key!r} is not a memory id, refusing to adopt")
+        # RT F2: an entry missing its required fields is corruption, not a
+        # thin record — accepting it would free the dedup key and allow a
+        # second live copy of the same original.
+        if not isinstance(entry, dict):
             raise AdoptError(
                 f"adoption ledger structurally invalid ({path.name}): "
                 f"entry {key!r}, refusing to adopt")
+        for field, check in (("root_id", federation.valid_id),
+                             ("memory_id", lambda v: isinstance(v, str)
+                              and bool(_ID_RE.match(v))),
+                             ("filename", lambda v: isinstance(v, str) and bool(v)),
+                             ("adopted_at", lambda v: isinstance(v, str) and bool(v))):
+            if not check(entry.get(field)):
+                raise AdoptError(
+                    f"adoption ledger entry {key[:8]}… is corrupt ({field} "
+                    f"missing or invalid); refusing to adopt until the "
+                    f"ledger is fixed")
     return data
 
 
@@ -158,13 +178,22 @@ def _check_identity(src: MemoryRecord, root: federation.RootRef,
             "original id fails the identity grammar (unsafe characters or "
             "length); refusing to key an adoption on it")
     dupes = 0
-    for rec in store.iter_memories_in(root.memory_dir(cwd)):
+    report: dict = {}
+    for rec in store.iter_memories_in(root.memory_dir(cwd), report=report):
         if rec.id == src.id:
             dupes += 1
             if dupes > 1:
                 raise AdoptError(
                     f"ambiguous id in source root: {dupes} memories in "
                     f"{root.label} declare id {src.id[:8]}…")
+    # RT round-2 F3: an incomplete scan (unreadable files) cannot PROVE
+    # uniqueness. Refuse rather than adopt on a negative that was never
+    # fully established.
+    if not report.get("complete", False):
+        raise AdoptError(
+            f"source root {root.label} could not be scanned completely "
+            f"(unreadable files?); refusing to claim id uniqueness — "
+            f"fix readability and retry")
 
 
 def _check_live(src: MemoryRecord) -> None:
@@ -210,8 +239,10 @@ def _copy_of(src: MemoryRecord, root_id: str, note: str = "",
     # relations_json, superseded_by, transit, outcome*, source_path and
     # operational extra_meta are NOT copied: a fresh MemoryRecord carries
     # none of them by construction.
-    if note:
-        copy.extra_meta["adopt_note"] = note  # inert text, not outcome*
+    # RT round-2 F1: the note lives ONLY in the ledger (json-encoded there,
+    # so newlines are data). Never in extra_meta: the frontmatter
+    # serializer interpolates values raw, so a multiline note would forge
+    # keys (id/source/validation_count) on the written file.
     return copy
 
 
@@ -230,12 +261,28 @@ def _dedup_hit(ledger: dict, root_id: str, src_id: str,
         if entry.get("root_id") != root_id or entry.get("memory_id") != src_id:
             continue
         # is the attested copy still live in this store?
-        for rec in store.iter_memories_in(config.memory_dir(cwd)):
+        report: dict = {}
+        found = None
+        for rec in store.iter_memories_in(config.memory_dir(cwd), report=report):
             if rec.id == local_id:
-                if rec.status == "active" and not rec.is_expired:
-                    return rec.filename()
+                found = rec
                 break
-        # dead or gone: free the key (the ledger is rewritten on success)
+        if found is not None:
+            if found.status == "active" and not found.is_expired:
+                return found.filename()
+            # dead (superseded/expired/deleted): free the key
+            stale.append(local_id)
+            continue
+        # Not found. RT round-2 F3: a MISSING copy frees the key only when
+        # the scan was complete; an incomplete scan (unreadable file) cannot
+        # prove the copy is gone, so keep the attestation and let the
+        # collision/identity checks downstream refuse — never silently drop
+        # the entry and authorize a second adoption.
+        if not report.get("complete", False):
+            raise AdoptError(
+                "this store could not be scanned completely (unreadable "
+                "files?); refusing to decide whether an adopted copy is "
+                "still present — fix readability and retry")
         stale.append(local_id)
     for local_id in stale:
         ledger.pop(local_id, None)
@@ -246,9 +293,13 @@ def _create_only(memdir: Path, rec: MemoryRecord) -> Path:
     """Atomic create-ONLY write: refuses an occupied destination.
 
     ``write_memory`` would ``os.replace`` over an unrelated homonym
-    (RT F3). Here the final step fails when the target exists: ``os.link``
-    on POSIX (EEXIST), ``os.rename``-guard fallback elsewhere. The tmp file
-    is removed on every path.
+    (RT F3). Here the final step is ``os.link``: it fails FileExistsError
+    when the target exists. RT round-2 F4: any OTHER os.link failure
+    (EOPNOTSUPP, EACCES, EIO...) is a visible refusal — the former
+    exists()+os.replace fallback could clobber a writer that occupied the
+    destination between the check and the replace. No fallback: a create-only
+    guarantee is only as strong as its weakest path. The tmp file is removed
+    on every path.
     """
     memdir.mkdir(parents=True, exist_ok=True)
     target = memdir / rec.filename()
@@ -263,13 +314,11 @@ def _create_only(memdir: Path, rec: MemoryRecord) -> Path:
                 f"destination collision: {target.name} already exists in "
                 f"this store — rename or supersede the local memory first "
                 f"(adoption never overwrites)") from None
-        except OSError:
-            # os.link unsupported (exotic FS): last-resort guarded create.
-            if target.exists():
-                raise AdoptError(
-                    f"destination collision: {target.name} already exists "
-                    f"in this store") from None
-            os.replace(tmp, target)
+        except OSError as exc:
+            raise AdoptError(
+                f"cannot create {target.name} atomically without "
+                f"hard-link support ({exc}); refusing rather than risking "
+                f"an overwrite") from None
         return target
     finally:
         if os.path.exists(tmp):

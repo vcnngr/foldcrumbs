@@ -316,6 +316,107 @@ class TestAdoptRefusals(_AdoptEnv):
         self.assertFalse(res["ok"])
 
 
+class TestRtP0Round2(_AdoptEnv):
+    """RT GPT round 1 (card t_64da90fa): F1-F4, all reproduced by PoC."""
+
+    def test_f1_multiline_note_cannot_forge_frontmatter(self):
+        src = self._theirs(title="Noted one", content="x.")
+        hostile = "evidence\nid: replacement-id\nsource: overwritten\nvalidation_count: 99"
+        res = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}",
+                              cwd=self.proj, note=hostile)
+        self.assertTrue(res["ok"], res.get("reason"))
+        c = store.get(res["filename"], cwd=self.proj)
+        self.assertEqual(c.id, res["id"],
+                         "F1: injected frontmatter must not replace the id")
+        self.assertEqual(c.source, f"adopted:{self.theirs.id}:{src.id}")
+        self.assertEqual(c.validation_count, 0)
+        # ledger join still holds
+        self.assertIn(res["id"], self._ledger())
+
+    def test_f2_entry_missing_required_fields_is_corrupt(self):
+        src = self._theirs(title="After thin entry", content="x.")
+        first = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}", cwd=self.proj)
+        self.assertTrue(first["ok"], first.get("reason"))
+        led = self._ledger()
+        led[first["id"]] = {"root_id": self.theirs.id}   # no memory_id
+        self._ledger_path().write_text(json.dumps(led), encoding="utf-8")
+        # same original, still the only one in the root: with a HEALTHY
+        # ledger this would refuse as "already adopted"; with the corrupt
+        # entry the dedup key is unreadable — fail-closed must still
+        # refuse, never authorize a second live copy.
+        res = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}", cwd=self.proj)
+        self.assertFalse(res["ok"])
+        self.assertIn("ledger", res["reason"].lower())
+        self.assertEqual(len(list(store.iter_memories_in(self.my_dir))), 1,
+                         "F2: corruption must never allow a second live copy")
+
+    def test_f2_dangling_ledger_symlink_is_not_absent(self):
+        src = self._theirs(title="Symlink case", content="x.")
+        lp = self._ledger_path()
+        os.symlink(str(lp) + ".nowhere", str(lp))  # dangling symlink
+        res = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}", cwd=self.proj)
+        self.assertFalse(res["ok"])
+        self.assertIn("ledger", res["reason"].lower())
+
+    def test_f3_incomplete_source_scan_refuses_uniqueness_claim(self):
+        # two originals share one id; one becomes unreadable — the identity
+        # scan is incomplete, so uniqueness cannot be claimed: refuse.
+        a = self._theirs(title="Twin A", content="aaa.", type_="fact")
+        b = MemoryRecord(title="Twin B", content="bbb.", type="event")
+        b.id = a.id
+        (self.their_dir / b.filename()).write_text(b.to_markdown(), encoding="utf-8")
+        unreadable = self.their_dir / b.filename()
+        unreadable.chmod(0o000)
+        try:
+            res = adopt_mod.adopt(f"{self.theirs.id}:{a.filename()}", cwd=self.proj)
+            self.assertFalse(res["ok"],
+                             "F3: incomplete scan must not prove uniqueness")
+            self.assertEqual(list(store.iter_memories_in(self.my_dir)), [])
+        finally:
+            unreadable.chmod(0o644)
+
+    def test_f3_incomplete_local_scan_keeps_attestation(self):
+        src = self._theirs(title="Local unreadable", content="x.")
+        first = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}", cwd=self.proj)
+        self.assertTrue(first["ok"], first.get("reason"))
+        ledger_before = self._ledger_path().read_bytes()
+        copy_path = self.my_dir / first["filename"]
+        copy_path.chmod(0o000)
+        try:
+            # same original, resolvable by id via a twin filename? no —
+            # the dedup join cannot see the copy; it must refuse rather
+            # than silently drop the attestation and adopt again.
+            res = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}", cwd=self.proj)
+            self.assertFalse(res["ok"],
+                             "F3: unreadable copy must not free the ledger key")
+            self.assertEqual(self._ledger_path().read_bytes(), ledger_before,
+                             "attestation must survive byte-identical")
+        finally:
+            copy_path.chmod(0o644)
+
+    def test_f4_link_fallback_refuses_instead_of_replacing(self):
+        # EOPNOTSUPP on os.link must be a visible refusal, never a
+        # exists()+os.replace fallback that can clobber a racing writer.
+        src = self._theirs(title="Fallback probe", content="x.")
+        real_link = os.link
+
+        def no_link(a, b, **kw):
+            raise OSError(93, "protocol not available")  # EOPNOTSUPP
+
+        os.link = no_link
+        try:
+            res = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}", cwd=self.proj)
+            self.assertFalse(res["ok"], "F4: no silent replace fallback")
+            self.assertEqual(list(store.iter_memories_in(self.my_dir)), [],
+                             "nothing may be written on link failure")
+            self.assertFalse(self._ledger_path().exists())
+        finally:
+            os.link = real_link
+        # and the normal path still works
+        res = adopt_mod.adopt(f"{self.theirs.id}:{src.filename()}", cwd=self.proj)
+        self.assertTrue(res["ok"], res.get("reason"))
+
+
 class TestLedgerFailClosed(_AdoptEnv):
 
     def test_corrupt_ledger_refuses_adoption(self):
