@@ -170,6 +170,35 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_adopt(args: argparse.Namespace) -> int:
+    from . import adopt as adopt_mod
+    if args.search:
+        try:
+            cands = adopt_mod.search_candidates(args.search, args.from_root,
+                                                limit=args.limit or 10)
+        except adopt_mod.AdoptError as exc:
+            print(f"adopt: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        if not cands:
+            print("no live candidates in that root")
+            return 0
+        for c in cands:
+            print(f"  {c['filename']}  [{c['type']}]  {c['title']}")
+        print(f"\nadopt one with: foldcrumbs adopt {args.from_root[:8]}…:<filename>")
+        return 0
+    if not args.ref:
+        print("adopt: expected <root_id>:<memory-file> (see `foldcrumbs roots`)",
+              file=sys.stderr)
+        raise SystemExit(2)
+    res = adopt_mod.adopt(args.ref, note=args.note or "",
+                          as_type=getattr(args, "as_type", None))
+    if not res["ok"]:
+        print(f"adopt refused: {res['reason']}", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"adopted: {res['filename']}  ({res['source']})")
+    return 0
+
+
 def _cmd_doctor(_: argparse.Namespace) -> int:
     from foldcrumbs import audit
     a = audit.audit()
@@ -1155,6 +1184,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="ingest a document file or URL into memories")
     ig.add_argument("source", help="local file path or http(s) URL")
     ig.set_defaults(func=_cmd_ingest)
+
+    ad = sub.add_parser("adopt",
+                        help="adopt ONE memory from a federated root (explicit, never sync)")
+    ad.add_argument("ref", nargs="?",
+                    help="<root_id>:<memory-file> — ids via `foldcrumbs roots`")
+    ad.add_argument("--search", help="list live candidates in a root (adopts nothing)")
+    ad.add_argument("--from", dest="from_root", help="root id for --search")
+    ad.add_argument("--limit", type=int, default=10, help="max candidates for --search")
+    ad.add_argument("--note", help="adoption note stored in the ledger (evidence)")
+    ad.add_argument("--as-type", dest="as_type", help="re-type the copy on adoption")
+    ad.set_defaults(func=_cmd_adopt)
 
     sub.add_parser("status", help="show config + stats").set_defaults(func=_cmd_status)
 
