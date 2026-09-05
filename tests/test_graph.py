@@ -191,6 +191,63 @@ class TestExplicitEdges(TmpStore):
         self.assertIn("caused_by", first)
         self.assertIn("precedes", first)
 
+    def test_non_dict_target_degrades_to_no_edge(self):
+        # RT F1 (P0): hand-written frontmatter can carry t as any truthy
+        # JSON value (string/list/int/bool) — relations.parse only checks
+        # truthiness. graph.build() must skip the malformed relation, not
+        # raise AttributeError and blind the whole graph.
+        a = self._put("Hostile rel", "x")
+        b = self._put("Good target", "y")
+        import json
+        a.relations_json = json.dumps([
+            {"p": "caused_by", "t": "not-a-dict"},
+            {"p": "depends_on", "t": ["k", "m"]},
+            {"p": "blocks", "t": 42},
+            {"p": "supports", "t": {"k": "m", "id": b.id}},
+        ])
+        store.write_memory(a)
+        g = graph.build()  # must not raise
+        self.assertEqual(g.counts()["explicit"], 1,
+                         "the one well-formed relation still renders")
+
+    def test_mermaid_predicate_confined_to_label(self):
+        # RT F2 (P1): pipes/newlines in a hand-written predicate must not
+        # leak into mermaid syntax — every output line must be a well-formed
+        # node or edge definition, never injected fragments.
+        a = self._put("Src M", "x", type_="event")
+        b = self._put("Dst M", "y", type_="event")
+        import json
+        a.relations_json = json.dumps(
+            [{"p": "evil|label\nA-->|B", "t": {"k": "m", "id": b.id},
+              "c": 0.8, "d": "2026-01-01T00:00:00Z"}])
+        store.write_memory(a)
+        out = graph.render_mermaid(graph.build())
+        import re
+        valid = re.compile(
+            r'^(\s*graph LR\s*|\s*[0-9a-f]{8}\[".*"\]\s*'
+            r'|\s*[0-9a-f]{8} (==>|-\.->|-->|-\.)(\|.*\|)? [0-9a-f]{8}\s*)$')
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            self.assertRegex(line, valid,
+                             f"line escapes the mermaid grammar: {line!r}")
+
+    def test_dot_predicate_backslash_safe(self):
+        # RT F3 (P1): a predicate ending in a backslash must not eat the
+        # closing quote and break the DOT document.
+        a = self._put("Src D", "x", type_="event")
+        b = self._put("Dst D", "y", type_="event")
+        import json
+        a.relations_json = json.dumps(
+            [{"p": "\\", "t": {"k": "m", "id": b.id},
+              "c": 0.8, "d": "2026-01-01T00:00:00Z"}])
+        store.write_memory(a)
+        out = graph.render_dot(graph.build())
+        self.assertNotIn('\\"]', out.replace('\\\\"', ""),
+                         "unescaped trailing backslash breaks DOT")
+        self.assertTrue(out.startswith("digraph"))
+        self.assertTrue(out.rstrip().endswith("}"))
+
 
 class TestRenderers(TmpStore):
     def _seed(self):

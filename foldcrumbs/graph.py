@@ -143,8 +143,11 @@ def build(cwd: str | os.PathLike[str] | None = None) -> Graph:
     # malformed JSON degrades to [], never to an error.
     for m in mems:
         for r in relations.parse(m.relations_json):
-            t = r.get("t") or {}
-            if t.get("k") != "m":
+            t = r.get("t")
+            # parse() only checks truthiness of "t": hand-written frontmatter
+            # can carry any JSON value here. A non-dict target is one
+            # malformed relation — skip it, never blind the whole graph (RT F1).
+            if not isinstance(t, dict) or t.get("k") != "m":
                 continue
             dst = str(t.get("id") or "")
             if dst in ids and dst != m.id:
@@ -190,6 +193,22 @@ def _esc_mermaid(label: str) -> str:
     return label.replace('"', "'")
 
 
+def _mermaid_edge_label(label: str) -> str:
+    # Edge labels sit between pipes (==>|text|): a pipe or a newline in a
+    # hand-written predicate would escape the label and inject syntax
+    # (RT F2). Quote the label and flatten newlines — mermaid accepts
+    # ==>|"text"| and treats the content as literal text.
+    flat = " ".join(label.split())
+    return f'"{_esc_mermaid(flat)}"'
+
+
+def _esc_dot(label: str) -> str:
+    # DOT quoted strings: escape backslashes FIRST, then quotes — a
+    # predicate ending in a backslash would otherwise eat the closing
+    # quote and produce an unparsable document (RT F3, Graphviz rc=1).
+    return label.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
 def render_mermaid(g: Graph) -> str:
     lines = ["graph LR"]
     for n in sorted(g.nodes, key=lambda x: x.id):
@@ -200,7 +219,7 @@ def render_mermaid(g: Graph) -> str:
         elif e.kind == "conflict":
             lines.append(f"    {_short(e.src)} -.->|conflict| {_short(e.dst)}")
         elif e.kind == "explicit":
-            pred = _esc_mermaid(e.label or "related")
+            pred = _mermaid_edge_label(e.label or "related")
             lines.append(f"    {_short(e.src)} ==>|{pred}| {_short(e.dst)}")
         else:
             lines.append(f"    {_short(e.src)} -.-|tag x{e.weight}| {_short(e.dst)}")
@@ -215,7 +234,7 @@ def render_dot(g: Graph) -> str:
         lines.append(f'    "{_short(n.id)}" [label="{label}"];')
     for e in g.edges:
         if e.kind == "explicit":
-            pred = (e.label or "related").replace('"', '\\"')
+            pred = _esc_dot(e.label or "related")
             style = f' [penwidth=2, color=orange, label="{pred}"]'
         else:
             style = {"superseded_by": "", "conflict": ' [style=dashed, color=red]',
