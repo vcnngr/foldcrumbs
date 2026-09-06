@@ -640,8 +640,8 @@ python3 -m unittest discover -s tests -v
 ## Server MCP
 
 foldcrumbs include un server MCP minimale (stdio, solo stdlib — nessuna dipendenza dall'SDK `mcp`)
-che espone nove tool — `remember`, `recall`, `answer`, `forget`, `graph_path`, `relate`, `ingest`,
-`adopt` e `outcome` —
+che espone undici tool — `remember`, `recall` (modalità completa o indice compatto), `fetch`,
+`timeline`, `answer`, `forget`, `graph_path`, `relate`, `ingest`, `adopt` e `outcome` —
 a qualsiasi client MCP:
 
 ```bash

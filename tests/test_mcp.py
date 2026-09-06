@@ -62,7 +62,7 @@ class TestHandler(unittest.TestCase):
         self.assertEqual(names,
                          {"remember", "recall", "answer", "forget",
                           "graph_path", "relate", "ingest",
-                          "adopt", "outcome"})
+                          "adopt", "outcome", "fetch", "timeline"})
 
     def test_forget_by_filename(self):
         rem = mcp_server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -271,7 +271,7 @@ class TestSubprocessRoundTrip(unittest.TestCase):
         self.assertEqual({t["name"] for t in by_id[2]["result"]["tools"]},
                          {"remember", "recall", "answer", "forget",
                           "graph_path", "relate", "ingest",
-                          "adopt", "outcome"})
+                          "adopt", "outcome", "fetch", "timeline"})
         self.assertFalse(by_id[3]["result"]["isError"])
         self.assertEqual(len(responses), 3)  # no response for the notification
 
