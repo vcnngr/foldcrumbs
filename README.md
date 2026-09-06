@@ -543,6 +543,56 @@ strip them, so no foreign verdict can be smuggled in.
 Design rationale and the full trust-boundary table:
 [docs/design/fleet-learning.md](docs/design/fleet-learning.md).
 
+## Permissions with a paper trail: `authorization`
+
+Agents that carry permissions in memory can launder authority: a grant
+gets written, its provenance washes out, and the revocation never
+propagates (arXiv 2609.01836 measured executors acting on false
+authority in 98.6% of trials). foldcrumbs answers with a typed ledger,
+not a policy engine — **it is not an enforcement point and never sees
+your actions**. What it guarantees: every grant carries its source
+event, its expiry, and its retirement chain — or it does not exist.
+
+```bash
+# the source event exists first — a grant without one is refused
+python3 -m foldcrumbs remember "Standup approved agent-a deploy access" --type event
+python3 -m foldcrumbs remember "agent-a may deploy to prod" \
+    --type authorization --grants "may deploy to prod" --granted-to agent-a \
+    --backed-by <event-id> --expires 30d
+python3 -m foldcrumbs recall deploy        # the ledger section rides with every recall
+python3 -m foldcrumbs doctor               # flags unbacked / expired / retirement gaps
+```
+
+The contract, honestly scoped:
+
+- **Minting is a human verb.** CLI only; MCP `remember` refuses the type
+  (an agent minting its own authority is the attack, not a feature).
+  Distill never emits it; ingest demotes it (a document cannot grant
+  authority); import/migrate refuse it; `adopt` refuses it both ways —
+  authority never travels between roots.
+- **No immortal permissions.** `expires_at` is mandatory and must be
+  aware and future; a stored grant with a broken expiry reads EXPIRED,
+  never ACTIVE (fail-closed).
+- **Backing must be alive.** `backed_by` must point at a live local
+  `event` or `decision` at write time. If it dies later, every served
+  read derives UNBACKED — a clean ACTIVE grant with dead backing is
+  never served.
+- **Retirement is the supersede chain.** `supersede <grant> --by
+  <event>` retires it; the bounded ledger trace renders dangling links
+  and cycles visibly broken, never silently complete. `graph path`
+  semantics are untouched: a retired grant stays a refused endpoint.
+- **Served reads derive state** (RETIRED > EXPIRED > UNBACKED > ACTIVE)
+  on every call: recall's own ledger section (exempt from "honour it"),
+  `fetch` with a deterministic envelope before the raw file, index
+  snapshots excluded with a pointer line, `answer` never sees grants.
+- **Declared limits**: a `decision` whose body says "allowed forever"
+  is out of reach (no semantic classifier); the CLI attestation is
+  procedural, not identity; raw files stay greppable — the contract
+  binds the surfaces the product serves.
+
+Design and the T1-T20 acceptance matrix:
+[docs/design/authorization-integrity.md](docs/design/authorization-integrity.md).
+
 ## Sharing memory between stores: `import`
 
 Stores are namespaced **per instance × per project**: memory lives in

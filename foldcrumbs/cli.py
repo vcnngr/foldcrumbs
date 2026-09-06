@@ -81,13 +81,28 @@ def _cmd_remember(args: argparse.Namespace) -> int:
         source="cli",
         tags=args.tag or [],
     )
+    # AUTH design rev2 §D3: minting a grant is a CLI (human) verb and needs
+    # the full identity — the core gate refuses anything incomplete.
+    if args.type == "authorization":
+        rec.grants = args.grants or ""
+        rec.granted_to = args.granted_to or ""
+        rec.backed_by = args.backed_by or ""
+        if not args.expires:
+            print("refused: --expires is required for an authorization "
+                  "(no immortal permissions)")
+            return 1
     if args.expires:
         try:
             rec.expires_at = parse_expiry(args.expires)
         except ValueError as exc:
             print(f"refused: {exc}")
             return 1
-    action, path = store.upsert(rec)
+    try:
+        action, path = store.upsert(rec)
+    except Exception as exc:
+        # AuthorizationError (and any core refusal) renders visibly
+        print(f"refused: {exc}")
+        return 1
     store.rebuild_index()
     print(f"{action}: {path}")
     return 0
@@ -115,6 +130,13 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         return 0
     block = format_context_block(top, heading=args.query)
     print(block or "(no matching memories)")
+    # AUTH design rev2 §D4: the authorization ledger is served with every
+    # recall — grants excluded from search are useless if never surfaced.
+    from . import authz
+    section = authz.render_authorization_section()
+    if section:
+        print()
+        print(section)
     return 0
 
 
@@ -341,6 +363,13 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
         print(f"conflicts  : {len(q['flagged'])} ambiguous, "
               f"{len(q['claims_out'])} claims out, "
               f"{len(q['contested_here'])} contested — `foldcrumbs conflicts`")
+    # AUTH design rev2 §D4: authorization gap classes
+    from . import authz as authz_mod
+    gaps = authz_mod.doctor_checks()
+    if gaps:
+        print(f"authorizations: {len(gaps)} finding(s)")
+        for g in gaps:
+            print(f"  ! {g}")
     return 0
 
 
@@ -1288,6 +1317,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--tag", action="append")
     r.add_argument("--expires", default="",
                    help="true until this date: ISO (2026-09-01) or relative (30d, 2w, 6m)")
+    r.add_argument("--grants", default="",
+                   help="authorization only: what is permitted")
+    r.add_argument("--granted-to", dest="granted_to", default="",
+                   help="authorization only: who holds the authority")
+    r.add_argument("--backed-by", dest="backed_by", default="",
+                   help="authorization only: id of the live local "
+                        "event/decision that is the source of this grant")
     r.set_defaults(func=_cmd_remember)
 
     rc = sub.add_parser("recall", help="search the store")

@@ -550,6 +550,58 @@ nessun verdetto esterno può essere contrabbandato.
 Razionale del design e tabella completa del trust boundary:
 [docs/design/fleet-learning.md](docs/design/fleet-learning.md).
 
+## Permessi con una traccia documentale: `authorization`
+
+Gli agenti che portano permessi in memoria possono riciclare autorità:
+un grant viene scritto, la sua provenienza si lava, e la revoca non si
+propaga (arXiv 2609.01836 ha misurato executor che agiscono su falsa
+autorità nel 98.6% dei casi). foldcrumbs risponde con un ledger
+tipizzato, non un policy engine — **non è un punto di enforcement e non
+vede mai le tue azioni**. Ciò che garantisce: ogni grant porta il suo
+evento sorgente, la sua scadenza e la sua catena di ritiro — oppure non
+esiste.
+
+```bash
+# prima esiste l'evento sorgente — un grant senza evento è rifiutato
+python3 -m foldcrumbs remember "Lo standup ha approvato l'accesso deploy di agent-a" --type event
+python3 -m foldcrumbs remember "agent-a può deployare in prod" \
+    --type authorization --grants "può deployare in prod" --granted-to agent-a \
+    --backed-by <event-id> --expires 30d
+python3 -m foldcrumbs recall deploy        # la sezione ledger accompagna ogni recall
+python3 -m foldcrumbs doctor               # segnala unbacked / scaduti / gap di ritiro
+```
+
+Il contratto, con scope onesto:
+
+- **Coniare è un verbo umano.** Solo CLI; il `remember` MCP rifiuta il
+  tipo (un agente che conia la propria autorità è l'attacco, non una
+  feature). Distill non lo emette mai; ingest lo degrada (un documento
+  non può concedere autorità); import/migrate lo rifiutano; `adopt` lo
+  rifiuta in entrambe le direzioni — l'autorità non viaggia tra root.
+- **Nessun permesso immortale.** `expires_at` è obbligatorio, aware e
+  futuro; un grant salvato con scadenza corrotta legge EXPIRED, mai
+  ACTIVE (fail-closed).
+- **Il backing deve essere vivo.** `backed_by` deve puntare a un
+  `event`/`decision` locale vivo al momento della scrittura. Se muore
+  dopo, ogni lettura servita deriva UNBACKED — un grant ACTIVE pulito
+  con backing morto non viene mai servito.
+- **Il ritiro è la catena supersede.** `supersede <grant> --by <event>`
+  lo ritira; la traccia ledger bounded mostra link pendenti e cicli
+  visibilmente rotti, mai silenziosamente completi. La semantica di
+  `graph path` non si tocca: un grant ritirato resta endpoint rifiutato.
+- **Le letture servite derivano lo stato** (RETIRED > EXPIRED > UNBACKED
+  > ACTIVE) a ogni chiamata: sezione ledger propria del recall (esente
+  da "honour it"), `fetch` con envelope deterministico prima del file
+  raw, snapshot dell'indice esclusi con riga puntatore, `answer` non
+  vede mai i grant.
+- **Limiti dichiarati**: una `decision` il cui body dice "allowed
+  forever" è fuori portata (nessun classificatore semantico);
+  l'attestazione CLI è procedurale, non identitaria; i file raw restano
+  greppabili — il contratto vincola le superfici che il prodotto serve.
+
+Design e matrice di accettazione T1-T20:
+[docs/design/authorization-integrity.md](docs/design/authorization-integrity.md).
+
 ## Condividere memoria tra store: `import`
 
 Gli store sono con namespace **per istanza × per progetto**: la memoria vive in

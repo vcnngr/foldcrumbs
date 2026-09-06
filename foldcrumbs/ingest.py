@@ -211,7 +211,17 @@ def ingest(source: str, cwd: str | None = None) -> dict[str, int]:
     text = _truncate_doc(text)
 
     records = []
+    demoted_authorizations = 0
     for item in _extract(text):
+        # AUTH design rev2 §D3: a document cannot grant authority. An
+        # extractor emitting type=authorization is DEMOTED to context and
+        # counted in the summary — visible, never a silent drop. `context`
+        # is not a distill gate type, so the item is then dropped by the
+        # standard gate: fail-closed. The count is the audit trail.
+        if item.get("type") == "authorization":
+            item = dict(item)
+            item["type"] = "context"
+            demoted_authorizations += 1
         # Same write gate and artifact filter distill applies — one rule set.
         if not distill._passes_gate(item):  # noqa: SLF001 — canonical gate
             continue
@@ -229,4 +239,6 @@ def ingest(source: str, cwd: str | None = None) -> dict[str, int]:
                 tags=item.get("tags", []),
             )
         )
-    return distill.persist(records, cwd)
+    out = distill.persist(records, cwd)
+    out["demoted_authorizations"] = demoted_authorizations
+    return out

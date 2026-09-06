@@ -372,6 +372,14 @@ def _adopt(ref: str, cwd=None, note: str = "",
         raise AdoptError(
             f"as_type {as_type!r} is not a memory type — must be one of "
             f"{', '.join(sorted(VALID_TYPES))}")
+    # AUTH design rev2 §D3: another instance's permission is not this
+    # instance's permission. Refused BEFORE any file write (T6), both
+    # directions: never adopt a foreign grant, never re-type into one.
+    if as_type == "authorization":
+        raise AdoptError(
+            "as_type 'authorization' is refused: authority never travels "
+            "between roots — mint grants locally with `foldcrumbs remember "
+            "--type authorization` backed by a local event/decision")
     root_id, mem_ref = _split_ref(ref)
     if not federation.valid_id(root_id):
         raise AdoptError(f"root id {root_id!r} is not a valid registry id")
@@ -388,6 +396,11 @@ def _adopt(ref: str, cwd=None, note: str = "",
 
     # --- fail-before-write: every check runs before any byte is written ---
     src = _resolve_in_root(root, mem_ref, cwd)
+    if src.type == "authorization":
+        raise AdoptError(
+            "that memory is an authorization of the source root — grants "
+            "never travel between roots (their backing event lives in the "
+            "source store's history)")
     _check_identity(src, root, cwd)
     _check_live(src)
     ledger = read_ledger(cwd)          # fail-closed on corrupt ledger

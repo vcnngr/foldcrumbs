@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Authorization integrity** — a new `authorization` memory type that
+  makes permissions a typed ledger instead of laundered prose (arXiv
+  2609.01836). A grant exists only with a live local `event`/`decision`
+  backing it (`backed_by`), a mandatory aware future expiry, and human
+  provenance; minting is CLI-only (`--grants/--granted-to/--backed-by`)
+  — MCP remember, distill, ingest (demoted+counted), import/migrate and
+  adopt all refuse it by construction. Retirement is the supersede
+  chain; a bounded ledger trace renders dangling/cyclic chains visibly
+  broken. Every served read derives state (RETIRED > EXPIRED > UNBACKED
+  > ACTIVE, fail-closed on corrupted expiry): recall's own ledger
+  section, fetch's deterministic envelope, index snapshots excluded
+  with a pointer line, `answer` never sees grants, `doctor` flags the
+  gap classes. Design + T1-T20 matrix:
+  docs/design/authorization-integrity.md (double-RT GREEN rev 2).
+
 - **Token-efficient recall: 3-layer workflow** — `recall --index` (CLI) and
   `recall(mode="index")` (MCP) return a compact filename/type/title hit
   list (a compact ref/type/title line per hit — savings grow with memory
