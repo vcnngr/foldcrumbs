@@ -54,19 +54,20 @@ class TmpStore(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="ccmem_test_")
         self._state = tempfile.mkdtemp(prefix="ccmem_test_state_")
-        # FOLDCRUMBS_* take precedence over the legacy ENGRAM_* names, so
-        # setting only the latter leaves a developer who exported either one
-        # pointed at their real store.
+        # FOLDCRUMBS_* is the canonical spelling (the legacy ENGRAM_* fallback
+        # has its own dedicated tests below). Both are cleared here so a
+        # developer who exported either one is not pointed at their real
+        # store.
         self._saved = {k: os.environ.get(k) for k in
                        ("ENGRAM_DIR", "ENGRAM_STATE_DIR", "CLAUDE_CONFIG_DIR",
                         "FOLDCRUMBS_DIR", "FOLDCRUMBS_STATE_DIR")}
         for k in ("FOLDCRUMBS_DIR", "FOLDCRUMBS_STATE_DIR"):
             os.environ.pop(k, None)
-        os.environ["ENGRAM_DIR"] = self.dir
+        os.environ["FOLDCRUMBS_DIR"] = self.dir
         # Isolate the federation registry too. Without this, search() —
         # federated by default — would consult the developer's real
         # ~/.foldcrumbs and read their actual stores during a test run.
-        os.environ["ENGRAM_STATE_DIR"] = self._state
+        os.environ["FOLDCRUMBS_STATE_DIR"] = self._state
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self._state) / "config")
         import importlib
         from foldcrumbs import config as _c

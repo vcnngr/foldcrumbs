@@ -103,9 +103,10 @@ def _worker_add_relation(mem_dir, state_dir, mem_id, predicate, evidence,
                          result_queue):
     """Add one relation under the memory lock; report the outcome."""
     import os
-    os.environ["ENGRAM_DIR"] = str(mem_dir)
-    os.environ["ENGRAM_STATE_DIR"] = str(state_dir)
-    for k in ("FOLDCRUMBS_DIR", "FOLDCRUMBS_STATE_DIR"):
+    os.environ["FOLDCRUMBS_DIR"] = str(mem_dir)
+    os.environ["FOLDCRUMBS_STATE_DIR"] = str(state_dir)
+    # clear the legacy spellings so the canonical ones above decide
+    for k in ("ENGRAM_DIR", "ENGRAM_STATE_DIR"):
         os.environ.pop(k, None)
     import importlib
     from foldcrumbs import config as _c

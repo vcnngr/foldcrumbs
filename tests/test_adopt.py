@@ -59,7 +59,7 @@ class _AdoptEnv(unittest.TestCase):
                        ("ENGRAM_STATE_DIR", "CLAUDE_CONFIG_DIR", "FOLDCRUMBS_DIR",
                         "ENGRAM_DIR", "FOLDCRUMBS_STATE_DIR")}
         os.environ.pop("FOLDCRUMBS_STATE_DIR", None)
-        os.environ["ENGRAM_STATE_DIR"] = str(self._state)
+        os.environ["FOLDCRUMBS_STATE_DIR"] = str(self._state)
         os.environ["CLAUDE_CONFIG_DIR"] = str(self._home / ".claude")
         os.environ.pop("FOLDCRUMBS_DIR", None)
         os.environ.pop("ENGRAM_DIR", None)
