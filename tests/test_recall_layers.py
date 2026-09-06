@@ -2,8 +2,8 @@
 
 Contract under test:
 * `recall --index` (CLI) / recall(mode="index") (MCP): compact index layer —
-  one line per hit: filename, type, title, updated date. ~10x fewer tokens
-  than the full context block; same ranking, same filters.
+  one line per hit: filename, type, title, updated date. Savings grow with
+  memory body length; same ranking, same filters.
 * `fetch <file> [<file> ...]` (CLI) / fetch tool (MCP): detail layer — full
   memory content by filename(s), batched. Unknown names are reported, not
   silently dropped.
@@ -160,9 +160,10 @@ class TestFetchLayer(_Seeded):
         self.assertIn("3 lines", out)
 
     def test_fetch_is_path_safe(self):
-        # containment: ../ must not escape the store
+        # containment: ../ must not escape the store — visibly refused
         txt = _text(_call(9, "fetch", names=["../MEMORY.md", "../../etc/passwd"]))
-        self.assertIn("not found", txt.lower())
+        low = txt.lower()
+        self.assertTrue("not found" in low or "not a memory" in low)
 
 
 class TestTimeline(_Seeded):
@@ -237,6 +238,234 @@ class TestCatalogParity(_Seeded):
         self.assertIn("mode", props)
         self.assertEqual(sorted(props["mode"].get("enum", [])),
                          ["full", "index"])
+
+
+class TestRtRound1P0P1(_Seeded):
+    """RT GPT round 1 on 5bc728e (card t_e5fe5cc7): F1-F4.
+
+    F1 (P0): federated index handed fetch a bare filename; a foreign hit
+    with a local homonym resolved to the LOCAL file — wrong content, no
+    error. Fix: index qualifies foreign refs as <root_id>:<filename>;
+    fetch resolves qualified refs read-only inside that registered root
+    and refuses to pass a foreign hit off as a local one.
+    """
+
+    def _seed_foreign(self):
+        """Register a second root holding a homonym of a local memory."""
+        import importlib
+        import tempfile
+        from foldcrumbs import config as _c, federation
+        self._fed_home = Path(tempfile.mkdtemp(prefix="ccmem_fed_"))
+        # ENGRAM_DIR (set by TmpStore) would override cwd derivation for
+        # EVERY store.get — pop it so the federated project resolves via
+        # CLAUDE_CONFIG_DIR + cwd like a real installation.
+        self._fed_saved = {k: os.environ.get(k) for k in
+                           ("FOLDCRUMBS_STATE_DIR", "CLAUDE_CONFIG_DIR",
+                            "FOLDCRUMBS_DIR", "ENGRAM_DIR",
+                            "ENGRAM_STATE_DIR")}
+        state = Path(tempfile.mkdtemp(prefix="ccmem_fstate_"))
+        os.environ["FOLDCRUMBS_STATE_DIR"] = str(state)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self._fed_home / ".claude")
+        os.environ.pop("FOLDCRUMBS_DIR", None)
+        os.environ.pop("ENGRAM_DIR", None)
+        os.environ.pop("ENGRAM_STATE_DIR", None)
+        importlib.reload(_c)
+        mine = federation.register(self._fed_home / ".claude")
+        theirs = federation.register(self._fed_home / ".claude-work")
+        proj = self._fed_home / "proj"
+        proj.mkdir(parents=True, exist_ok=True)
+        my_dir = mine.memory_dir(proj)
+        my_dir.mkdir(parents=True, exist_ok=True)
+        their_dir = theirs.memory_dir(proj)
+        their_dir.mkdir(parents=True, exist_ok=True)
+        # homonym pair: same basename, different content
+        rec_l = MemoryRecord(title="Deploy window",
+                             content="LOCAL_ONLY: cache capacity unrelated.",
+                             type="fact")
+        (my_dir / rec_l.filename()).write_text(rec_l.to_markdown(),
+                                               encoding="utf-8")
+        rec_f = MemoryRecord(title="Deploy window",
+                             content="FOREIGN_ONLY: deploys on fridays only.",
+                             type="fact")
+        (their_dir / rec_f.filename()).write_text(rec_f.to_markdown(),
+                                                  encoding="utf-8")
+        return mine, theirs, rec_l.filename(), proj
+
+    def _fed_call(self, id_, name, **args):
+        # run inside the federated project cwd so search sees both roots
+        old = os.getcwd()
+        os.chdir(self._fed_proj)
+        try:
+            return _call(id_, name, **args)
+        finally:
+            os.chdir(old)
+
+    def setUp(self):
+        super().setUp()
+        self.mine, self.theirs, self.homonym, self._fed_proj = \
+            self._seed_foreign()
+
+    def tearDown(self):
+        import importlib
+        from foldcrumbs import config as _c
+        for k, v in self._fed_saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        importlib.reload(_c)
+        super().tearDown()
+
+    def test_f1_index_qualifies_foreign_hits(self):
+        resp = self._fed_call(30, "recall", query="deploys on fridays",
+                              mode="index", limit=5)
+        idx = _text(resp)
+        # the foreign hit is addressable as <root_id>:<filename>
+        self.assertIn(f"{self.theirs.id}:{self.homonym}", idx)
+        # and marked as foreign, so a reader knows it is not local
+        self.assertIn("foreign", idx.lower())
+
+    def test_f1_fetch_qualified_ref_returns_foreign_content(self):
+        ref = f"{self.theirs.id}:{self.homonym}"
+        txt = _text(self._fed_call(31, "fetch", names=[ref]))
+        self.assertIn("FOREIGN_ONLY", txt)
+        self.assertNotIn("LOCAL_ONLY", txt)
+
+    def test_f1_fetch_bare_homonym_never_mixes_identities(self):
+        # the bare name is LOCAL — it must return local content or refuse,
+        # and the index for the foreign hit never offers the bare name
+        txt = _text(self._fed_call(32, "fetch", names=[self.homonym]))
+        # whichever it does, it must not be the foreign body under a
+        # local-looking name — and here the local file exists, so local:
+        self.assertIn("LOCAL_ONLY", txt)
+        self.assertNotIn("FOREIGN_ONLY", txt)
+
+    def test_f1_fetch_unknown_root_refused(self):
+        txt = _text(self._fed_call(33, "fetch",
+                                   names=[f"deadbeef:{self.homonym}"]))
+        self.assertIn("not found", txt.lower())
+
+    def test_f1_fetch_qualified_ref_path_safe(self):
+        # traversal inside a qualified ref stays refused (visible refusal,
+        # wording may be 'not found' or 'not a memory file')
+        evil = f"{self.theirs.id}:../../.claude/config"
+        txt = _text(self._fed_call(34, "fetch", names=[evil]))
+        low = txt.lower()
+        self.assertTrue("not found" in low or "not a memory" in low)
+
+    def test_f1_full_recall_unchanged(self):
+        # the fix must not touch full-mode recall
+        txt = _text(self._fed_call(35, "recall", query="deploys on fridays"))
+        self.assertIn("FOREIGN_ONLY", txt)
+        self.assertIn("foldcrumbs-recall", txt)
+
+
+class TestRtRound1Timeline(_Seeded):
+    """F2 (P1): excluded anchors must refuse VISIBLY, not print nothing."""
+
+    def test_f2_archived_anchor_refused(self):
+        name = self.names[1]
+        store.set_status(name, "archived")
+        store.rebuild_index()
+        txt = _text(_call(40, "timeline", ref=name))
+        self.assertIn("refused", txt.lower())
+
+    def test_f2_expired_anchor_refused(self):
+        from datetime import datetime, timedelta, timezone
+        name = self.names[3]
+        rec = store.get(name)
+        rec.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        store.write_memory(rec)
+        store.rebuild_index()
+        txt = _text(_call(41, "timeline", ref=name))
+        self.assertIn("refused", txt.lower())
+
+    def test_f2_cli_nonzero_rc_on_excluded_anchor(self):
+        import contextlib
+        import io
+        from foldcrumbs import cli
+        name = self.names[1]
+        store.set_status(name, "archived")
+        store.rebuild_index()
+        buf, ebuf = io.StringIO(), io.StringIO()
+        old = os.getcwd()
+        os.chdir(self.dir)
+        try:
+            with contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(ebuf):
+                rc = cli.main(["timeline", name])
+        finally:
+            os.chdir(old)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("refused", (buf.getvalue() + ebuf.getvalue()).lower())
+
+
+class TestRtRound1FetchArtifacts(_Seeded):
+    """F3 (P1): fetch is for memory .md files only — not store artifacts."""
+
+    def test_f3_adoptions_json_refused(self):
+        (Path(self.dir) / ".adoptions.json").write_text(
+            '{"secret": "ledger contents"}', encoding="utf-8")
+        txt = _text(_call(50, "fetch", names=[".adoptions.json"]))
+        self.assertIn("not a memory", txt.lower())
+        self.assertNotIn("ledger contents", txt)
+
+    def test_f3_index_md_refused(self):
+        txt = _text(_call(51, "fetch", names=["MEMORY.md"]))
+        self.assertIn("not a memory", txt.lower())
+
+    def test_f3_recalls_json_refused(self):
+        txt = _text(_call(52, "fetch", names=[".recalls.json"]))
+        self.assertIn("not a memory", txt.lower())
+
+    def test_f3_cli_artifact_refused(self):
+        import contextlib
+        import io
+        from foldcrumbs import cli
+        (Path(self.dir) / ".adoptions.json").write_text(
+            '{"secret": "ledger contents"}', encoding="utf-8")
+        buf = io.StringIO()
+        old = os.getcwd()
+        os.chdir(self.dir)
+        try:
+            with contextlib.redirect_stdout(buf):
+                cli.main(["fetch", ".adoptions.json"])
+        finally:
+            os.chdir(old)
+        self.assertNotIn("ledger contents", buf.getvalue())
+
+
+class TestRtRound1McpTypes(_Seeded):
+    """F4 (P1): off-schema MCP args are refused, not coerced."""
+
+    def test_f4_mode_list_refused(self):
+        txt = _text(_call(60, "recall", query="deploy", mode=["index"]))
+        self.assertIn("refused", txt.lower())
+
+    def test_f4_mode_int_refused(self):
+        txt = _text(_call(61, "recall", query="deploy", mode=0))
+        self.assertIn("refused", txt.lower())
+
+    def test_f4_names_nested_refused(self):
+        txt = _text(_call(62, "fetch", names=[["a.md"]]))
+        self.assertIn("refused", txt.lower())
+
+    def test_f4_names_dict_refused(self):
+        txt = _text(_call(63, "fetch", names={"a": "b"}))
+        self.assertIn("refused", txt.lower())
+
+    def test_f4_window_float_refused(self):
+        txt = _text(_call(64, "timeline", ref=self.names[0], window=1.5))
+        self.assertIn("refused", txt.lower())
+
+    def test_f4_window_bool_refused(self):
+        txt = _text(_call(65, "timeline", ref=self.names[0], window=True))
+        self.assertIn("refused", txt.lower())
+
+    def test_f4_server_survives_and_next_call_works(self):
+        _call(66, "recall", query="deploy", mode={"x": 1})
+        txt = _text(_call(67, "recall", query="deploy"))
+        self.assertIn("foldcrumbs-recall", txt)
 
 
 if __name__ == "__main__":

@@ -98,13 +98,19 @@ def _cmd_recall(args: argparse.Namespace) -> int:
                        types=args.type or None, tags=args.tag or None)
     if getattr(args, "index", False):
         # Layer 1 of 3: compact index — pair with `foldcrumbs fetch`.
+        # RT F1: foreign hits are qualified <root_id>:<filename> and marked,
+        # so fetch can never resolve them to a local homonym.
         if not top:
             print("(no matching memories)")
             return 0
         for m in top:
             name = m.source_path or m.filename()
             day = m.updated_at.strftime("%Y-%m-%d") if m.updated_at else "?"
-            print(f"{name}  [{m.type}]  {m.title}  ({day})")
+            if m.is_foreign:
+                print(f"{m.origin_root_id}:{name}  [{m.type}]  {m.title}  "
+                      f"({day})  (foreign: {m.origin_root}, read-only)")
+            else:
+                print(f"{name}  [{m.type}]  {m.title}  ({day})")
         print(f"-- {len(top)} hit(s); full text: foldcrumbs fetch <file> [...]")
         return 0
     block = format_context_block(top, heading=args.query)
@@ -113,17 +119,18 @@ def _cmd_recall(args: argparse.Namespace) -> int:
 
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
+    # Shares resolution with the MCP tool: local file.md or qualified
+    # <root_id>:file.md, memory files only (RT F1/F3).
+    from . import mcp_server
     found = 0
     for name in args.names:
-        rec = store.get(name)
-        if rec is None:
-            print(f"--- {name}: not found")
+        text, reason = mcp_server._fetch_one(name)
+        if text is None:
+            print(f"--- {name}: {reason}")
             continue
         found += 1
-        real = rec.source_path or rec.filename()
-        path = config.memory_dir() / real
-        print(f"--- {real}")
-        print(path.read_text(encoding="utf-8").rstrip())
+        print(f"--- {name}")
+        print(text.rstrip())
         print()
     # 0 if at least one name resolved; 1 if none did (nothing to show)
     return 0 if found else 1
@@ -135,9 +142,9 @@ def _cmd_timeline(args: argparse.Namespace) -> int:
     if window < 0:
         print("refused: --window must be >= 0", file=sys.stderr)
         return 1
-    anchor = mcp_server._resolve_timeline_anchor(args.ref)
+    anchor, refusal = mcp_server._resolve_timeline_anchor2(args.ref)
     if anchor is None:
-        print(f"no memory matches {args.ref!r}", file=sys.stderr)
+        print(refusal or f"no memory matches {args.ref!r}", file=sys.stderr)
         return 1
     rows = mcp_server._timeline_rows(anchor, window)
     for m in rows:

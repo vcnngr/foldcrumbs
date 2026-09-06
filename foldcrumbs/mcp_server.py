@@ -60,8 +60,9 @@ TOOLS = [
             "Search the project's foldcrumbs memory and return the most relevant "
             "memories as a context block. Call this at the start of a task to "
             "load prior decisions and conventions. mode='index' returns a "
-            "compact filename/type/title index (~10x fewer tokens) — then use "
-            "the fetch tool for the entries you actually need."
+            "compact filename/type/title index (savings grow with memory "
+            "body length) — then use the fetch tool for the entries you "
+            "actually need."
         ),
         "inputSchema": {
             "type": "object",
@@ -345,50 +346,110 @@ def tool_recall(args: dict[str, Any]) -> str:
     mems = _search(str(args["query"]), int(args.get("limit", 10)),
                    types=list(types) if types else None,
                    tags=list(tags) if tags else None)
-    mode = str(args.get("mode") or "full")
+    mode = args.get("mode", "full")
+    if mode is None:
+        mode = "full"
+    if not isinstance(mode, str) or mode not in ("full", "index"):
+        return (f"refused: mode must be the string 'full' or 'index' "
+                f"(got {type(mode).__name__}: {mode!r})")
     if mode == "index":
-        # Layer 1 of 3: compact index — filename, type, title, date only.
-        # ~10x fewer tokens; fetch full bodies via the `fetch` tool.
+        # Layer 1 of 3: compact index — ref, type, title, date only.
+        # Savings depend on body length; fetch full bodies via `fetch`.
+        # RT F1: a FOREIGN hit is never offered as a bare local filename —
+        # it is qualified <root_id>:<filename> and marked, so fetch cannot
+        # silently resolve it to a local homonym.
         if not mems:
             return "(no matching memories)"
         lines = []
         for m in mems:
             name = m.source_path or m.filename()
             day = m.updated_at.strftime("%Y-%m-%d") if m.updated_at else "?"
-            lines.append(f"{name}  [{m.type}]  {m.title}  ({day})")
+            if m.is_foreign:
+                ref = f"{m.origin_root_id}:{name}"
+                lines.append(f"{ref}  [{m.type}]  {m.title}  ({day})  "
+                             f"(foreign: {m.origin_root}, read-only)")
+            else:
+                lines.append(f"{name}  [{m.type}]  {m.title}  ({day})")
         lines.append(f"fetch full text with: fetch(names=[...]) "
                      f"— {len(mems)} hit(s)")
         return "\n".join(lines)
-    if mode != "full":
-        return f"refused: mode must be 'full' or 'index' (got {mode!r})"
     block = format_context_block(mems, heading=str(args["query"]))
     return block or "(no matching memories)"
 
 
-def _fetch_one(name: str) -> str | None:
-    """Full text of one memory by filename, or None. Path-safe via store.get."""
+def _is_memory_filename(name: str) -> bool:
+    """fetch is for memory .md files only (RT F3).
+
+    Refuses anything that is not a plain ``*.md`` basename: store artifacts
+    (index, ledgers, handoffs, dotfiles), paths, traversal.
+    """
+    if not name or name.startswith(".") or "/" in name or "\\" in name:
+        return False
+    if "\x00" in name:
+        return False
+    if not name.endswith(".md"):
+        return False
+    return not store.is_store_artifact(name)
+
+
+def _fetch_one(name: str) -> tuple[str | None, str]:
+    """Full text of one memory by ref. Returns (text, refusal_reason).
+
+    Two ref shapes, no others (RT F1):
+    * ``file.md`` — a LOCAL memory, resolved via store.get (path-safe).
+    * ``<root_id>:file.md`` — a FOREIGN memory in a registered federated
+      root, read-only, resolved inside that root's memory dir only.
+    """
+    if not isinstance(name, str) or not name:
+        return None, "not found"
+    if ":" in name:
+        root_id, _, rel = name.partition(":")
+        if not _is_memory_filename(rel):
+            return None, "not a memory file (or unsafe ref)"
+        from . import federation
+        if not federation.valid_id(root_id):
+            return None, "not found"
+        root = federation.get_root(root_id)
+        if root is None:
+            return None, "not found"
+        memdir = root.memory_dir()
+        path = memdir / rel
+        try:
+            contained = path.resolve().is_relative_to(memdir.resolve())
+        except OSError:
+            return None, "not found"
+        if not contained or not path.is_file():
+            return None, "not found"
+        try:
+            return path.read_text(encoding="utf-8"), ""
+        except OSError:
+            return None, "unreadable"
+    if not _is_memory_filename(name):
+        return None, "not a memory file (or unsafe ref)"
     rec = store.get(name)
-    if rec is None:
-        return None
+    if rec is None or rec.is_foreign:
+        return None, "not found"
     real = rec.source_path or rec.filename()
     path = config.memory_dir() / real
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8"), ""
     except OSError:
-        return None
+        return None, "unreadable"
 
 
 def tool_fetch(args: dict[str, Any]) -> str:
     names = args.get("names")
     if isinstance(names, str):
         names = [names]
-    if not isinstance(names, list) or not names:
-        return "refused: fetch needs 'names' — one filename or a list."
+    if (not isinstance(names, list) or not names
+            or not all(isinstance(n, str) for n in names)):
+        return ("refused: fetch needs 'names' — one filename string or a "
+                "flat list of filename strings.")
     out = []
     for n in names:
-        text = _fetch_one(str(n))
+        text, reason = _fetch_one(n)
         if text is None:
-            out.append(f"--- {n}: not found")
+            out.append(f"--- {n}: {reason}")
         else:
             out.append(f"--- {n}\n{text.rstrip()}")
     return "\n\n".join(out)
@@ -406,18 +467,21 @@ def _timeline_rows(anchor: MemoryRecord, window: int) -> list[MemoryRecord]:
 
 
 def tool_timeline(args: dict[str, Any]) -> str:
-    ref = str(args.get("ref") or "")
-    if not ref:
-        return "refused: timeline needs 'ref' — a memory filename/title or a query."
-    try:
-        window = int(args.get("window", 3))
-    except (TypeError, ValueError):
-        return "refused: 'window' must be a non-negative integer."
+    ref = args.get("ref")
+    if not isinstance(ref, str) or not ref:
+        return ("refused: timeline needs 'ref' — a non-empty string "
+                "(memory filename/title, or a query).")
+    window = args.get("window", 3)
+    # RT F4: bools are ints in Python and floats truncate — refuse both
+    # instead of coercing; only a true non-negative int passes.
+    if isinstance(window, bool) or not isinstance(window, int):
+        return ("refused: 'window' must be a non-negative integer "
+                f"(got {type(window).__name__}: {window!r})")
     if window < 0:
         return "refused: 'window' must be >= 0."
-    anchor = _resolve_timeline_anchor(ref)
+    anchor, refusal = _resolve_timeline_anchor2(ref)
     if anchor is None:
-        return f"no memory matches {ref!r}"
+        return refusal or f"no memory matches {ref!r}"
     rows = _timeline_rows(anchor, window)
     lines = []
     for m in rows:
@@ -428,17 +492,57 @@ def tool_timeline(args: dict[str, Any]) -> str:
     return "\n".join(lines) or "(timeline empty)"
 
 
-def _resolve_timeline_anchor(ref: str) -> MemoryRecord | None:
-    """Filename first; then id/title via the shared resolver; then a query."""
+def _resolve_timeline_anchor2(ref: str) -> tuple[MemoryRecord | None, str]:
+    """Resolve the anchor, failing VISIBLY on excluded states (RT F2).
+
+    Returns (record, "") on success or (None, refusal) — a deleted/archived/
+    expired/foreign anchor is refused with a reason, never rendered as an
+    empty timeline that looks like 'nothing happened around this memory'.
+    """
     rec = store.get(ref)
+    refusal = _anchor_exclusion(rec, ref)
     if rec is not None:
-        return rec
+        if refusal:
+            return None, refusal
+        return rec, ""
     try:
-        return _resolve_local_ref(ref)
+        local = _resolve_local_ref(ref)
     except ValueError:
-        pass
+        local = None
+    if local is not None:
+        refusal = _anchor_exclusion(local, ref)
+        if refusal:
+            return None, refusal
+        return local, ""
     hits = _search(ref, 1)
-    return hits[0] if hits else None
+    if hits:
+        top = hits[0]
+        if top.is_foreign:
+            return None, (f"refused: the top hit for {ref!r} is foreign "
+                          f"(root {top.origin_root}, read-only) — the "
+                          "timeline is local-only; use recall for it")
+        refusal = _anchor_exclusion(top, ref)
+        if refusal:
+            return None, refusal
+        return top, ""
+    return None, f"no memory matches {ref!r}"
+
+
+def _anchor_exclusion(rec: MemoryRecord | None, ref: str) -> str:
+    """Why this anchor cannot head a timeline ('' when it can)."""
+    if rec is None:
+        return ""
+    if rec.is_foreign:
+        return (f"refused: {ref!r} is foreign (root {rec.origin_root}, "
+                "read-only) — the timeline is local-only")
+    if rec.status == "deleted":
+        return f"refused: {ref!r} is deleted — restore it first"
+    if rec.status != "active":
+        return (f"refused: {ref!r} is {rec.status} — the timeline covers "
+                "active memories")
+    if rec.is_expired:
+        return f"refused: {ref!r} is expired — it left the active view"
+    return ""
 
 
 def tool_answer(args: dict[str, Any]) -> str:

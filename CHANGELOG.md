@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Token-efficient recall: 3-layer workflow** — `recall --index` (CLI) and
   `recall(mode="index")` (MCP) return a compact filename/type/title hit
-  list (~10x fewer tokens); new `fetch` command/tool prints the full text
+  list (a compact ref/type/title line per hit — savings grow with memory
+  body length); new `fetch` command/tool prints the full text
   of chosen memories in one batch (unknown names are reported, never
   silently dropped; path-safe via the store resolver); new `timeline`
   command/tool shows the chronological neighbourhood of a memory (or a
