@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Token-efficient recall: 3-layer workflow** — `recall --index` (CLI) and
+  `recall(mode="index")` (MCP) return a compact filename/type/title hit
+  list (~10x fewer tokens); new `fetch` command/tool prints the full text
+  of chosen memories in one batch (unknown names are reported, never
+  silently dropped; path-safe via the store resolver); new `timeline`
+  command/tool shows the chronological neighbourhood of a memory (or a
+  query's top hit), anchor marked, deterministic order. The MCP surface
+  grows from 9 to 11 tools; full-mode recall is unchanged.
+
 - **Fleet learning (Phase 3)** — explicit one-memory adoption from
   federated roots plus an outcome loop, with no central store and no
   auto-sync (design: docs/design/fleet-learning.md).

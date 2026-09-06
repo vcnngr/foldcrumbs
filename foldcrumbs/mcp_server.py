@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, llm, store
+from . import __version__, config, llm, store
 from .profile import format_context_block
 from .relations import PREDICATES
 from .schema import VALID_TYPES, MemoryRecord
@@ -59,7 +59,9 @@ TOOLS = [
         "description": (
             "Search the project's foldcrumbs memory and return the most relevant "
             "memories as a context block. Call this at the start of a task to "
-            "load prior decisions and conventions."
+            "load prior decisions and conventions. mode='index' returns a "
+            "compact filename/type/title index (~10x fewer tokens) — then use "
+            "the fetch tool for the entries you actually need."
         ),
         "inputSchema": {
             "type": "object",
@@ -79,6 +81,12 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Only memories carrying at least one of these tags.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["full", "index"],
+                    "description": "full (default): context block. index: "
+                                   "compact hit list — pair with the fetch tool.",
                 },
             },
             "required": ["query"],
@@ -260,6 +268,49 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "fetch",
+        "description": (
+            "Layer 3 of the token-efficient recall workflow: fetch the full "
+            "text of memories by filename — batch the IDs/filenames you got "
+            "from recall(mode='index'). Unknown names are reported, not "
+            "silently dropped."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "names": {
+                    "description": "One filename or an array of filenames.",
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                },
+            },
+            "required": ["names"],
+        },
+    },
+    {
+        "name": "timeline",
+        "description": (
+            "Layer 2 of the recall workflow: chronological context around "
+            "one memory (or a query's top hit) — the N memories before and "
+            "after it by creation time, anchor marked with '>>'. Answers "
+            "'what else was happening when this was decided'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string",
+                        "description": "Memory filename/id/title, or a query "
+                                       "(timeline around the top hit)."},
+                "window": {"type": "integer",
+                           "description": "Memories before/after the anchor "
+                                          "(default 3)."},
+            },
+            "required": ["ref"],
+        },
+    },
 ]
 
 
@@ -294,8 +345,100 @@ def tool_recall(args: dict[str, Any]) -> str:
     mems = _search(str(args["query"]), int(args.get("limit", 10)),
                    types=list(types) if types else None,
                    tags=list(tags) if tags else None)
+    mode = str(args.get("mode") or "full")
+    if mode == "index":
+        # Layer 1 of 3: compact index — filename, type, title, date only.
+        # ~10x fewer tokens; fetch full bodies via the `fetch` tool.
+        if not mems:
+            return "(no matching memories)"
+        lines = []
+        for m in mems:
+            name = m.source_path or m.filename()
+            day = m.updated_at.strftime("%Y-%m-%d") if m.updated_at else "?"
+            lines.append(f"{name}  [{m.type}]  {m.title}  ({day})")
+        lines.append(f"fetch full text with: fetch(names=[...]) "
+                     f"— {len(mems)} hit(s)")
+        return "\n".join(lines)
+    if mode != "full":
+        return f"refused: mode must be 'full' or 'index' (got {mode!r})"
     block = format_context_block(mems, heading=str(args["query"]))
     return block or "(no matching memories)"
+
+
+def _fetch_one(name: str) -> str | None:
+    """Full text of one memory by filename, or None. Path-safe via store.get."""
+    rec = store.get(name)
+    if rec is None:
+        return None
+    real = rec.source_path or rec.filename()
+    path = config.memory_dir() / real
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def tool_fetch(args: dict[str, Any]) -> str:
+    names = args.get("names")
+    if isinstance(names, str):
+        names = [names]
+    if not isinstance(names, list) or not names:
+        return "refused: fetch needs 'names' — one filename or a list."
+    out = []
+    for n in names:
+        text = _fetch_one(str(n))
+        if text is None:
+            out.append(f"--- {n}: not found")
+        else:
+            out.append(f"--- {n}\n{text.rstrip()}")
+    return "\n\n".join(out)
+
+
+def _timeline_rows(anchor: MemoryRecord, window: int) -> list[MemoryRecord]:
+    all_mems = [m for m in store.iter_memories(config.memory_dir())
+                if m.status == "active" and not m.is_expired]
+    all_mems.sort(key=lambda m: (m.created_at, m.source_path or m.filename()))
+    try:
+        i = next(k for k, m in enumerate(all_mems) if m.id == anchor.id)
+    except StopIteration:
+        return []
+    return all_mems[max(0, i - window): i + window + 1]
+
+
+def tool_timeline(args: dict[str, Any]) -> str:
+    ref = str(args.get("ref") or "")
+    if not ref:
+        return "refused: timeline needs 'ref' — a memory filename/title or a query."
+    try:
+        window = int(args.get("window", 3))
+    except (TypeError, ValueError):
+        return "refused: 'window' must be a non-negative integer."
+    if window < 0:
+        return "refused: 'window' must be >= 0."
+    anchor = _resolve_timeline_anchor(ref)
+    if anchor is None:
+        return f"no memory matches {ref!r}"
+    rows = _timeline_rows(anchor, window)
+    lines = []
+    for m in rows:
+        day = m.created_at.strftime("%Y-%m-%d %H:%M") if m.created_at else "?"
+        mark = ">>" if m.id == anchor.id else "  "
+        lines.append(f"{mark} {day}  [{m.type}] {m.title} "
+                     f"({m.source_path or m.filename()})")
+    return "\n".join(lines) or "(timeline empty)"
+
+
+def _resolve_timeline_anchor(ref: str) -> MemoryRecord | None:
+    """Filename first; then id/title via the shared resolver; then a query."""
+    rec = store.get(ref)
+    if rec is not None:
+        return rec
+    try:
+        return _resolve_local_ref(ref)
+    except ValueError:
+        pass
+    hits = _search(ref, 1)
+    return hits[0] if hits else None
 
 
 def tool_answer(args: dict[str, Any]) -> str:
@@ -555,7 +698,8 @@ _DISPATCH = {"remember": tool_remember, "recall": tool_recall,
              "answer": tool_answer, "forget": tool_forget,
              "graph_path": tool_graph_path, "relate": tool_relate,
              "ingest": tool_ingest, "adopt": tool_adopt,
-             "outcome": tool_outcome}
+             "outcome": tool_outcome, "fetch": tool_fetch,
+             "timeline": tool_timeline}
 
 
 # --- JSON-RPC / MCP plumbing ----------------------------------------------- #
