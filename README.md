@@ -233,8 +233,8 @@ On top of the derived view, a memory can carry **explicit** relations to
 another memory or to an external entity. They live in one canonical-JSON
 frontmatter line (`relations_json`) — diff-friendly, round-trip safe — and
 follow strict rules (design REV-2): predicates come from a closed vocabulary
-of eight (`caused_by`, `depends_on`, `supersedes`, `contradicts`, `supports`,
-`refines`, `blocks`, `precedes`); anything else is refused. An edge without
+of nine (`caused_by`, `depends_on`, `supersedes`, `contradicts`, `supports`,
+`refines`, `blocks`, `precedes`, `invalidated_by`); anything else is refused. An edge without
 evidence is recorded as `inferred` at confidence ≤ 0.5. Writes are locked per
 memory (fail-closed), so two agents editing one memory never lose an edge.
 
@@ -592,6 +592,45 @@ The contract, honestly scoped:
 
 Design and the T1-T20 acceptance matrix:
 [docs/design/authorization-integrity.md](docs/design/authorization-integrity.md).
+
+## Facts that die with their cause: `invalidated_by`
+
+Some memories are only true *while something else is true*. The staging
+URL exists only while the staging cluster exists; the license terms hold
+only while the vendor agreement holds. foldcrumbs lets you write that
+dependency down as a contract:
+
+```bash
+foldcrumbs relate "Staging URL" invalidated_by --to-memory "Stg cluster" \
+    --evidence "the URL exists only while the cluster does"
+```
+
+When the target dies — superseded, archived, expired, or gone — the
+dependent **leaves the served context**: recall, the index, timeline and
+federation stop presenting it as current. Nothing is rewritten: the
+contract is *derived on every read*, never cascaded, never swept by a
+daemon. Revive the target and the dependent is served again on the next
+read, with no repair pass.
+
+The honest edges:
+
+- contracts **do not chain** — A holds while B is *alive*, not while B is
+  itself valid. If B's death should kill A too, write the second edge.
+- an unresolvable target (typo, hard-forget) makes the dependent
+  **dangling**: excluded fail-closed and listed by `foldcrumbs doctor`
+  for repair — never silently dropped, never claimed deleted.
+- recall says what it withheld: up to 3 diagnostic lines ("matched but
+  not served: … invalidated …") ride below the block, and `fetch` puts
+  an envelope on the raw file. The diagnostics never feed the answer
+  path as evidence.
+- a memory carrying a contract is **create-only at its destination**: no
+  upsert or re-ingest can silently overwrite the contract away — retire
+  or repair it explicitly.
+- graph traversal is untouched: an invalidated memory stays a path node;
+  invalidation is a context-serving rule, not a graph rule.
+
+Design and the T1-T15 acceptance matrix:
+[docs/design/invalidated-by.md](docs/design/invalidated-by.md).
 
 ## Sharing memory between stores: `import`
 

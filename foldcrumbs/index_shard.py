@@ -160,11 +160,25 @@ def write_shard(cwd: str | os.PathLike[str] | None = None) -> Path | None:
                     "federation: shard not published (lock unavailable)"
                 )
                 return None
+            # INV design rev2 §D3: a shard is a snapshot — snapshots do not
+            # derive. Contract-carrying memories are excluded from
+            # publication (a foreign reader cannot resolve their contracts
+            # anyway — the reader-side search marks them UNRESOLVED);
+            # counted here so the exclusion is visible, not silent.
+            from . import invalidation as _inv
+            _all = list(store.iter_memories(cwd))
+            _contracted_n = sum(1 for m in _all
+                                if _inv.carries_contract(m)
+                                and store._visible(m))
             entries = [
                 _entry(m, memory_dir)
-                for m in store.iter_memories(cwd)
-                if store._visible(m)
+                for m in _all
+                if store._visible(m) and not _inv.carries_contract(m)
             ]
+            if _contracted_n:
+                config.log_event(
+                    f"federation: {_contracted_n} contract-carrying "
+                    "memory/memories withheld from shard publication")
             entries.sort(key=lambda e: (e["created_at"], e["filename"]))
             existing = _read_shard_file(target)
             # The directory counts as much as the entries. Readers refuse a

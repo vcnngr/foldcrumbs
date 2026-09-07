@@ -46,6 +46,10 @@ from .schema import MemoryRecord
 PREDICATES = frozenset({
     "caused_by", "depends_on", "supersedes", "contradicts",
     "supports", "refines", "blocks", "precedes",
+    # INV design rev2 §D1: "A holds only while B is base-alive". Derived
+    # on read (never cascaded); single-hop; write gate: B must be a LIVE
+    # local memory at write time, no self-edges, no entity targets.
+    "invalidated_by",
 })
 
 _LOCK_WAIT_SECONDS = 10.0
@@ -163,6 +167,17 @@ def add_relation(mem_id: str, predicate: str, target: dict,
         raise InvalidRelation(
             f"unknown predicate {predicate!r}; valid: "
             + ", ".join(sorted(PREDICATES)))
+    if predicate == "invalidated_by":
+        # INV design rev2 §D1/§T6: memory targets only — an entity has no
+        # lifecycle to watch; self-edges are a paradox.
+        nt = _norm_target_shape(target)
+        if nt.get("k") != "m":
+            raise InvalidRelation(
+                "invalidated_by needs a memory target — an entity has no "
+                "lifecycle for the contract to watch")
+        if nt.get("id") == mem_id:
+            raise InvalidRelation(
+                "a memory cannot be invalidated by itself")
     if prov is not None and prov not in ("manual", "agent", "inferred"):
         raise InvalidRelation(f"unknown provenance {prov!r}")
     norm_t = _norm_target_shape(target)
@@ -230,6 +245,23 @@ def _add_relation_locked(mem_id: str, rel: dict, norm_t: dict,
             # check-then-write window. cwd-aware (GPT code-RT P0-3).
             if norm_t["k"] == "m" and norm_t["id"] not in _known_ids(cwd):
                 raise InvalidRelation(f"no memory with id {norm_t['id']!r}")
+            if rel["p"] == "invalidated_by":
+                # INV design rev2 §D1/T6: the contract target must be
+                # BASE-alive at write time — an edge to a dead memory is a
+                # mistake, not a contract. Checked under the lock with the
+                # existence check (same observational posture as authz
+                # minting: B can die right after; every read re-derives).
+                from . import invalidation
+                target_rec = _find_by_id(norm_t["id"], cwd)
+                if not invalidation.base_alive(target_rec):
+                    raise InvalidRelation(
+                        f"contract target {norm_t['id']!r} is "
+                        f"{target_rec.status}"
+                        + (" (expired)" if target_rec.is_expired
+                           and target_rec.status == "active" else "")
+                        + " — an invalidation contract must point at a "
+                          "live memory; a dead target is a mistake, not "
+                          "a contract")
             rec = _find_by_id(mem_id, cwd)
             rels = parse(rec.relations_json)
             key = _dedup_key(rel["p"], norm_t)

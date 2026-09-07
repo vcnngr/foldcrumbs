@@ -102,6 +102,16 @@ def _run_scenario(scen: dict) -> dict:
                 if check is None or not relations._transit_gate(check):
                     return {"id": scen["id"], "grade": "FAIL",
                             "reason": "setup: transit did not persist"}
+            elif op == "invalidate":
+                # INV design rev2: dependent holds only while target lives
+                dep, tgt = keys[step["dependent"]], keys[step["target"]]
+                ok = relations.add_relation(
+                    dep.id, "invalidated_by",
+                    target={"k": "m", "id": tgt.id},
+                    evidence="bench contract", confidence=0.9, prov="manual")
+                if not ok:
+                    return {"id": scen["id"], "grade": "FAIL",
+                            "reason": "setup: invalidate edge not written"}
             else:
                 return {"id": scen["id"], "grade": "FAIL",
                         "reason": f"unknown op {op!r}"}
@@ -184,7 +194,8 @@ def validate_suite(scenarios: dict) -> None:
         raise ValueError("bench suite is empty — refusing to grade nothing "
                          "as CURRENT")
     seen: set[str] = set()
-    known_ops = {"remember", "supersede", "archive", "outcome_bad", "transit"}
+    known_ops = {"remember", "supersede", "archive", "outcome_bad", "transit",
+                 "invalidate"}
     for scen in suite:
         sid = scen.get("id")
         if not sid:
@@ -204,6 +215,12 @@ def validate_suite(scenarios: dict) -> None:
                     if step[ref] not in keys:
                         raise ValueError(
                             f"{sid}: supersede references unknown key "
+                            f"{step[ref]!r}")
+            elif op == "invalidate":
+                for ref in ("dependent", "target"):
+                    if step[ref] not in keys:
+                        raise ValueError(
+                            f"{sid}: invalidate references unknown key "
                             f"{step[ref]!r}")
             else:
                 if step["target"] not in keys:

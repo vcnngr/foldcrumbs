@@ -222,8 +222,8 @@ docs/design/graph-layer.md。
 在派生视图之上，一条记忆可以携带指向另一条记忆或外部实体的**显式**关系。
 它们以一行规范 JSON 的形式保存在 frontmatter 里（`relations_json`）—
 便于 diff、往返安全 — 并遵循严格规则（design REV-2）：谓词来自一个封闭的
-八词词汇表（`caused_by`、`depends_on`、`supersedes`、`contradicts`、
-`supports`、`refines`、`blocks`、`precedes`）；其他一律拒绝。没有 evidence
+九词词汇表（`caused_by`、`depends_on`、`supersedes`、`contradicts`、
+`supports`、`refines`、`blocks`、`precedes`、`invalidated_by`）；其他一律拒绝。没有 evidence
 的边会以 confidence ≤ 0.5 记为 `inferred`。写入按记忆加锁（fail-closed），
 因此两个 agent 同时编辑同一条记忆绝不会丢边。
 
@@ -545,6 +545,40 @@ python3 -m foldcrumbs doctor               # 标记无来源/已过期/退役缺
 
 设计与 T1-T20 验收矩阵：
 [docs/design/authorization-integrity.md](docs/design/authorization-integrity.md)。
+
+## 随其因一同失效的事实：`invalidated_by`
+
+有些记忆只在*另一件事成立时*才成立。staging URL 只在 staging 集群存在时
+存在；许可条款只在供应商协议有效时有效。foldcrumbs 允许你把这种依赖写成
+契约：
+
+```bash
+foldcrumbs relate "Staging URL" invalidated_by --to-memory "Stg cluster" \
+    --evidence "the URL exists only while the cluster does"
+```
+
+当目标消亡 — 被取代、归档、过期或删除 — 依赖它的记忆便**退出所服务的
+上下文**：recall、索引、timeline 与联邦不再把它当作当前事实呈现。没有任何
+东西被重写：契约在*每次读取时派生*，绝不级联写回，绝无守护进程清扫。让
+目标复活，下一次读取依赖记忆即恢复服务，无需任何修复过程。
+
+诚实的边界：
+
+- 契约**不链式传播** — A 成立的条件是 B *活着*，而不是 B 自身有效。如果
+  B 的死亡也应使 A 失效，请显式写第二条边。
+- 无法解析的目标（拼写错误、硬删除）使依赖记忆成为 **dangling**：按
+  fail-closed 排除，并由 `foldcrumbs doctor` 列出以便修复 — 绝不静默
+  丢弃，绝不声称已删除。
+- recall 会说明它扣留了什么：最多 3 行诊断（"matched but not served: …
+  invalidated …"）随块附上，`fetch` 则在原始文件前加上信封说明。这些
+  诊断绝不会作为证据进入 answer 路径。
+- 携带契约的记忆在其目的地是**仅创建**的：任何 upsert 或重新摄取都无法
+  静默覆盖契约 — 请显式撤回或修复。
+- 图遍历保持不变：被失效的记忆仍是路径节点；失效是上下文服务规则，不是
+  图规则。
+
+设计与 T1-T15 验收矩阵：
+[docs/design/invalidated-by.md](docs/design/invalidated-by.md)。
 
 ## 在存储之间共享记忆：`import`
 

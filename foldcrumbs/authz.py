@@ -247,12 +247,33 @@ def render_authorization_section(cwd=None) -> str:
             f" | until: {until} | {g.source_path or g.filename()}")
         lines.append(
             f"    backed by: {g.backed_by or 'MISSING'}"
-            f" ({backing_status(g.backed_by, cwd)}) | {state}")
+            f" ({backing_status(g.backed_by, cwd)}) | {state}"
+            + _invalidation_label(g, cwd))
         if state == "RETIRED":
             trace = render_trace(g, cwd)
             for tl in trace.splitlines()[1:]:
                 lines.append(f"    {tl.strip()}")
     return "\n".join(lines)
+
+
+def _invalidation_label(g: MemoryRecord, cwd=None) -> str:
+    """INV design rev2 T14: a grant carrying an invalidation contract
+    renders BOTH states — its own (UNBACKED/…) and the contract's. Neither
+    suppressed by the other: the ledger is a repair surface, not a ranking.
+    """
+    from . import invalidation as _inv
+    if not _inv.carries_contract(g):
+        return ""
+    ctx = _inv.ReadContext.for_store(cwd)
+    outcome, detail = _inv.derive(g, ctx)
+    if outcome == _inv.VALID:
+        return ""
+    label = {
+        _inv.INVALIDATED: "INVALIDATED",
+        _inv.DANGLING: "CONTRACT-DANGLING",
+        _inv.UNRESOLVED: "CONTRACT-UNVERIFIED",
+    }[outcome]
+    return f" | {label}" + (f" ({detail})" if detail else "")
 
 
 def render_trace(rec: MemoryRecord, cwd=None) -> str:
