@@ -569,17 +569,17 @@ def write_memory(
         return authz.mint(rec, cwd)
     d = _ensure_dir(cwd)
     target = d / rec.filename()
-    # INV design rev2 §D4: a record carrying an invalidation contract is
-    # CREATE-ONLY at its destination — no silent overwrite by upsert or
-    # destination collision (the rev1 hole: an identical re-ingest found no
-    # visible duplicate and os.replace'd the contract away). MAINTENANCE
-    # rewrites of the SAME record (source_path set — relations edges,
-    # archive/restore, decay) are exempt, mirroring the authz grant rule;
-    # the exemption is identity-based, never caller-declared.
-    if target.exists() and rec.source_path is None:
+    # INV design rev2 §D4 + RT r1 F2: a record carrying an invalidation
+    # contract is CREATE-ONLY at its destination. The exemption is for
+    # MAINTENANCE OF THE SAME RECORD — proven by identity (existing.id ==
+    # rec.id), never by the mere presence of source_path (a loaded record
+    # retitled to collide would otherwise overwrite the contract away).
+    if target.exists():
         from . import invalidation
         existing = _read_one(target)
-        if existing is not None and invalidation.carries_contract(existing):
+        if (existing is not None
+                and invalidation.carries_contract(existing)
+                and existing.id != rec.id):
             raise ContractProtectedError(
                 f"{target.name}: existing memory carries an invalidation "
                 "contract — retire it explicitly (supersede/forget) or fix "
@@ -1230,8 +1230,13 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
     _ctx = _inv.ReadContext(local_all, complete=complete)
     contracted = [m for m in local_all if _inv.carries_contract(m)
                   and _visible(m) and m.type != "authorization"]
+    # RT r1 F1: grants stay OUT of the snapshot body — the contract filter
+    # must not silently re-admit authorization records without contracts
+    # (that regressed the authz snapshot rule: SessionStart/PostCompact
+    # re-injected grants after backing death).
     mems = [m for m in local_all if _visible(m)
-            and not _inv.carries_contract(m)]
+            and not _inv.carries_contract(m)
+            and m.type != "authorization"]
     # AUTH design rev2 §D4: grants are EXCLUDED from the static snapshot —
     # a snapshot predating expiry/backing-death must not present as live
     # truth. When grants exist the index carries a pointer line instead;

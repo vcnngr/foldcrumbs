@@ -73,6 +73,13 @@ class ReadContext:
                         "contract target could not be verified "
                         "(incomplete scan)")
             return (DANGLING, "contract target does not resolve in this store")
+        if not self.complete:
+            # RT r1 F3: a FOUND-alive target in an incomplete scan is not
+            # proof of uniqueness — loss of evidence must never turn an
+            # ambiguous state into served truth. Fail closed.
+            return (UNRESOLVED,
+                    "contract target could not be verified "
+                    "(incomplete scan — uniqueness unproven)")
         if len(matches) > 1:
             # duplicate ids (one alive, one dead): ambiguous — fail closed,
             # never last-wins (design §D2).

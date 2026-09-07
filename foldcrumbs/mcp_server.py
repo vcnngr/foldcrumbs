@@ -490,6 +490,16 @@ def _fetch_one(name: str) -> tuple[str | None, str]:
         if probe is not None and probe.type == "authorization":
             return None, ("not served: that root's authorizations are its "
                           "own policy surface (grants never cross roots)")
+        # RT r1 F4: a foreign record carrying an invalidation contract is
+        # served raw ONLY with the unverified-contract envelope — the
+        # contract lives in the owner store and can never be resolved
+        # against the local dict (design D2 fail-closed).
+        from . import invalidation as _inv
+        if probe is not None and _inv.carries_contract(probe):
+            return ("[not served as current: contract unverified — the "
+                    "contract lives in the owner store and cannot be "
+                    "checked from here; verify before use]"
+                    f"\n\n{text.rstrip()}"), ""
         return text, ""
     if not _is_memory_filename(name):
         return None, "not a memory file (or unsafe ref)"
@@ -505,19 +515,31 @@ def _fetch_one(name: str) -> tuple[str | None, str]:
     # AUTH design rev2 §D4: a grant gets the deterministic state envelope
     # BEFORE the raw historical document — the product's claim, not the
     # model's interpretation.
+    # RT r1 F4: envelopes COMPOSE — an early return for grants suppressed
+    # the invalidation envelope (and foreign records skipped it entirely).
+    from . import invalidation as _inv
+    prefixes: list[str] = []
     if rec.type == "authorization":
         from . import authz
-        return f"{authz.fetch_envelope(rec)}\n\n{text.rstrip()}", ""
-    # INV design rev2 §D3: the raw file is a historical document and stays
-    # served, but an invalidated/dangling/unresolved contract gets the
-    # one-line envelope BEFORE it — same posture as the grant envelope.
-    from . import invalidation as _inv
+        prefixes.append(authz.fetch_envelope(rec))
     if _inv.carries_contract(rec):
-        ctx = _inv.ReadContext.for_store()
-        outcome, detail = _inv.derive(rec, ctx)
-        if outcome != _inv.VALID:
-            return (f"[not served as current: {_inv.diagnostic_line(rec, outcome, detail)}]"
-                    f"\n\n{text.rstrip()}"), ""
+        if rec.is_foreign:
+            # the contract lives in the OWNER store; from here it can
+            # never be verified — say so explicitly, never resolve
+            # against the local dict (design D2).
+            prefixes.append(
+                "[not served as current: matched but not served — "
+                "contract unverified (contract lives in the owner "
+                "store — cannot verify from here); verify before use]")
+        else:
+            ctx = _inv.ReadContext.for_store()
+            outcome, detail = _inv.derive(rec, ctx)
+            if outcome != _inv.VALID:
+                prefixes.append(
+                    "[not served as current: "
+                    f"{_inv.diagnostic_line(rec, outcome, detail)}]")
+    if prefixes:
+        return "\n".join(prefixes) + f"\n\n{text.rstrip()}", ""
     return text, ""
 
 

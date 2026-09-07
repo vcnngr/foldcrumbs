@@ -7,6 +7,7 @@ all fail-closed; contract-carrying records are create-only at their
 destination (D4) so no upsert can silently overwrite a contract away.
 """
 
+import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -447,6 +448,191 @@ class TestT15DanglingDoctor(InvBase):
         report = inv.doctor_report()
         self.assertTrue(any("does not resolve" in line for line in report),
                         report)
+
+
+class TestRtRound1P0(InvBase):
+    """RT GPT round 1 on 4954fd8 (card t_145de292): F1-F4, all
+    probe-reproduced."""
+
+    def test_f1_index_never_publishes_grants(self):
+        # F1 (regression of the authz snapshot rule): rebuild_index must
+        # keep excluding authorization records — the delta dropped the
+        # type filter when it added the contract filter, re-injecting
+        # grants into SessionStart/PostCompact snapshots.
+        ev = _rec("Approval", "Approved: agent-a may deploy.", type_="event")
+        store.write_memory(ev)
+        g = MemoryRecord(
+            title="Deploy access", content="agent-a may deploy.",
+            type="authorization", grants="may deploy", granted_to="agent-a",
+            backed_by=ev.id,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            provenance="explicit_statement")
+        from foldcrumbs import authz
+        authz.mint(g)
+        store.rebuild_index()
+        idx = (Path(self.dir) / _c.INDEX_NAME).read_text(encoding="utf-8")
+        self.assertNotIn(g.title, idx)
+        self.assertNotIn(g.filename(), idx)
+        # the backing EVENT is an ordinary memory and stays listed; the
+        # grant itself must appear only via the pointer line, never as a
+        # memory row
+        self.assertNotIn(f"[{g.title}]", idx)
+
+    def test_f2_source_path_does_not_excuse_foreign_identity(self):
+        # F2: write_memory skipped the contract check whenever
+        # rec.source_path was set — but source_path proves nothing about
+        # WHICH record is being rewritten. A loaded record C, retitled to
+        # collide with A's destination, must not overwrite A's contract.
+        self._kill_b("supersede")
+        c = _rec("Unrelated", "Totally different content here.", type_="fact")
+        store.write_memory(c)
+        loaded = store.get(c.filename())
+        loaded.source_path = loaded.source_path or loaded.filename()
+        # now forge the collision: same title/type as A -> same destination
+        loaded.title = self.a.title
+        loaded.content = self.a.content
+        loaded.type = self.a.type
+        p = Path(self.dir) / self.a.filename()
+        before = p.read_bytes()
+        with self.assertRaises(store.ContractProtectedError):
+            store.write_memory(loaded)
+        self.assertEqual(p.read_bytes(), before)
+
+    def test_f2_legitimate_maintenance_still_works(self):
+        # the exemption must survive for the SAME record: load A, edit A,
+        # write A back (relations edits, archive) — identity matches.
+        self._kill_b("supersede")
+        rec = store.get(self.a.filename())
+        rec.source_path = rec.source_path or rec.filename()
+        rec.description = "annotated during repair"
+        store.write_memory(rec)     # must NOT raise
+        after = store.get(self.a.filename())
+        self.assertEqual(after.id, self.a.id)
+        self.assertEqual(after.description, "annotated during repair")
+
+    def test_f3_incomplete_scan_never_valid(self):
+        # F3: resolve() declared VALID from an incomplete scan — loss of
+        # evidence turned an ambiguous state into served truth.
+        ctx = inv.ReadContext(
+            [_rec_live_target()], complete=False)
+        outcome, _detail = ctx.resolve("some-id-not-in-list")
+        self.assertEqual(outcome, inv.UNRESOLVED)
+        # and a FOUND-alive target in an incomplete context is still not
+        # proof of uniqueness:
+        t = _rec_live_target()
+        ctx2 = inv.ReadContext([t], complete=False)
+        outcome2, detail2 = ctx2.resolve(t.id)
+        self.assertEqual(outcome2, inv.UNRESOLVED,
+                         f"incomplete scan yielded {outcome2}")
+        self.assertIn("verifi", detail2.lower())
+
+    def test_f4_fetch_grant_shows_both_envelopes(self):
+        # F4: fetch returned early for grants — the invalidation envelope
+        # never composed with the authz one.
+        ev = _rec("Approval2", "Approved: agent-b may deploy.", type_="event")
+        store.write_memory(ev)
+        g = MemoryRecord(
+            title="Grant with contract", content="agent-b may deploy.",
+            type="authorization", grants="may deploy", granted_to="agent-b",
+            backed_by=ev.id,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            provenance="explicit_statement")
+        from foldcrumbs import authz
+        authz.mint(g)
+        relations.add_relation(
+            g.id, "invalidated_by",
+            target={"k": "m", "id": self.b.id},
+            evidence="tied to cluster", confidence=0.9, prov="manual")
+        self._kill_b("supersede")
+        txt = _text(_call(2, "fetch", names=[g.filename()]))
+        self.assertIn("authorization:", txt)        # authz envelope
+        self.assertIn("not served as current", txt)  # invalidation envelope
+
+    def test_f4_fetch_foreign_contract_flagged(self):
+        # F4: a foreign record with a contract was served raw. From a
+        # non-owner reader the contract is UNRESOLVED — the envelope must
+        # say so (raw still served; the refusal of foreign GRANTS stays).
+        import importlib
+        from foldcrumbs import federation
+        fed_home = Path(self._state) / "f4_fed"
+        fed_home.mkdir(parents=True)
+        saved = {k: os.environ.get(k) for k in
+                 ("FOLDCRUMBS_STATE_DIR", "CLAUDE_CONFIG_DIR",
+                  "FOLDCRUMBS_DIR", "ENGRAM_DIR", "ENGRAM_STATE_DIR")}
+        state = Path(self._state) / "f4_fstate"
+        state.mkdir(parents=True)
+        os.environ["FOLDCRUMBS_STATE_DIR"] = str(state)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(fed_home / ".claude")
+        os.environ.pop("FOLDCRUMBS_DIR", None)
+        os.environ.pop("ENGRAM_DIR", None)
+        os.environ.pop("ENGRAM_STATE_DIR", None)
+        importlib.reload(_c)
+        old_cwd = os.getcwd()
+        try:
+            mine = federation.register(fed_home / ".claude")
+            theirs = federation.register(fed_home / ".claude-work")
+            proj = fed_home / "proj"
+            proj.mkdir(parents=True, exist_ok=True)
+            my_dir = mine.memory_dir(proj)
+            my_dir.mkdir(parents=True, exist_ok=True)
+            their_dir = theirs.memory_dir(proj)
+            their_dir.mkdir(parents=True, exist_ok=True)
+            # their pair: A_f contracted on B_f, B_f then archived IN THEIR
+            # store (the contract dies where it lives)
+            tb = MemoryRecord(title="Their cluster",
+                              content="Their staging cluster lives.",
+                              type="decision")
+            (their_dir / tb.filename()).write_text(tb.to_markdown(),
+                                                   encoding="utf-8")
+            ta = MemoryRecord(title="Their URL",
+                              content="Their staging URL is https://x.example.",
+                              type="fact")
+            (their_dir / ta.filename()).write_text(ta.to_markdown(),
+                                                   encoding="utf-8")
+            # write the edge by hand (canonical JSON) — same shape relate
+            # would produce; avoids env juggling for their-store writes
+            import json as _json
+            edge = [{"p": "invalidated_by",
+                     "t": {"k": "m", "id": tb.id},
+                     "c": 0.9, "d": "2026-09-07T00:00:00+00:00",
+                     "e": "their contract", "prov": "manual"}]
+            txt_f = (their_dir / ta.filename()).read_text(encoding="utf-8")
+            # schema serializes relations_json RAW (no extra quoting) and
+            # from_markdown reads it back with .strip() — match that shape
+            txt_f = txt_f.replace(
+                "---\n", f"---\nrelations_json: {_json.dumps(edge)}\n", 1)
+            (their_dir / ta.filename()).write_text(txt_f, encoding="utf-8")
+            tb2 = MemoryRecord.from_markdown(
+                (their_dir / tb.filename()).read_text(encoding="utf-8"))
+            tb2.status = "archived"
+            tb2.source_path = tb2.filename()
+            (their_dir / tb.filename()).write_text(tb2.to_markdown(),
+                                                   encoding="utf-8")
+            # a local record so fetch has a home root
+            loc = MemoryRecord(title="Local note", content="Mine.",
+                               type="fact")
+            (my_dir / loc.filename()).write_text(loc.to_markdown(),
+                                                 encoding="utf-8")
+            os.chdir(proj)
+            out = _text(_call(3, "fetch",
+                              names=[f"{theirs.id}:{ta.filename()}"]))
+        finally:
+            os.chdir(old_cwd)
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            importlib.reload(_c)
+        self.assertIn("x.example", out)   # raw still served
+        self.assertTrue(
+            "not served as current" in out or "unverified" in out.lower()
+            or "could not verify" in out.lower(),
+            f"foreign contracted memory served without envelope: {out[:200]}")
+
+
+def _rec_live_target():
+    return _rec("Live target", "A live target memory.", type_="decision")
 
 
 class TestT15BenchS7(unittest.TestCase):
