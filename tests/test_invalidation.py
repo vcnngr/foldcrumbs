@@ -631,8 +631,45 @@ class TestRtRound1P0(InvBase):
             f"foreign contracted memory served without envelope: {out[:200]}")
 
 
+    def test_f3r2_completeness_propagates_to_timeline_and_doctor(self):
+        # RT r2 residual (F3 PARTIAL): search propagates the real
+        # completeness flag, but timeline and doctor built their
+        # ReadContext with the constructor default complete=True — a
+        # PermissionError on a twin file made search exclude A while
+        # timeline still served it and doctor lost the warning.
+        import unittest.mock as mock
+        # twin file with the SAME id as B, unreadable -> scan incomplete
+        twin = _rec("Stg cluster twin", "Duplicate id twin.", type_="decision")
+        twin.id = self.b.id
+        twin_path = Path(self.dir) / twin.filename()
+        twin_path.write_text(twin.to_markdown(), encoding="utf-8")
+
+        real_read = Path.read_text
+
+        def flaky_read(p, *a, **k):
+            if Path(p) == twin_path:
+                raise PermissionError("simulated IO loss")
+            return real_read(p, *a, **k)
+
+        from foldcrumbs import mcp_server
+        with mock.patch.object(Path, "read_text", flaky_read):
+            # timeline must NOT serve A (contract unverifiable)
+            txt = mcp_server.tool_timeline(
+                {"ref": self.a.filename(), "window": 3})
+            self.assertIn("refused", txt,
+                          f"timeline served A on incomplete scan: {txt}")
+            # doctor must keep the warning
+            report = inv.doctor_report()
+            self.assertTrue(
+                any("unverified" in ln or "ambiguous" in ln
+                    for ln in report),
+                f"doctor lost the warning: {report}")
+
+
 def _rec_live_target():
     return _rec("Live target", "A live target memory.", type_="decision")
+
+
 
 
 class TestT15BenchS7(unittest.TestCase):

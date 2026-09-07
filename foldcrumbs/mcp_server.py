@@ -565,10 +565,11 @@ def _timeline_rows(anchor: MemoryRecord, window: int) -> list[MemoryRecord]:
     # INV design rev2 §D3: timeline filtered inline (status/expiry) — the
     # derived contract check joins the same filter, rows AND anchor. One
     # context per call (design D2 cost model: get/fetch/timeline build it
-    # explicitly).
+    # explicitly). RT r2 residual: the REAL completeness flag travels —
+    # an incomplete scan must degrade to UNRESOLVED, never default-True.
     from . import invalidation as _inv
-    all_raw = list(store.iter_memories(config.memory_dir()))
-    ctx = _inv.ReadContext(all_raw)
+    all_raw, complete = store.scan_store(config.memory_dir())
+    ctx = _inv.ReadContext(all_raw, complete=complete)
     all_mems = [m for m in all_raw
                 if m.status == "active" and not m.is_expired
                 and _inv.is_served(m, ctx)]

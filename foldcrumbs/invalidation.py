@@ -177,9 +177,12 @@ def doctor_report(cwd: Any = None) -> list[str]:
     (design §D3 doctor row). NOT a context filter — it lists all three
     failure outcomes plus mutual pairs, so a human can repair them.
     """
-    from . import store
-    records = list(store.iter_memories_including_retired(cwd))
-    ctx = ReadContext(records)
+    from . import config, store
+    # RT r2 residual: doctor must not lose the warning when the scan is
+    # incomplete — propagate the real completeness flag (scan_store
+    # includes retired records, same visibility-independent posture).
+    records, complete = store.scan_store(config.memory_dir(cwd))
+    ctx = ReadContext(records, complete=complete)
     lines: list[str] = []
     contracted = [m for m in records if carries_contract(m)]
     # mutual pairs (design §D1/T7): A inv_by B AND B inv_by A
