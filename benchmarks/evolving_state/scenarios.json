@@ -12,9 +12,25 @@
       "desc": "a decision is superseded by a newer one; recall must serve the NEW text and must not lead with the old",
       "topic": "deploy window",
       "setup": [
-        {"op": "remember", "key": "old", "title": "Deploy window", "content": "We deploy on Fridays at 18:00 UTC.", "type": "decision"},
-        {"op": "remember", "key": "new", "title": "Deploy window v2", "content": "We deploy Tuesdays 10-12 UTC, never Fridays.", "type": "decision"},
-        {"op": "supersede", "old": "old", "new": "new"}
+        {
+          "op": "remember",
+          "key": "old",
+          "title": "Deploy window",
+          "content": "We deploy on Fridays at 18:00 UTC.",
+          "type": "decision"
+        },
+        {
+          "op": "remember",
+          "key": "new",
+          "title": "Deploy window v2",
+          "content": "We deploy Tuesdays 10-12 UTC, never Fridays.",
+          "type": "decision"
+        },
+        {
+          "op": "supersede",
+          "old": "old",
+          "new": "new"
+        }
       ],
       "query": "deploy window",
       "expect_current_key": "new",
@@ -25,10 +41,24 @@
       "desc": "a memory past its expiry must leave the served view entirely",
       "topic": "trial license",
       "setup": [
-        {"op": "remember", "key": "expired", "title": "Trial license", "content": "The trial license covers staging until last month.", "type": "fact", "expires_in_days": -5}
+        {
+          "op": "remember",
+          "key": "expired",
+          "title": "Trial license",
+          "content": "The trial license covers staging until last month.",
+          "type": "fact",
+          "expires_in_days": -5
+        },
+        {
+          "op": "remember",
+          "key": "canary",
+          "title": "Staging policy",
+          "content": "Staging deployments require the trial license class of coverage.",
+          "type": "fact"
+        }
       ],
       "query": "trial license staging",
-      "expect_current_key": null,
+      "expect_current_key": "canary",
       "forbid_key": "expired"
     },
     {
@@ -36,9 +66,24 @@
       "desc": "a memory judged bad stays visible (history is not hidden) but must be served with the tentative marker; search ranking is relevance-based by design (FL-2), the penalty lives in compute_confidence",
       "topic": "cache config",
       "setup": [
-        {"op": "remember", "key": "bad", "title": "Cache TTL", "content": "Set the cache TTL to 300 seconds for the API layer.", "type": "fact"},
-        {"op": "outcome_bad", "target": "bad"},
-        {"op": "remember", "key": "good", "title": "Cache TTL corrected", "content": "The API cache TTL is 60 seconds; 300 caused stale reads.", "type": "fact"}
+        {
+          "op": "remember",
+          "key": "bad",
+          "title": "Cache TTL",
+          "content": "Set the cache TTL to 300 seconds for the API layer.",
+          "type": "fact"
+        },
+        {
+          "op": "outcome_bad",
+          "target": "bad"
+        },
+        {
+          "op": "remember",
+          "key": "good",
+          "title": "Cache TTL corrected",
+          "content": "The API cache TTL is 60 seconds; 300 caused stale reads.",
+          "type": "fact"
+        }
       ],
       "query": "cache TTL api",
       "expect_current_key": "good",
@@ -49,11 +94,27 @@
       "desc": "an archived memory must not be served",
       "topic": "oncall rotation",
       "setup": [
-        {"op": "remember", "key": "arch", "title": "Oncall rotation", "content": "Marco is oncall this week for payments.", "type": "fact"},
-        {"op": "archive", "target": "arch"}
+        {
+          "op": "remember",
+          "key": "arch",
+          "title": "Oncall rotation",
+          "content": "Marco is oncall this week for payments.",
+          "type": "fact"
+        },
+        {
+          "op": "archive",
+          "target": "arch"
+        },
+        {
+          "op": "remember",
+          "key": "canary",
+          "title": "Oncall policy",
+          "content": "The payments oncall rotation is published every Monday.",
+          "type": "fact"
+        }
       ],
       "query": "oncall payments",
-      "expect_current_key": null,
+      "expect_current_key": "canary",
       "forbid_key": "arch"
     },
     {
@@ -61,10 +122,29 @@
       "desc": "walking a superseded memory via transit must not make it a served answer",
       "topic": "auth provider",
       "setup": [
-        {"op": "remember", "key": "old", "title": "Auth provider", "content": "We use Auth0 for customer auth.", "type": "decision"},
-        {"op": "remember", "key": "new", "title": "Auth provider v2", "content": "We migrated customer auth to Keycloak.", "type": "decision"},
-        {"op": "supersede", "old": "old", "new": "new"},
-        {"op": "transit", "target": "old"}
+        {
+          "op": "remember",
+          "key": "old",
+          "title": "Auth provider",
+          "content": "We use Auth0 for customer auth.",
+          "type": "decision"
+        },
+        {
+          "op": "remember",
+          "key": "new",
+          "title": "Auth provider v2",
+          "content": "We migrated customer auth to Keycloak.",
+          "type": "decision"
+        },
+        {
+          "op": "supersede",
+          "old": "old",
+          "new": "new"
+        },
+        {
+          "op": "transit",
+          "target": "old"
+        }
       ],
       "query": "customer auth provider",
       "expect_current_key": "new",
@@ -75,15 +155,44 @@
       "desc": "a chain of two supersessions must serve only the newest",
       "topic": "queue choice",
       "setup": [
-        {"op": "remember", "key": "v1", "title": "Queue", "content": "We use RabbitMQ for the job queue.", "type": "decision"},
-        {"op": "remember", "key": "v2", "title": "Queue v2", "content": "We moved the job queue to Kafka.", "type": "decision"},
-        {"op": "remember", "key": "v3", "title": "Queue v3", "content": "The job queue is Redis Streams now.", "type": "decision"},
-        {"op": "supersede", "old": "v1", "new": "v2"},
-        {"op": "supersede", "old": "v2", "new": "v3"}
+        {
+          "op": "remember",
+          "key": "v1",
+          "title": "Queue",
+          "content": "We use RabbitMQ for the job queue.",
+          "type": "decision"
+        },
+        {
+          "op": "remember",
+          "key": "v2",
+          "title": "Queue v2",
+          "content": "We moved the job queue to Kafka.",
+          "type": "decision"
+        },
+        {
+          "op": "remember",
+          "key": "v3",
+          "title": "Queue v3",
+          "content": "The job queue is Redis Streams now.",
+          "type": "decision"
+        },
+        {
+          "op": "supersede",
+          "old": "v1",
+          "new": "v2"
+        },
+        {
+          "op": "supersede",
+          "old": "v2",
+          "new": "v3"
+        }
       ],
       "query": "job queue",
       "expect_current_key": "v3",
-      "forbid_key": "v1"
+      "forbid_keys": [
+        "v1",
+        "v2"
+      ]
     }
   ]
 }

@@ -38,16 +38,28 @@ SCENARIOS_PATH = Path(__file__).resolve().parent / "scenarios.json"
 
 def _run_scenario(scen: dict) -> dict:
     """Execute one scenario in a fresh temp store. Returns the grade dict."""
-    from foldcrumbs import relations, store
+    from foldcrumbs import config, relations, store
     from foldcrumbs.profile import format_context_block
     from foldcrumbs.schema import MemoryRecord
 
     tmp = Path(tempfile.mkdtemp(prefix="fc_bench_"))
     memdir = tmp / "memory"
     memdir.mkdir()
-    # route the store into the sandbox for this scenario only
+    statedir = tmp / "state"
+    # RT PR62 F2: env alone is NOT the sandbox. config.STATE_DIR and
+    # config.SEMANTIC are module constants captured at import time; the
+    # runner must override them per scenario and restore the caller's
+    # values afterwards. FOLDCRUMBS_DIR is read dynamically, but we save
+    # and restore the env too — never pop what the caller had set.
+    saved_env = {k: os.environ.get(k)
+                 for k in ("FOLDCRUMBS_DIR", "ENGRAM_DIR",
+                           "FOLDCRUMBS_STATE_DIR", "ENGRAM_STATE_DIR")}
+    saved_state = config.STATE_DIR
+    saved_semantic = config.SEMANTIC
     os.environ["FOLDCRUMBS_DIR"] = str(memdir)
-    os.environ["FOLDCRUMBS_STATE_DIR"] = str(tmp / "state")
+    os.environ["FOLDCRUMBS_STATE_DIR"] = str(statedir)
+    config.STATE_DIR = statedir
+    config.SEMANTIC = False   # the bench never consults embeddings
 
     keys: dict[str, MemoryRecord] = {}
     try:
@@ -70,7 +82,10 @@ def _run_scenario(scen: dict) -> dict:
                             "reason": "setup: supersede returned False"}
             elif op == "archive":
                 target = keys[step["target"]]
-                store.set_status(target.filename(), "archived")
+                ok = store.set_status(target.filename(), "archived")
+                if not ok:
+                    return {"id": scen["id"], "grade": "FAIL",
+                            "reason": "setup: archive returned False"}
             elif op == "outcome_bad":
                 from foldcrumbs import outcome as outcome_mod
                 target = keys[step["target"]]
@@ -82,6 +97,11 @@ def _run_scenario(scen: dict) -> dict:
             elif op == "transit":
                 target = keys[step["target"]]
                 relations.set_transit(target.id, True)
+                # postcondition (RT F4): the flag must actually persist
+                check = store.get(target.filename())
+                if check is None or not relations._transit_gate(check):
+                    return {"id": scen["id"], "grade": "FAIL",
+                            "reason": "setup: transit did not persist"}
             else:
                 return {"id": scen["id"], "grade": "FAIL",
                         "reason": f"unknown op {op!r}"}
@@ -91,8 +111,11 @@ def _run_scenario(scen: dict) -> dict:
         block = format_context_block(hits, heading=scen["query"])
 
         expect_key = scen.get("expect_current_key")
-        forbid_key = scen.get("forbid_key")
-        forbidden = keys[forbid_key].content if forbid_key else None
+        forbid_keys = scen.get("forbid_keys")
+        if forbid_keys is None:
+            # singular form accepted for compatibility
+            forbid_keys = [scen["forbid_key"]] if scen.get("forbid_key") else []
+        forbidden = [keys[k].content for k in forbid_keys]
         expected = keys[expect_key].content if expect_key else None
 
         # a content line may be re-wrapped by the renderer: probe on a
@@ -114,38 +137,99 @@ def _run_scenario(scen: dict) -> dict:
             elif "(tentative)" not in block:
                 grade, reason = "SUPERSEDED", "penalized memory served WITHOUT tentative marker"
             else:
-                # marker must sit on the penalized line, not another
-                marked = [ln for ln in block.splitlines()
-                          if "(tentative)" in ln]
+                # marker must sit on EVERY line serving the penalized
+                # memory (RT r2 F3: a duplicated unmarked bullet next to
+                # the marked one is a leak, not a pass)
                 frag = pen.content.strip().split(".")[0][:40].lower()
-                if any(frag in ln.lower() for ln in marked):
+                serving = [ln for ln in block.splitlines()
+                           if frag in ln.lower()]
+                if serving and all("(tentative)" in ln for ln in serving):
                     grade, reason = "CURRENT", "current served; penalized visible AND marked tentative"
                 else:
-                    grade, reason = "SUPERSEDED", "tentative marker on the wrong line"
-        elif forbidden and _served(forbidden):
-            grade, reason = "SUPERSEDED", "obsolete memory in served block"
-        elif expected and _served(expected):
-            grade, reason = "CURRENT", "current memory served, obsolete absent"
-        elif expected is None and forbidden and not _served(forbidden):
-            grade, reason = "CURRENT", "nothing expected; obsolete correctly absent"
+                    grade, reason = "SUPERSEDED", "penalized memory served on a line WITHOUT the tentative marker"
         else:
-            grade, reason = "FAIL", "neither expected nor forbidden content served"
+            leaked = [f for f in forbidden if _served(f)]
+            if leaked:
+                grade, reason = ("SUPERSEDED",
+                                 f"obsolete memory in served block "
+                                 f"({len(leaked)} of {len(forbidden)} forbidden)")
+            elif expected and _served(expected):
+                grade, reason = "CURRENT", "current memory served, obsolete absent"
+            elif expected is None and forbidden and not leaked:
+                grade, reason = "CURRENT", "nothing expected; obsolete correctly absent"
+            else:
+                grade, reason = "FAIL", "neither expected nor forbidden content served"
         return {"id": scen["id"], "grade": grade, "reason": reason,
                 "hits": len(hits)}
     finally:
-        os.environ.pop("FOLDCRUMBS_DIR", None)
-        os.environ.pop("FOLDCRUMBS_STATE_DIR", None)
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        config.STATE_DIR = saved_state
+        config.SEMANTIC = saved_semantic
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def validate_suite(scenarios: dict) -> None:
+    """RT PR62 F5: an empty or malformed suite must never exit green.
+
+    Refuses: zero scenarios, duplicate ids, key references (expect/forbid/
+    tentative/setup targets) that no remembered key provides, unknown ops.
+    """
+    suite = scenarios.get("scenarios") or []
+    if not suite:
+        raise ValueError("bench suite is empty — refusing to grade nothing "
+                         "as CURRENT")
+    seen: set[str] = set()
+    known_ops = {"remember", "supersede", "archive", "outcome_bad", "transit"}
+    for scen in suite:
+        sid = scen.get("id")
+        if not sid:
+            raise ValueError("scenario without id")
+        if sid in seen:
+            raise ValueError(f"duplicate scenario id: {sid}")
+        seen.add(sid)
+        keys: set[str] = set()
+        for step in scen.get("setup", []):
+            op = step.get("op")
+            if op not in known_ops:
+                raise ValueError(f"{sid}: unknown op {op!r}")
+            if op == "remember":
+                keys.add(step["key"])
+            elif op == "supersede":
+                for ref in ("old", "new"):
+                    if step[ref] not in keys:
+                        raise ValueError(
+                            f"{sid}: supersede references unknown key "
+                            f"{step[ref]!r}")
+            else:
+                if step["target"] not in keys:
+                    raise ValueError(
+                        f"{sid}: {op} references unknown key "
+                        f"{step['target']!r}")
+        for field in ("expect_current_key", "forbid_key",
+                      "expect_tentative_key"):
+            ref = scen.get(field)
+            if ref is not None and ref not in keys:
+                raise ValueError(f"{sid}: {field} references unknown key "
+                                 f"{ref!r}")
+        for ref in scen.get("forbid_keys", []):
+            if ref not in keys:
+                raise ValueError(f"{sid}: forbid_keys references unknown "
+                                 f"key {ref!r}")
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--json", action="store_true",
                         help="machine-readable output")
     args = parser.parse_args()
 
     scenarios = json.loads(SCENARIOS_PATH.read_text(encoding="utf-8"))
+    validate_suite(scenarios)
     results = [_run_scenario(s) for s in scenarios["scenarios"]]
 
     counts = {"CURRENT": 0, "SUPERSEDED": 0, "FAIL": 0}

@@ -14,9 +14,12 @@ Exit code 0 only when every scenario grades `CURRENT`.
 
 ## What is graded
 
-The served surface under test is the recall path (`store.search` +
-`format_context_block`) — exactly what `recall`, the MCP `recall` tool and
-the context block feed on. Closed-pool grading, like the paper:
+The served surface under test is the LOCAL recall path (`store.search`
+with `federated=False` + `format_context_block`) — the context ordinary
+memories are handed to `recall`, the MCP `recall` tool and answer
+prompts. Out of scope, stated plainly: federation, the authorization
+ledger section, the MEMORY.md index content, and any model's reading of
+the block. Closed-pool grading, like the paper:
 
 | grade | meaning |
 |---|---|
@@ -44,7 +47,12 @@ the context block feed on. Closed-pool grading, like the paper:
 - S3's grade changed during development from "rank above" to "served with
   tentative marker": the first formulation contradicted the FL-2 design
   (a penalty must demote weight, never hide a memory). The scenario file
-  records the contract, so the bench cannot be silently weakened later.
+  records the contract; `validate_suite` refuses an empty or malformed
+  suite, and `tests/test_bench_evolving.py` pins the core contracts with
+  mutation probes (a product regression that serves superseded memories
+  must turn this bench red — verified by mutating `_visible` in-memory).
+- S5 tests the transit flag's effect on the served recall view, not a
+  graph traversal.
 - We have not run StateMemBench itself and make no comparative claim
   against systems measured there.
 
