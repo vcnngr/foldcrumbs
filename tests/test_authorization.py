@@ -8,6 +8,9 @@ fail-closed; maintenance (retiring a dead grant) is never blocked by the
 minting gates.
 """
 
+import argparse
+import contextlib
+import io
 import os
 import sys
 import threading
@@ -21,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _sandbox import SANDBOX, is_inside  # noqa: E402,F401
 
+from foldcrumbs import config as _c  # noqa: E402
 from foldcrumbs import store  # noqa: E402
 from foldcrumbs.schema import MemoryRecord  # noqa: E402
 
@@ -565,6 +569,173 @@ class TestSchemaRoundTrip(AuthBase):
         # re-write of a parsed non-auth record: frontmatter fields unchanged
         after = path.read_bytes()
         self.assertEqual(before.split(b"---")[1], after.split(b"---")[1])
+
+
+class TestRtRound2P0(AuthBase):
+    """RT GPT round 2 on c74e039 (card t_13ad5a83): F1-F3 P0, F4-F7 P1.
+
+    F1: migrate --from copied grants (and their backing events) between
+    stores — an expressly forbidden entry path produced an ACTIVE grant
+    with no local minting.
+    F2: a relations write racing a supersede could resurrect a retired
+    grant (RETIRED -> ACTIVE, superseded_by lost): the two writers did
+    not share a lock domain.
+    F3: distill's auto-supersede could retire a grant on an LLM verdict
+    — the emission filter never protected records already in the store.
+    """
+
+    def test_f1_migrate_refuses_grants(self):
+        from foldcrumbs import cli as cli_mod
+        # source store: one grant + its backing event, in a separate dir
+        src_root = Path(self._state) / "migrate_src"
+        src_root.mkdir(parents=True)
+        g = _grant(title="Migrated grant", backed_by=self.event.id)
+        (src_root / g.filename()).write_text(g.to_markdown(), encoding="utf-8")
+        f = MemoryRecord(title="Migrated fact", content="ordinary.", type="fact")
+        (src_root / f.filename()).write_text(f.to_markdown(), encoding="utf-8")
+        # route memory_dir: from_dir -> src_root, default -> the test store
+        # (the FOLDCRUMBS_DIR override ignores cwd, so patch the resolver)
+        real_md = _c.memory_dir
+
+        def routed_md(cwd=None):
+            if cwd is not None and str(cwd) == "SRC":
+                return src_root
+            return real_md()
+        _c.memory_dir = routed_md
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = cli_mod._cmd_migrate(
+                    argparse.Namespace(from_dir="SRC", force=True))
+        finally:
+            _c.memory_dir = real_md
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        names = {m.filename() for m in
+                 store.iter_memories_including_retired(self.dir)}
+        self.assertNotIn(g.filename(), names)      # grant refused
+        self.assertIn(f.filename(), names)          # ordinary memory copied
+        self.assertIn("refused", out.lower())       # visible count
+        self.assertIn("1", out)
+
+    def test_f2_supersede_shares_memory_lock_with_relations(self):
+        from foldcrumbs import federation, authz
+        g = _grant(title="Raced grant", backed_by=self.event.id)
+        store.write_memory(g)
+        revoker = MemoryRecord(title="Race revoker", content="No.", type="event")
+        store.write_memory(revoker)
+        lock_dir = Path(_c.STATE_DIR) / "locks" / f"memory-{g.id}"
+        # hold the relations memory-lock, then supersede must NOT complete
+        # while it is held: the two writers share one serialization domain
+        with federation.file_lock(lock_dir, wait=1.0) as held:
+            self.assertTrue(held)
+            done = threading.Event()
+
+            def retire():
+                store.supersede(g.filename(), revoker.filename())
+                done.set()
+            t = threading.Thread(target=retire, daemon=True)
+            t.start()
+            finished = done.wait(timeout=0.5)
+            self.assertFalse(finished,
+                             "supersede wrote while the memory lock was held")
+        t.join(timeout=10)
+        self.assertTrue(done.is_set())
+        rec = store.get(g.filename())
+        self.assertEqual(rec.status, "superseded")
+        self.assertEqual(authz.derived_state(rec), "RETIRED")
+
+    def test_f2_relations_after_revocation_keeps_retired(self):
+        from foldcrumbs import relations, authz
+        g = _grant(title="Rel after retire", backed_by=self.event.id)
+        store.write_memory(g)
+        revoker = MemoryRecord(title="Rel revoker", content="No.", type="event")
+        store.write_memory(revoker)
+        store.supersede(g.filename(), revoker.filename())
+        # a relations write on the retired grant must not resurrect it
+        rec = store.get(g.filename())
+        relations.add_relation(
+            rec.id, "depends_on", target={"k": "m", "id": self.event.id},
+            evidence="test", confidence=0.8)
+        after = store.get(g.filename())
+        self.assertEqual(after.status, "superseded")
+        self.assertEqual(after.superseded_by, revoker.id)
+        self.assertEqual(authz.derived_state(after), "RETIRED")
+
+    def test_f3_auto_supersede_never_retires_grants(self):
+        from foldcrumbs import distill
+        import foldcrumbs.llm as llm
+        g = _grant(title="Targeted grant", grants="may deploy to prod",
+                   backed_by=self.event.id)
+        store.write_memory(g)
+        before = (Path(self.dir) / (g.source_path or g.filename())).read_bytes()
+        fresh = MemoryRecord(title="New decision on deploy",
+                             content="agent-a may deploy to prod, revised.",
+                             type="decision")
+        store.write_memory(fresh)
+        real = llm.chat
+        llm.chat = lambda *a, **k: "supersede"  # the model WANTS to retire it
+        try:
+            distill.persist([fresh])    # the pipeline: upsert + auto-supersede
+        finally:
+            llm.chat = real
+        after = (Path(self.dir) / (g.source_path or g.filename())).read_bytes()
+        self.assertEqual(before, after, "auto-supersede touched a grant")
+        rec = store.get(g.filename())
+        self.assertEqual(rec.status, "active")
+
+
+class TestRtRound2P1(AuthBase):
+    """F4-F7 (P1): trace wired into recall, uuid-identity collision,
+    doctor expiry coverage, index pointer line."""
+
+    def test_f4_trace_rides_with_recall_section(self):
+        from foldcrumbs import authz
+        g = _grant(title="Traced grant", backed_by=self.event.id)
+        store.write_memory(g)
+        revoker = MemoryRecord(title="Trace revoker", content="No.", type="event")
+        store.write_memory(revoker)
+        store.supersede(g.filename(), revoker.filename())
+        store.forget(revoker.filename(), hard=True)   # dangling chain
+        store.rebuild_index()
+        section = authz.render_authorization_section()
+        self.assertIn("RETIRED", section)
+        self.assertIn("target removed", section.lower())
+
+    def test_f5_same_uuid_different_identity_refused(self):
+        g1 = _grant(title="UUID grant one", backed_by=self.event.id)
+        store.write_memory(g1)
+        g2 = _grant(title="UUID grant two", backed_by=self.event.id,
+                    granted_to="agent-b")
+        g2.id = g1.id                      # forged identical UUID
+        with self.assertRaises(Exception) as ctx:
+            store.write_memory(g2)
+        self.assertIn("collision", str(ctx.exception).lower())
+
+    def test_f6_doctor_flags_missing_expiry(self):
+        from foldcrumbs import authz
+        g = _grant(title="No expiry grant", backed_by=self.event.id)
+        store.write_memory(g)
+        path = Path(self.dir) / (g.source_path or g.filename())
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace(
+            f"expires_at: {g.expires_at.isoformat()}", "expires_at: "),
+            encoding="utf-8")
+        report = authz.doctor_checks()
+        self.assertTrue(any("expiry" in r.lower() for r in report))
+
+    def test_f7_index_mode_pointer_line(self):
+        from foldcrumbs import mcp_server
+        g = _grant(title="Indexed grant", backed_by=self.event.id)
+        store.write_memory(g)
+        store.rebuild_index()
+        r = mcp_server.handle({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "recall",
+                       "arguments": {"query": "deploy", "mode": "index"}}})
+        text = r["result"]["content"][0]["text"]
+        self.assertIn("authorization", text.lower())
+        self.assertNotIn(g.grants, text)   # grants themselves never in index
 
 
 if __name__ == "__main__":

@@ -379,6 +379,15 @@ def tool_recall(args: dict[str, Any]) -> str:
                 lines.append(f"{name}  [{m.type}]  {m.title}  ({day})")
         lines.append(f"fetch full text with: fetch(names=[...]) "
                      f"— {len(mems)} hit(s)")
+        # RT r2 F7: grants are excluded from index hits — say so, and
+        # point at the surface that serves them (full recall's ledger).
+        _grants = [m for m in
+                   store.iter_memories_including_retired()
+                   if m.type == "authorization"]
+        if _grants:
+            lines.append(
+                f"({len(_grants)} authorization record(s) excluded from "
+                f"index mode — served with state in full recall)")
         return "\n".join(lines)
     block = format_context_block(mems, heading=str(args["query"]))
     text = block or "(no matching memories)"

@@ -1113,6 +1113,56 @@ def _strip_reserved_keys(text: str) -> str:
 _strip_reserved_transit = _strip_reserved_keys
 
 
+def _is_authorization_text(text: str) -> bool:
+    """True when a memory file's frontmatter declares type: authorization.
+
+    Cheap line scan (no full parse): migrate only needs the refusal
+    decision, and a file that cannot be recognized stays a copy —
+    grants are recognizable by construction (we write the line).
+    """
+    if not text.startswith("---"):
+        return False
+    for line in text.split("\n")[1:80]:   # frontmatter is short; bounded
+        if line.startswith("---"):
+            break
+        if line.strip().lower().startswith("type:"):
+            return line.split(":", 1)[1].strip().lower() == "authorization"
+    return False
+
+
+def _migrate_copy_tree_filtered(src_dir: Path, dst_dir: Path) -> int:
+    """Copy a directory tree WITHOUT authorization memories.
+
+    RT r2 F1: copytree on a subdirectory could smuggle grants in. Every
+    .md file passes the same refusal as the flat branch; non-memory
+    files copy unchanged. Returns the refusal count.
+    """
+    import shutil
+
+    refused = 0
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for sub in sorted(src_dir.rglob("*")):
+        if not sub.is_file():
+            continue
+        rel = sub.relative_to(src_dir)
+        target = dst_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if sub.suffix == ".md":
+            try:
+                text = sub.read_text(encoding="utf-8")
+            except OSError:
+                shutil.copy2(sub, target)
+                continue
+            if _is_authorization_text(text):
+                refused += 1
+                continue
+            target.write_text(_strip_reserved_transit(text),
+                              encoding="utf-8")
+        else:
+            shutil.copy2(sub, target)
+    return refused
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     """Migrate a legacy engram install to foldcrumbs (non-destructive).
 
@@ -1151,20 +1201,34 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
             return 1
         else:
             dst.mkdir(parents=True, exist_ok=True)
+            refused_auth = 0
             for item in src.iterdir():
                 target = dst / item.name
                 if item.is_dir():
-                    shutil.copytree(item, target, dirs_exist_ok=True)
+                    # RT r2 F1: a subdirectory could carry memory files —
+                    # copytree must not smuggle grants in. Filter per file.
+                    refused_auth += _migrate_copy_tree_filtered(item, target)
                 elif item.suffix == ".md":
                     # D3-bis trust boundary: migrate is an automatic entry
                     # path, so the reserved `transit` key never rides in with
                     # a copied memory.
-                    text = _strip_reserved_transit(item.read_text(
-                        encoding="utf-8"))
-                    target.write_text(text, encoding="utf-8")
+                    # AUTH design rev2 §D3 / RT r2 F1: migrate REFUSES
+                    # authorizations — authority never travels between
+                    # stores, whatever the copy mechanism.
+                    text = item.read_text(encoding="utf-8")
+                    if _is_authorization_text(text):
+                        refused_auth += 1
+                        continue
+                    target.write_text(_strip_reserved_transit(text),
+                                      encoding="utf-8")
                 else:
                     shutil.copy2(item, target)
             print(f"memory: copied {src} -> {dst}")
+            if refused_auth:
+                print(f"memory: refused {refused_auth} authorization "
+                      f"record(s) — grants never migrate; mint them "
+                      f"locally with `foldcrumbs remember --type "
+                      f"authorization`")
     else:
         print(f"memory: (skipped) pass --from <old-project-dir> to copy its store "
               f"into {config.memory_dir()}")

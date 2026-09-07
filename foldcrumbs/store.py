@@ -839,10 +839,38 @@ def supersede(
     The old file stays on disk with ``status: superseded`` (confidence collapses
     to 0, drops out of index/recall; ``prune`` can clear it later). Returns False
     when either name doesn't resolve.
+
+    AUTH design rev2 §D3 / RT r2 F2: retirement of a GRANT runs under the
+    same per-memory lock relations writers take (locks/memory-<id>), with a
+    re-read under the lock — so a relations write racing a revocation can
+    neither resurrect the grant (relations re-reads the retired record) nor
+    be clobbered by it (supersede re-reads the relations). Ordinary memories
+    keep the historical lock-free path: their writers already share nothing
+    and the contract predates this change.
     """
     old, new = get(old_name, cwd), get(new_name, cwd)
     if old is None or new is None or old_name == new_name:
         return False
+    if old.type == "authorization":
+        from . import federation
+        lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{old.id}"
+        lock_dir.parent.mkdir(parents=True, exist_ok=True)
+        with federation.file_lock(lock_dir, wait=5.0) as held:
+            if not held:
+                config.log_event(
+                    f"supersede: memory {old.id} locked by another writer; "
+                    "retirement deferred (refusing to race)")
+                return False
+            # re-read under the lock: a relations write may have landed
+            # since the caller resolved the record
+            old = get(old_name, cwd)
+            if old is None or old.status == "superseded":
+                return old is not None    # already retired: nothing to do
+            old.mark_superseded(new.id)
+            _write_text(config.memory_dir(cwd) / old_name, old.to_markdown())
+        recalls.forget(old.id, cwd)
+        rebuild_index(cwd)
+        return True
     old.mark_superseded(new.id)
     _write_text(config.memory_dir(cwd) / old_name, old.to_markdown())
     recalls.forget(old.id, cwd)

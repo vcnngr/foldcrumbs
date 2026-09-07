@@ -187,6 +187,13 @@ def mint(rec: MemoryRecord, cwd=None) -> Path:
         for existing in store.iter_memories_including_retired(cwd):
             if existing.type != AUTH_TYPE:
                 continue
+            # RT r2 F5: identity is BOTH the UUID and the semantic tuple —
+            # a forged/duplicate id with a different tuple is a collision.
+            if existing.id == rec.id:
+                raise AuthorizationError(
+                    f"collision: an authorization with id {rec.id} already "
+                    f"exists ({existing.source_path or existing.filename()}) "
+                    "— ids are never reused")
             if (existing.granted_to == rec.granted_to
                     and existing.grants == rec.grants
                     and existing.backed_by == rec.backed_by):
@@ -219,7 +226,11 @@ def render_authorization_section(cwd=None) -> str:
     grants -> empty string (no section, zero noise).
     """
     from . import store
-    grants = [m for m in store.iter_memories(cwd) if m.type == AUTH_TYPE]
+    # RT r2 F4: the ledger shows the WHOLE history — retired/expired grants
+    # included (a retired grant that disappears from view is how laundering
+    # restarts), each with its derived state and, when retired, its trace.
+    grants = [m for m in store.iter_memories_including_retired(cwd)
+              if m.type == AUTH_TYPE]
     if not grants:
         return ""
     grants.sort(key=lambda m: (m.created_at, m.source_path or m.filename()))
@@ -237,6 +248,10 @@ def render_authorization_section(cwd=None) -> str:
         lines.append(
             f"    backed by: {g.backed_by or 'MISSING'}"
             f" ({backing_status(g.backed_by, cwd)}) | {state}")
+        if state == "RETIRED":
+            trace = render_trace(g, cwd)
+            for tl in trace.splitlines()[1:]:
+                lines.append(f"    {tl.strip()}")
     return "\n".join(lines)
 
 
@@ -292,15 +307,20 @@ def doctor_checks(cwd=None) -> list[str]:
                 and m.status == "active"):
             out.append(f"expired-but-active authorization: {name} — decay "
                        "has not archived it yet")
+        # RT r2 F6: missing/naive expiry is the fail-closed EXPIRED case —
+        # doctor must surface it, not just derive it silently.
+        if m.expires_at is None:
+            out.append(f"authorization with missing expiry: {name} "
+                       "(reads EXPIRED, fail-closed) — fix the file or "
+                       "retire the grant")
+        elif m.expires_at.tzinfo is None:
+            out.append(f"invalid (naive) expiry on authorization: {name}")
         if m.backed_by:
             for b in store.iter_memories_including_retired(cwd):
                 if b.id == m.backed_by and b.status == "superseded":
                     out.append(f"authorization with superseded backing: "
                                f"{name} — retirement candidate")
                     break
-        if (m.type == AUTH_TYPE and m.expires_at is not None
-                and m.expires_at.tzinfo is None):
-            out.append(f"invalid (naive) expiry on authorization: {name}")
     return out
 
 
