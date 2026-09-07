@@ -324,6 +324,13 @@ def _search(query: str, limit: int, types: list[str] | None = None,
 
 
 def tool_remember(args: dict[str, Any]) -> str:
+    # AUTH design rev2 §D3: an agent minting its own authority is the
+    # paper's attack with extra steps. Grants are CLI-only (human verb).
+    if str(args.get("type") or "") == "authorization":
+        return ("refused: type 'authorization' cannot be minted via MCP — "
+                "grants are created by a human through the CLI "
+                "(`foldcrumbs remember --type authorization --grants ... "
+                "--backed-by ...`), backed by a live local event/decision")
     rec = MemoryRecord(
         title=str(args.get("title") or args["content"])[:80],
         content=str(args["content"]),
@@ -372,9 +379,25 @@ def tool_recall(args: dict[str, Any]) -> str:
                 lines.append(f"{name}  [{m.type}]  {m.title}  ({day})")
         lines.append(f"fetch full text with: fetch(names=[...]) "
                      f"— {len(mems)} hit(s)")
+        # RT r2 F7: grants are excluded from index hits — say so, and
+        # point at the surface that serves them (full recall's ledger).
+        _grants = [m for m in
+                   store.iter_memories_including_retired()
+                   if m.type == "authorization"]
+        if _grants:
+            lines.append(
+                f"({len(_grants)} authorization record(s) excluded from "
+                f"index mode — served with state in full recall)")
         return "\n".join(lines)
     block = format_context_block(mems, heading=str(args["query"]))
-    return block or "(no matching memories)"
+    text = block or "(no matching memories)"
+    # AUTH design rev2 §D4: the ledger section rides with every full recall
+    # (CLI and MCP serve the same honest view).
+    from . import authz
+    section = authz.render_authorization_section()
+    if section:
+        text = f"{text}\n\n{section}"
+    return text
 
 
 def _is_memory_filename(name: str) -> bool:
@@ -421,9 +444,19 @@ def _fetch_one(name: str) -> tuple[str | None, str]:
         if not contained or not path.is_file():
             return None, "not found"
         try:
-            return path.read_text(encoding="utf-8"), ""
+            text = path.read_text(encoding="utf-8")
         except OSError:
             return None, "unreadable"
+        # AUTH design rev2 §D6: another root's grants are its policy
+        # surface, not our context — excluded from every served surface.
+        try:
+            probe = MemoryRecord.from_markdown(text)
+        except Exception:
+            probe = None
+        if probe is not None and probe.type == "authorization":
+            return None, ("not served: that root's authorizations are its "
+                          "own policy surface (grants never cross roots)")
+        return text, ""
     if not _is_memory_filename(name):
         return None, "not a memory file (or unsafe ref)"
     rec = store.get(name)
@@ -432,9 +465,16 @@ def _fetch_one(name: str) -> tuple[str | None, str]:
     real = rec.source_path or rec.filename()
     path = config.memory_dir() / real
     try:
-        return path.read_text(encoding="utf-8"), ""
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return None, "unreadable"
+    # AUTH design rev2 §D4: a grant gets the deterministic state envelope
+    # BEFORE the raw historical document — the product's claim, not the
+    # model's interpretation.
+    if rec.type == "authorization":
+        from . import authz
+        return f"{authz.fetch_envelope(rec)}\n\n{text.rstrip()}", ""
+    return text, ""
 
 
 def tool_fetch(args: dict[str, Any]) -> str:

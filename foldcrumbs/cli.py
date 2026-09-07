@@ -81,13 +81,28 @@ def _cmd_remember(args: argparse.Namespace) -> int:
         source="cli",
         tags=args.tag or [],
     )
+    # AUTH design rev2 §D3: minting a grant is a CLI (human) verb and needs
+    # the full identity — the core gate refuses anything incomplete.
+    if args.type == "authorization":
+        rec.grants = args.grants or ""
+        rec.granted_to = args.granted_to or ""
+        rec.backed_by = args.backed_by or ""
+        if not args.expires:
+            print("refused: --expires is required for an authorization "
+                  "(no immortal permissions)")
+            return 1
     if args.expires:
         try:
             rec.expires_at = parse_expiry(args.expires)
         except ValueError as exc:
             print(f"refused: {exc}")
             return 1
-    action, path = store.upsert(rec)
+    try:
+        action, path = store.upsert(rec)
+    except Exception as exc:
+        # AuthorizationError (and any core refusal) renders visibly
+        print(f"refused: {exc}")
+        return 1
     store.rebuild_index()
     print(f"{action}: {path}")
     return 0
@@ -115,6 +130,13 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         return 0
     block = format_context_block(top, heading=args.query)
     print(block or "(no matching memories)")
+    # AUTH design rev2 §D4: the authorization ledger is served with every
+    # recall — grants excluded from search are useless if never surfaced.
+    from . import authz
+    section = authz.render_authorization_section()
+    if section:
+        print()
+        print(section)
     return 0
 
 
@@ -341,6 +363,13 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
         print(f"conflicts  : {len(q['flagged'])} ambiguous, "
               f"{len(q['claims_out'])} claims out, "
               f"{len(q['contested_here'])} contested — `foldcrumbs conflicts`")
+    # AUTH design rev2 §D4: authorization gap classes
+    from . import authz as authz_mod
+    gaps = authz_mod.doctor_checks()
+    if gaps:
+        print(f"authorizations: {len(gaps)} finding(s)")
+        for g in gaps:
+            print(f"  ! {g}")
     return 0
 
 
@@ -1084,6 +1113,59 @@ def _strip_reserved_keys(text: str) -> str:
 _strip_reserved_transit = _strip_reserved_keys
 
 
+def _is_authorization_text(text: str) -> bool:
+    """True when a memory file declares type: authorization.
+
+    RT r3 (GPT F1 residual): a bounded line-scan missed the type key in
+    over-long frontmatter and was fooled by duplicate keys. The real
+    parser is the canonical contract — what from_markdown derives is
+    what the store would serve, so that is what migrate must refuse on.
+    Unparseable text degrades to "not an authorization": migrate copies
+    ordinary/unknown files as before (they carry no authority by
+    construction — the store's own mint gate stands behind this).
+    """
+    if not text.startswith("---"):
+        return False
+    try:
+        from .schema import MemoryRecord
+        return MemoryRecord.from_markdown(text).type == "authorization"
+    except Exception:
+        return False
+
+
+def _migrate_copy_tree_filtered(src_dir: Path, dst_dir: Path) -> int:
+    """Copy a directory tree WITHOUT authorization memories.
+
+    RT r2 F1: copytree on a subdirectory could smuggle grants in. Every
+    .md file passes the same refusal as the flat branch; non-memory
+    files copy unchanged. Returns the refusal count.
+    """
+    import shutil
+
+    refused = 0
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for sub in sorted(src_dir.rglob("*")):
+        if not sub.is_file():
+            continue
+        rel = sub.relative_to(src_dir)
+        target = dst_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if sub.suffix == ".md":
+            try:
+                text = sub.read_text(encoding="utf-8")
+            except OSError:
+                shutil.copy2(sub, target)
+                continue
+            if _is_authorization_text(text):
+                refused += 1
+                continue
+            target.write_text(_strip_reserved_transit(text),
+                              encoding="utf-8")
+        else:
+            shutil.copy2(sub, target)
+    return refused
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     """Migrate a legacy engram install to foldcrumbs (non-destructive).
 
@@ -1122,20 +1204,34 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
             return 1
         else:
             dst.mkdir(parents=True, exist_ok=True)
+            refused_auth = 0
             for item in src.iterdir():
                 target = dst / item.name
                 if item.is_dir():
-                    shutil.copytree(item, target, dirs_exist_ok=True)
+                    # RT r2 F1: a subdirectory could carry memory files —
+                    # copytree must not smuggle grants in. Filter per file.
+                    refused_auth += _migrate_copy_tree_filtered(item, target)
                 elif item.suffix == ".md":
                     # D3-bis trust boundary: migrate is an automatic entry
                     # path, so the reserved `transit` key never rides in with
                     # a copied memory.
-                    text = _strip_reserved_transit(item.read_text(
-                        encoding="utf-8"))
-                    target.write_text(text, encoding="utf-8")
+                    # AUTH design rev2 §D3 / RT r2 F1: migrate REFUSES
+                    # authorizations — authority never travels between
+                    # stores, whatever the copy mechanism.
+                    text = item.read_text(encoding="utf-8")
+                    if _is_authorization_text(text):
+                        refused_auth += 1
+                        continue
+                    target.write_text(_strip_reserved_transit(text),
+                                      encoding="utf-8")
                 else:
                     shutil.copy2(item, target)
             print(f"memory: copied {src} -> {dst}")
+            if refused_auth:
+                print(f"memory: refused {refused_auth} authorization "
+                      f"record(s) — grants never migrate; mint them "
+                      f"locally with `foldcrumbs remember --type "
+                      f"authorization`")
     else:
         print(f"memory: (skipped) pass --from <old-project-dir> to copy its store "
               f"into {config.memory_dir()}")
@@ -1288,6 +1384,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--tag", action="append")
     r.add_argument("--expires", default="",
                    help="true until this date: ISO (2026-09-01) or relative (30d, 2w, 6m)")
+    r.add_argument("--grants", default="",
+                   help="authorization only: what is permitted")
+    r.add_argument("--granted-to", dest="granted_to", default="",
+                   help="authorization only: who holds the authority")
+    r.add_argument("--backed-by", dest="backed_by", default="",
+                   help="authorization only: id of the live local "
+                        "event/decision that is the source of this grant")
     r.set_defaults(func=_cmd_remember)
 
     rc = sub.add_parser("recall", help="search the store")

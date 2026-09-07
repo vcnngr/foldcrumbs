@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-# The 13 memory types (memanto/app/constants.py).
+# The 14 memory types (memanto/app/constants.py + authorization).
 VALID_TYPES = {
     "fact",
     "preference",
@@ -31,6 +31,11 @@ VALID_TYPES = {
     "observation",
     "commitment",
     "error",
+    # AUTH design rev2 §D1: a grant of authority. Not a fact, not a
+    # decision — conflating it with those is how laundering starts.
+    # Carries granted_to/grants/backed_by and a MANDATORY aware future
+    # expiry; minting is CLI-only and fail-closed (foldcrumbs.authz).
+    "authorization",
 }
 
 VALID_PROVENANCE = {
@@ -254,6 +259,14 @@ class MemoryRecord:
     outcome_at: datetime | None = None
     outcome_note: str | None = None
 
+    # AUTH design rev2 §D1: authorization-only fields. Required (non-empty)
+    # FOR type=authorization at the core write gate; ignored for every other
+    # type. Serialized only when set — zero noise on the millions of memories
+    # that predate this field.
+    granted_to: str | None = None   # who holds the authority
+    grants: str | None = None       # what is permitted, one statement
+    backed_by: str | None = None    # memory id of the source event/decision
+
     @property
     def is_foreign(self) -> bool:
         return self.origin_root is not None
@@ -385,6 +398,15 @@ class MemoryRecord:
             if self.outcome_note:
                 fm.append("outcome_note: "
                           + " ".join(str(self.outcome_note).split()))
+        # AUTH rev2 §D1: authorization-only keys, serialized only when set
+        # (flattened to one line each — FL-1 F1 lesson: a multiline value
+        # would forge frontmatter keys on the next parse).
+        if self.granted_to:
+            fm.append("granted_to: " + " ".join(str(self.granted_to).split()))
+        if self.grants:
+            fm.append("grants: " + " ".join(str(self.grants).split()))
+        if self.backed_by:
+            fm.append("backed_by: " + " ".join(str(self.backed_by).split()))
         # Unknown keys go back into the file verbatim: a rewrite must never
         # erase frontmatter this code does not own (design REV-2, GPT-F6).
         for key in sorted(self.extra_meta):
@@ -437,6 +459,9 @@ class MemoryRecord:
             outcome=_parse_outcome(meta.get("outcome")),
             outcome_at=_parse_dt_opt(meta.get("outcome_at")),
             outcome_note=(meta.get("outcome_note") or "").strip() or None,
+            granted_to=(meta.get("granted_to") or "").strip() or None,
+            grants=(meta.get("grants") or "").strip() or None,
+            backed_by=(meta.get("backed_by") or "").strip() or None,
         )
         # Frontmatter this code does not own: preserved verbatim so a
         # rewrite cannot erase it (design REV-2, GPT-F6).
@@ -446,6 +471,7 @@ class MemoryRecord:
             "updated_at", "superseded_by", "supersedes_external",
             "expires_at", "relations_json", "contradiction_detected",
             "outcome", "outcome_at", "outcome_note",
+            "granted_to", "grants", "backed_by",
         }
         rec.extra_meta = {k: v for k, v in meta.items() if k not in _known}
         # Remember that the timestamp was invented rather than read — which

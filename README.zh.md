@@ -503,6 +503,49 @@ search 排序仍基于相关性。`outcome*` 键是保留键：import 和 migrat
 设计原理与完整的信任边界表：
 [docs/design/fleet-learning.md](docs/design/fleet-learning.md)。
 
+## 有案可查的权限：`authorization`
+
+在记忆中携带权限的代理可能"洗白"授权：一条许可被写入，其来源被冲刷掉，
+而撤销永远不会传播（arXiv 2609.01836 测得执行者在 98.6% 的试验中
+依据虚假授权行动）。foldcrumbs 的回答是一个类型化台账，而不是策略引擎 —
+**它不是执行点，也永远看不到你的操作**。它保证的是：每条授权都携带其
+来源事件、其到期时间和其退役链 — 否则它就不存在。
+
+```bash
+# 来源事件先存在 — 没有来源事件的授权会被拒绝
+python3 -m foldcrumbs remember "站会批准了 agent-a 的部署权限" --type event
+python3 -m foldcrumbs remember "agent-a 可以部署到生产环境" \
+    --type authorization --grants "可以部署到生产环境" --granted-to agent-a \
+    --backed-by <event-id> --expires 30d
+python3 -m foldcrumbs recall deploy        # 台账部分随每次 recall 一起提供
+python3 -m foldcrumbs doctor               # 标记无来源/已过期/退役缺口
+```
+
+契约，范围诚实：
+
+- **铸造是人类动词。** 仅限 CLI；MCP `remember` 拒绝该类型
+  （代理铸造自己的权限是攻击，不是功能）。distill 从不发出它；
+  ingest 将其降级（文档不能授予权限）；import/migrate 拒绝它；
+  `adopt` 双向拒绝 — 授权永不跨根旅行。
+- **没有不朽的权限。** `expires_at` 是必需的，必须带时区且在未来；
+  存储中到期时间损坏的授权读取为 EXPIRED，绝不是 ACTIVE（fail-closed）。
+- **来源必须存活。** `backed_by` 在写入时必须指向本地存活的 `event` 或
+  `decision`。如果它之后消亡，每次提供的读取都派生出 UNBACKED —
+  来源已死却显示干净 ACTIVE 的授权永不被提供。
+- **退役即 supersede 链。** `supersede <grant> --by <event>` 使其退役；
+  有界台账轨迹将悬空链接和循环渲染为可见的断裂，绝不静默地完整。
+  `graph path` 语义不变：退役的授权仍是被拒绝的端点。
+- **提供的读取派生状态**（RETIRED > EXPIRED > UNBACKED > ACTIVE）
+  于每次调用：recall 自己的台账部分（免于"honour it"），
+  `fetch` 在原始文件之前带确定性封装，索引快照被排除并附指针行，
+  `answer` 永远看不到授权。
+- **声明的限制**：正文写着"永远允许"的 `decision` 超出范围
+  （没有语义分类器）；CLI 证明是程序性的，不是身份性的；
+  原始文件仍可 grep — 契约约束的是产品提供的界面。
+
+设计与 T1-T20 验收矩阵：
+[docs/design/authorization-integrity.md](docs/design/authorization-integrity.md)。
+
 ## 在存储之间共享记忆：`import`
 
 存储按 **实例 × 项目** 划分命名空间：记忆位于

@@ -515,15 +515,40 @@ def load_all(cwd: str | os.PathLike[str] | None = None) -> list[MemoryRecord]:
     return list(iter_memories(cwd))
 
 
+def iter_memories_including_retired(
+    cwd: str | os.PathLike[str] | None = None,
+) -> Iterator[MemoryRecord]:
+    """LOCAL scan with NO visibility filter: superseded/deleted/expired
+    included. The authorization ledger needs the whole history — a
+    retired grant that disappears from view is how laundering restarts
+    (AUTH design rev2 §D4/§D5). Local only, like every write-path scan.
+    """
+    yield from iter_memories_in(config.memory_dir(cwd))
+
+
 def _path_for(rec: MemoryRecord, cwd: str | os.PathLike[str] | None) -> Path:
     return config.memory_dir(cwd) / rec.filename()
 
 
 def write_memory(
-    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None
+    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None,
+    _skip_auth_gate: bool = False,
 ) -> Path:
-    """Write a memory atomically (tmp + os.replace). Returns the file path."""
+    """Write a memory atomically (tmp + os.replace). Returns the file path.
+
+    AUTH design rev2 §D2: MINTING a grant (type=authorization, no
+    source_path — i.e. a NEW record, not a rewrite of one loaded from
+    disk) routes through authz.mint: fail-closed validation, create-only
+    identity checks, per-store lock. Rewrites of an existing grant
+    (relations, archive/restore — source_path set) are MAINTENANCE and
+    are not re-gated: retiring or annotating a grant whose backing died
+    is the ledger's job.
+    """
     _refuse_if_foreign(rec, "write")
+    if (rec.type == "authorization" and rec.source_path is None
+            and not _skip_auth_gate):
+        from . import authz
+        return authz.mint(rec, cwd)
     d = _ensure_dir(cwd)
     target = d / rec.filename()
     fd, tmp = tempfile.mkstemp(dir=str(d), suffix=".tmp")
@@ -622,8 +647,15 @@ def upsert(
 
     action ∈ {"created", "validated"}. If a near-duplicate exists, we bump its
     validation count (trust) instead of adding a second copy.
+
+    AUTH design rev2 §D2.5: authorizations are EXCLUDED from the fuzzy
+    dedup — two grants that read alike but differ in granted_to/grants/
+    backed_by are different grants. Creation routes to write_memory,
+    which delegates to the locked, fail-closed minting gate.
     """
     _refuse_if_foreign(rec, "store")
+    if rec.type == "authorization":
+        return "created", write_memory(rec, cwd)
     dup = find_duplicate(rec, cwd)
     if dup is not None:
         dup.validate()
@@ -648,7 +680,8 @@ def import_store(
     lists of source filenames; with ``apply`` it writes and rebuilds the index.
     """
     src = Path(src_dir).expanduser()
-    plan: dict[str, list[str]] = {"created": [], "validated": [], "skipped": []}
+    plan: dict[str, list[str]] = {"created": [], "validated": [], "skipped": [],
+                                  "refused_authorizations": []}
     for path in sorted(src.glob("*.md")):
         if is_store_artifact(path.name):
             continue
@@ -665,6 +698,12 @@ def import_store(
             rec = MemoryRecord.from_markdown(text)
         except Exception:
             plan["skipped"].append(path.name)
+            continue
+        # AUTH design rev2 §D3: a grant's backing event lives in the SOURCE
+        # store's history; without it the grant is unbacked by definition.
+        # Refused outright — not silently retyped — and counted visibly.
+        if rec.type == "authorization":
+            plan["refused_authorizations"].append(path.name)
             continue
         if rec.status != "active":
             plan["skipped"].append(path.name)
@@ -800,10 +839,38 @@ def supersede(
     The old file stays on disk with ``status: superseded`` (confidence collapses
     to 0, drops out of index/recall; ``prune`` can clear it later). Returns False
     when either name doesn't resolve.
+
+    AUTH design rev2 §D3 / RT r2 F2: retirement of a GRANT runs under the
+    same per-memory lock relations writers take (locks/memory-<id>), with a
+    re-read under the lock — so a relations write racing a revocation can
+    neither resurrect the grant (relations re-reads the retired record) nor
+    be clobbered by it (supersede re-reads the relations). Ordinary memories
+    keep the historical lock-free path: their writers already share nothing
+    and the contract predates this change.
     """
     old, new = get(old_name, cwd), get(new_name, cwd)
     if old is None or new is None or old_name == new_name:
         return False
+    if old.type == "authorization":
+        from . import federation
+        lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{old.id}"
+        lock_dir.parent.mkdir(parents=True, exist_ok=True)
+        with federation.file_lock(lock_dir, wait=5.0) as held:
+            if not held:
+                config.log_event(
+                    f"supersede: memory {old.id} locked by another writer; "
+                    "retirement deferred (refusing to race)")
+                return False
+            # re-read under the lock: a relations write may have landed
+            # since the caller resolved the record
+            old = get(old_name, cwd)
+            if old is None or old.status == "superseded":
+                return old is not None    # already retired: nothing to do
+            old.mark_superseded(new.id)
+            _write_text(config.memory_dir(cwd) / old_name, old.to_markdown())
+        recalls.forget(old.id, cwd)
+        rebuild_index(cwd)
+        return True
     old.mark_superseded(new.id)
     _write_text(config.memory_dir(cwd) / old_name, old.to_markdown())
     recalls.forget(old.id, cwd)
@@ -931,6 +998,11 @@ def search(
     lexical: list[tuple[float, str, MemoryRecord]] = []
     for m in candidates:
         if not _visible(m):
+            continue
+        # AUTH design rev2 §D4: grants never compete in ordinary search —
+        # they are served by the ledger section (authz.render_authorization_
+        # section) with derived state, or not at all.
+        if m.type == "authorization":
             continue
         if m.contested_by and not include_contested:
             continue
@@ -1081,6 +1153,12 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
     """
     d = _ensure_dir(cwd)
     mems = [m for m in iter_memories(cwd) if _visible(m)]
+    # AUTH design rev2 §D4: grants are EXCLUDED from the static snapshot —
+    # a snapshot predating expiry/backing-death must not present as live
+    # truth. When grants exist the index carries a pointer line instead;
+    # served reads (recall/fetch) derive state live.
+    grants = [m for m in mems if m.type == "authorization"]
+    mems = [m for m in mems if m.type != "authorization"]
 
     grouped: dict[str, list[MemoryRecord]] = {}
     for m in mems:
@@ -1111,6 +1189,13 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
             hook = m.description or m.title
             target = m.source_path or m.filename()
             lines.append(f"- [{m.title}]({target}) — {hook}{tag}")
+        lines.append("")
+    if grants:
+        lines.append("## Authorizations")
+        lines.append(
+            f"- {len(grants)} grant(s) withheld from this snapshot — "
+            "served live via `foldcrumbs recall` (snapshot states can be "
+            "stale). Verify before acting.")
         lines.append("")
 
     target = d / config.INDEX_NAME

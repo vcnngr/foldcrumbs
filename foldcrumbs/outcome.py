@@ -69,6 +69,13 @@ def set_outcome(name: str, verdict: str, note: str = "",
         return {"ok": False,
                 "reason": "that memory belongs to another root — record the "
                           "outcome where you adopted it (or adopt it first)"}
+    # AUTH design rev2 §D3: outcome rewrites the whole record outside
+    # write_memory, and a race with supersede demonstrably resurrects
+    # retired records (RT r1 F2 probe). Grants take no verdicts.
+    if rec.type == "authorization":
+        return {"ok": False,
+                "reason": "authorization records take no outcome verdicts — "
+                          "retire a grant with supersede, not good/bad"}
 
     if v == "good":
         rec.validation_count += 1

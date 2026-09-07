@@ -261,6 +261,11 @@ def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
     count = 0
     for rec in fresh:
         for old in store.find_conflict_candidates(rec, cwd, federated=True):
+            # AUTH design rev2 §D3 / RT r2 F3: a grant is retired by a
+            # human verb, never by a model verdict. Excluded from the
+            # automatic candidates BEFORE the LLM ever sees the pair.
+            if old.type == "authorization" or rec.type == "authorization":
+                continue
             answer = llm.chat(
                 messages=[
                     {"role": "system", "content": _SUPERSEDE_PROMPT},
@@ -287,6 +292,14 @@ def _auto_supersede(fresh: list[MemoryRecord], cwd: str | None = None) -> int:
                     f"(verdict unclear; see `foldcrumbs conflicts`)")
                 continue
             if verdict == "supersede":
+                # Second guard (RT r2 F3): even if a future refactor lets a
+                # grant reach here, the mutation itself refuses. Belt AND
+                # braces on the ledger.
+                if old.type == "authorization" or rec.type == "authorization":
+                    config.log_event(
+                        "auto-supersede refused: authorization records are "
+                        "retired by humans only")
+                    continue
                 if old.is_foreign:
                     # Someone else's store is read-only from here, so the
                     # contradiction is *recorded*, not applied: the assertion
