@@ -37,6 +37,7 @@ the block. Closed-pool grading, like the paper:
 | S4 | archive | absent |
 | S5 | transit on a superseded memory | traversal grants no authority: still absent from served answers |
 | S6 | two-hop supersede chain | only the newest served |
+| S7 | invalidation contract (target superseded) | dependent absent from the served block |
 
 ## Honesty notes
 

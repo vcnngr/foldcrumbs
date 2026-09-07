@@ -193,6 +193,47 @@
         "v1",
         "v2"
       ]
+    },
+    {
+      "id": "S7-invalidation-contract",
+      "desc": "a memory holding only while its contract target lives: when the target is superseded, the dependent leaves the served block (invalidation contracts, docs/design/invalidated-by.md rev2)",
+      "topic": "staging",
+      "setup": [
+        {
+          "op": "remember",
+          "key": "cluster",
+          "title": "Stg cluster",
+          "content": "We use the stg cluster for staging.",
+          "type": "decision"
+        },
+        {
+          "op": "remember",
+          "key": "cluster2",
+          "title": "Stg cluster v2",
+          "content": "Staging moved to the k8s cluster.",
+          "type": "decision"
+        },
+        {
+          "op": "remember",
+          "key": "url",
+          "title": "Staging URL",
+          "content": "The staging URL is https://stg.example.com.",
+          "type": "fact"
+        },
+        {
+          "op": "invalidate",
+          "dependent": "url",
+          "target": "cluster"
+        },
+        {
+          "op": "supersede",
+          "old": "cluster",
+          "new": "cluster2"
+        }
+      ],
+      "query": "staging url",
+      "expect_current_key": null,
+      "forbid_key": "url"
     }
   ]
 }

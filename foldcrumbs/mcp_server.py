@@ -319,8 +319,10 @@ TOOLS = [
 
 
 def _search(query: str, limit: int, types: list[str] | None = None,
-            tags: list[str] | None = None) -> list[MemoryRecord]:
-    return store.search(query, limit=limit, types=types, tags=tags)
+            tags: list[str] | None = None,
+            collect_invalidated: list | None = None) -> list[MemoryRecord]:
+    return store.search(query, limit=limit, types=types, tags=tags,
+                        collect_invalidated=collect_invalidated)
 
 
 def tool_remember(args: dict[str, Any]) -> str:
@@ -350,9 +352,15 @@ def tool_recall(args: dict[str, Any]) -> str:
     if isinstance(types, str):
         types = [types]
     tags = args.get("tags")
+    # INV design rev2 §D3: one pass, one snapshot — search partitions the
+    # contract-carrying candidates; the diagnostics tail renders them
+    # honestly (max 3 + "showing 3 of N"). The tail NEVER feeds answer's
+    # LLM context (tool_answer does not pass collect_invalidated).
+    invalidated: list = []
     mems = _search(str(args["query"]), int(args.get("limit", 10)),
                    types=list(types) if types else None,
-                   tags=list(tags) if tags else None)
+                   tags=list(tags) if tags else None,
+                   collect_invalidated=invalidated)
     mode = args.get("mode", "full")
     if mode is None:
         mode = "full"
@@ -388,9 +396,19 @@ def tool_recall(args: dict[str, Any]) -> str:
             lines.append(
                 f"({len(_grants)} authorization record(s) excluded from "
                 f"index mode — served with state in full recall)")
+        if invalidated:
+            lines.append(
+                f"({len(invalidated)} contract-carrying match(es) not "
+                f"served as current — see full recall diagnostics)")
         return "\n".join(lines)
     block = format_context_block(mems, heading=str(args["query"]))
-    text = block or "(no matching memories)"
+    text = block or ("(no matching memories)" if not invalidated
+                     else "(no matching memories served as current)")
+    # INV design rev2 §D3: the diagnostics tail — honest one-liners for
+    # contract-carrying hits that were partitioned out, max 3 + count.
+    # Deterministic order (created_at, filename). NOT part of the block:
+    # answer's LLM context never sees it as evidence.
+    text = _append_invalidated_tail(text, invalidated)
     # AUTH design rev2 §D4: the ledger section rides with every full recall
     # (CLI and MCP serve the same honest view).
     from . import authz
@@ -398,6 +416,22 @@ def tool_recall(args: dict[str, Any]) -> str:
     if section:
         text = f"{text}\n\n{section}"
     return text
+
+
+def _append_invalidated_tail(text: str, invalidated: list) -> str:
+    """Render the diagnostics tail (design §D3): max 3 lines + 'showing 3
+    of N'; deterministic ordering; each line says only what was observed."""
+    if not invalidated:
+        return text
+    from . import invalidation as _inv
+    ordered = sorted(invalidated,
+                     key=lambda t: (t[0].created_at or _inv.datetime.min.replace(tzinfo=_inv.timezone.utc),
+                                    t[0].filename()))
+    lines = [_inv.diagnostic_line(rec, outcome, detail)
+             for rec, outcome, detail in ordered[:3]]
+    if len(ordered) > 3:
+        lines.append(f"(showing 3 of {len(ordered)} invalidated matches)")
+    return text + "\n\n" + "\n".join(lines)
 
 
 def _is_memory_filename(name: str) -> bool:
@@ -474,6 +508,16 @@ def _fetch_one(name: str) -> tuple[str | None, str]:
     if rec.type == "authorization":
         from . import authz
         return f"{authz.fetch_envelope(rec)}\n\n{text.rstrip()}", ""
+    # INV design rev2 §D3: the raw file is a historical document and stays
+    # served, but an invalidated/dangling/unresolved contract gets the
+    # one-line envelope BEFORE it — same posture as the grant envelope.
+    from . import invalidation as _inv
+    if _inv.carries_contract(rec):
+        ctx = _inv.ReadContext.for_store()
+        outcome, detail = _inv.derive(rec, ctx)
+        if outcome != _inv.VALID:
+            return (f"[not served as current: {_inv.diagnostic_line(rec, outcome, detail)}]"
+                    f"\n\n{text.rstrip()}"), ""
     return text, ""
 
 
@@ -496,8 +540,16 @@ def tool_fetch(args: dict[str, Any]) -> str:
 
 
 def _timeline_rows(anchor: MemoryRecord, window: int) -> list[MemoryRecord]:
-    all_mems = [m for m in store.iter_memories(config.memory_dir())
-                if m.status == "active" and not m.is_expired]
+    # INV design rev2 §D3: timeline filtered inline (status/expiry) — the
+    # derived contract check joins the same filter, rows AND anchor. One
+    # context per call (design D2 cost model: get/fetch/timeline build it
+    # explicitly).
+    from . import invalidation as _inv
+    all_raw = list(store.iter_memories(config.memory_dir()))
+    ctx = _inv.ReadContext(all_raw)
+    all_mems = [m for m in all_raw
+                if m.status == "active" and not m.is_expired
+                and _inv.is_served(m, ctx)]
     all_mems.sort(key=lambda m: (m.created_at, m.source_path or m.filename()))
     try:
         i = next(k for k, m in enumerate(all_mems) if m.id == anchor.id)
@@ -582,6 +634,16 @@ def _anchor_exclusion(rec: MemoryRecord | None, ref: str) -> str:
                 "active memories")
     if rec.is_expired:
         return f"refused: {ref!r} is expired — it left the active view"
+    # INV design rev2 §D3: an invalidated anchor gets the same explicit
+    # refusal (mirrors the RT F2 posture: never an empty timeline that
+    # looks like 'nothing happened around this memory').
+    from . import invalidation as _inv
+    if _inv.carries_contract(rec):
+        ctx = _inv.ReadContext.for_store()
+        outcome, detail = _inv.derive(rec, ctx)
+        if outcome != _inv.VALID:
+            return (f"refused: {ref!r} is not served as current — "
+                    f"{_inv.diagnostic_line(rec, outcome, detail)}")
     return ""
 
 

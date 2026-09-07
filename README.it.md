@@ -238,8 +238,8 @@ Sopra la vista derivata, una memoria può portare relazioni **esplicite** verso
 un'altra memoria o un'entità esterna. Vivono in una riga frontmatter JSON
 canonico (`relations_json`) — diff-friendly, round-trip sicura — e seguono
 regole strette (design REV-2): i predicati vengono da un vocabolario chiuso di
-otto (`caused_by`, `depends_on`, `supersedes`, `contradicts`, `supports`,
-`refines`, `blocks`, `precedes`); qualunque altro è rifiutato. Un arco senza
+nove (`caused_by`, `depends_on`, `supersedes`, `contradicts`, `supports`,
+`refines`, `blocks`, `precedes`, `invalidated_by`); qualunque altro è rifiutato. Un arco senza
 evidence viene registrato come `inferred` con confidence ≤ 0.5. Le scritture
 sono lockate per memoria (fail-closed): due agenti che editano la stessa
 memoria non perdono mai un arco.
@@ -601,6 +601,48 @@ Il contratto, con scope onesto:
 
 Design e matrice di accettazione T1-T20:
 [docs/design/authorization-integrity.md](docs/design/authorization-integrity.md).
+
+## Fatti che muoiono con la loro causa: `invalidated_by`
+
+Alcune memorie sono vere solo *finché qualcos'altro è vero*. L'URL di
+staging esiste solo finché esiste il cluster di staging; i termini della
+licenza valgono finché vale l'accordo col fornitore. foldcrumbs ti lascia
+scrivere questa dipendenza come contratto:
+
+```bash
+foldcrumbs relate "Staging URL" invalidated_by --to-memory "Stg cluster" \
+    --evidence "the URL exists only while the cluster does"
+```
+
+Quando il target muore — superseded, archiviato, scaduto o rimosso — il
+dipendente **esce dal contesto servito**: recall, indice, timeline e
+federazione smettono di presentarlo come corrente. Nulla viene
+riscritto: il contratto è *derivato a ogni lettura*, mai a cascata, mai
+spazzato da un daemon. Rianima il target e il dipendente torna servito
+alla lettura successiva, senza alcun repair pass.
+
+I bordi onesti:
+
+- i contratti **non si concatenano** — A vale finché B è *viva*, non
+  finché B è a sua volta valida. Se la morte di B deve uccidere anche A,
+  scrivi il secondo arco.
+- un target non risolvibile (typo, hard-forget) rende il dipendente
+  **dangling**: escluso fail-closed ed elencato da `foldcrumbs doctor`
+  per la riparazione — mai scartato in silenzio, mai dichiarato
+  cancellato.
+- il recall dice cosa ha trattenuto: fino a 3 righe diagnostiche
+  ("matched but not served: … invalidated …") sotto il blocco, e `fetch`
+  mette una envelope sul file grezzo. Le diagnostiche non alimentano mai
+  il percorso answer come evidenza.
+- una memoria con contratto è **create-only a destinazione**: nessun
+  upsert o re-ingest può sovrascrivere il contratto in silenzio —
+  ritiralo o riparalo esplicitamente.
+- la traversal del grafo resta intatta: una memoria invalidata resta un
+  nodo di path; l'invalidazione è una regola del contesto servito, non
+  del grafo.
+
+Design e matrice di accettazione T1-T15:
+[docs/design/invalidated-by.md](docs/design/invalidated-by.md).
 
 ## Condividere memoria tra store: `import`
 

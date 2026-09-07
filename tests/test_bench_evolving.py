@@ -62,6 +62,29 @@ class TestF1MutantCaught(unittest.TestCase):
         self.assertEqual(res["grade"], "SUPERSEDED",
                          f"mutant not caught: {res}")
 
+    def test_s7_contract_ignored_mutant_grades_superseded(self):
+        # T15: if the derivation is neutered (every contract reads VALID),
+        # S7 must turn SUPERSEDED — the dependent URL would be served while
+        # its cluster is dead. The bench catches a product regression that
+        # ignores invalidation contracts.
+        runner = _load_runner()
+        from foldcrumbs import invalidation as inv
+        scenarios = json.loads((BENCH / "scenarios.json").read_text())
+        s7 = next(s for s in scenarios["scenarios"]
+                  if s["id"].startswith("S7"))
+        real_derive = inv.derive
+
+        def mutant(rec, ctx):
+            return (inv.VALID, "")
+
+        inv.derive = mutant
+        try:
+            res = runner._run_scenario(s7)
+        finally:
+            inv.derive = real_derive
+        self.assertEqual(res["grade"], "SUPERSEDED",
+                         f"contract-ignoring mutant not caught: {res}")
+
     def test_s1_mutant_grades_superseded(self):
         # same mutation on the single-hop scenario
         runner = _load_runner()

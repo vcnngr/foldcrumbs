@@ -109,14 +109,21 @@ def _cmd_remember(args: argparse.Namespace) -> int:
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
+    # INV design rev2 §D3: CLI and MCP serve the same honest view — the
+    # partition happens in one pass inside search; diagnostics ride the tail.
+    invalidated: list = []
     top = store.search(args.query, limit=args.limit,
-                       types=args.type or None, tags=args.tag or None)
+                       types=args.type or None, tags=args.tag or None,
+                       collect_invalidated=invalidated)
     if getattr(args, "index", False):
         # Layer 1 of 3: compact index — pair with `foldcrumbs fetch`.
         # RT F1: foreign hits are qualified <root_id>:<filename> and marked,
         # so fetch can never resolve them to a local homonym.
         if not top:
             print("(no matching memories)")
+            if invalidated:
+                print(f"({len(invalidated)} contract-carrying match(es) not "
+                      f"served as current — see full recall diagnostics)")
             return 0
         for m in top:
             name = m.source_path or m.filename()
@@ -127,9 +134,18 @@ def _cmd_recall(args: argparse.Namespace) -> int:
             else:
                 print(f"{name}  [{m.type}]  {m.title}  ({day})")
         print(f"-- {len(top)} hit(s); full text: foldcrumbs fetch <file> [...]")
+        if invalidated:
+            print(f"({len(invalidated)} contract-carrying match(es) not "
+                  f"served as current — see full recall diagnostics)")
         return 0
     block = format_context_block(top, heading=args.query)
-    print(block or "(no matching memories)")
+    print(block or ("(no matching memories)" if not invalidated
+                    else "(no matching memories served as current)"))
+    if invalidated:
+        from .mcp_server import _append_invalidated_tail
+        tail = _append_invalidated_tail("", invalidated).strip()
+        print()
+        print(tail)
     # AUTH design rev2 §D4: the authorization ledger is served with every
     # recall — grants excluded from search are useless if never surfaced.
     from . import authz
@@ -370,6 +386,13 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
         print(f"authorizations: {len(gaps)} finding(s)")
         for g in gaps:
             print(f"  ! {g}")
+    # INV design rev2 §D3: invalidation-contract health (repair view)
+    from . import invalidation as inv_mod
+    inv_lines = inv_mod.doctor_report()
+    if inv_lines:
+        print(f"contracts  : {len(inv_lines)} invalidation finding(s)")
+        for ln in inv_lines:
+            print(f"  ! {ln}")
     return 0
 
 

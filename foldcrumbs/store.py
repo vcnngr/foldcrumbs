@@ -180,6 +180,24 @@ class ForeignMemoryError(PermissionError):
     """
 
 
+class ContractProtectedError(PermissionError):
+    """Refused: the destination file carries an invalidation contract.
+
+    INV design rev2 §D4: contract-carrying records are create-only at
+    their destination. An upsert/re-ingest of identical content must NOT
+    silently replace such a record (new id, contract lost, served again
+    while the target is dead). Retire or repair the contract explicitly.
+    """
+
+
+def _read_one(path: Path):
+    """Parse one memory file, or None when unreadable/unparseable."""
+    try:
+        return MemoryRecord.from_markdown(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def _resolve_in_store(
     name: str, cwd: str | os.PathLike[str] | None = None
 ) -> Path | None:
@@ -551,6 +569,21 @@ def write_memory(
         return authz.mint(rec, cwd)
     d = _ensure_dir(cwd)
     target = d / rec.filename()
+    # INV design rev2 §D4: a record carrying an invalidation contract is
+    # CREATE-ONLY at its destination — no silent overwrite by upsert or
+    # destination collision (the rev1 hole: an identical re-ingest found no
+    # visible duplicate and os.replace'd the contract away). MAINTENANCE
+    # rewrites of the SAME record (source_path set — relations edges,
+    # archive/restore, decay) are exempt, mirroring the authz grant rule;
+    # the exemption is identity-based, never caller-declared.
+    if target.exists() and rec.source_path is None:
+        from . import invalidation
+        existing = _read_one(target)
+        if existing is not None and invalidation.carries_contract(existing):
+            raise ContractProtectedError(
+                f"{target.name}: existing memory carries an invalidation "
+                "contract — retire it explicitly (supersede/forget) or fix "
+                "the contract first; no silent overwrite")
     fd, tmp = tempfile.mkstemp(dir=str(d), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -658,6 +691,18 @@ def upsert(
         return "created", write_memory(rec, cwd)
     dup = find_duplicate(rec, cwd)
     if dup is not None:
+        # INV design rev2 §D4: validation would bump trust on a memory
+        # whose contract is dead — wrong signal. A near-duplicate of a
+        # contract-carrying record is a visible refusal, never a silent
+        # re-validation (and the destination-collision overwrite is
+        # refused by write_memory itself).
+        from . import invalidation as _inv
+        if _inv.carries_contract(dup):
+            raise ContractProtectedError(
+                f"{dup.filename()}: a near-duplicate memory carries an "
+                "invalidation contract — retire it explicitly "
+                "(supersede/forget) or fix the contract first; no silent "
+                "re-validation")
         dup.validate()
         path = write_memory(dup, cwd)
         return "validated", path
@@ -951,6 +996,7 @@ def search(
     tags: list[str] | None = None,
     federated: bool = True,
     include_contested: bool = False,
+    collect_invalidated: list | None = None,
 ) -> list[MemoryRecord]:
     """Grep-like search over active memories: substring + word-overlap + fuzzy.
 
@@ -988,6 +1034,16 @@ def search(
     # local store anyway, so holding it costs nothing — while leaving it lazy
     # meant the federated pass parsed every local file a second time.
     local, complete = _read_local(cwd)
+    # INV design rev2 §D2/§D3: one owner-scoped resolution context per
+    # operation, built from the scan search performs anyway (O(N+E), no
+    # extra IO on this path — T12 pins it). Contract-carrying candidates
+    # are partitioned out BEFORE scoring: the served list stays clean and
+    # the diagnostics tail (caller-provided list) carries the honest
+    # one-liners. Foreign records' contracts resolve only in the OWNER's
+    # context — from here they are UNRESOLVED, fail-closed, never served
+    # as current.
+    from . import invalidation as _inv
+    _ctx = _inv.ReadContext(local, complete=complete)
     # Foreign filenames are absent by construction: the sidecar is this
     # store's own observation of what it needed, and another instance's store
     # is never ours to write.
@@ -999,6 +1055,17 @@ def search(
     for m in candidates:
         if not _visible(m):
             continue
+        if _inv.carries_contract(m):
+            if m.is_foreign:
+                outcome, detail = (_inv.UNRESOLVED,
+                                   "contract lives in the owner store — "
+                                   "cannot verify from here")
+            else:
+                outcome, detail = _inv.derive(m, _ctx)
+            if outcome != _inv.VALID:
+                if collect_invalidated is not None:
+                    collect_invalidated.append((m, outcome, detail))
+                continue
         # AUTH design rev2 §D4: grants never compete in ordinary search —
         # they are served by the ledger section (authz.render_authorization_
         # section) with derived state, or not at all.
@@ -1152,13 +1219,25 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
     and the file diff-stable for Syncthing.
     """
     d = _ensure_dir(cwd)
-    mems = [m for m in iter_memories(cwd) if _visible(m)]
+    # INV design rev2 §D3: the index is a snapshot; snapshots do not derive.
+    # Contract-carrying memories are EXCLUDED structurally (whatever their
+    # current outcome — a snapshot published while B lived must not assert
+    # A as current after B dies) and counted in a pointer line; the hooks
+    # posture (SessionStart/PostCompact) inherits this exclusion because
+    # they read THIS file. Served reads (recall/fetch) derive live.
+    local_all, complete = _read_local(cwd)
+    from . import invalidation as _inv
+    _ctx = _inv.ReadContext(local_all, complete=complete)
+    contracted = [m for m in local_all if _inv.carries_contract(m)
+                  and _visible(m) and m.type != "authorization"]
+    mems = [m for m in local_all if _visible(m)
+            and not _inv.carries_contract(m)]
     # AUTH design rev2 §D4: grants are EXCLUDED from the static snapshot —
     # a snapshot predating expiry/backing-death must not present as live
     # truth. When grants exist the index carries a pointer line instead;
     # served reads (recall/fetch) derive state live.
-    grants = [m for m in mems if m.type == "authorization"]
-    mems = [m for m in mems if m.type != "authorization"]
+    grants = [m for m in local_all if _visible(m)
+              and m.type == "authorization"]
 
     grouped: dict[str, list[MemoryRecord]] = {}
     for m in mems:
@@ -1196,6 +1275,16 @@ def rebuild_index(cwd: str | os.PathLike[str] | None = None) -> Path:
             f"- {len(grants)} grant(s) withheld from this snapshot — "
             "served live via `foldcrumbs recall` (snapshot states can be "
             "stale). Verify before acting.")
+        lines.append("")
+    if contracted:
+        # INV design rev2 §D3: a pointer, never an assertion — the same
+        # posture as the grants line above.
+        lines.append("## Invalidation contracts")
+        lines.append(
+            f"- {len(contracted)} memory/memories carry invalidation "
+            "contracts — withheld from this snapshot; served live via "
+            "`foldcrumbs recall` with current contract state. Verify "
+            "before use.")
         lines.append("")
 
     target = d / config.INDEX_NAME

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Invalidation contracts** — a new `invalidated_by` relation predicate
+  (arXiv 2609.00243): "this memory holds only while that one holds".
+  When the target dies (superseded, archived, expired, hard-forgotten),
+  the dependent leaves the served context — derived on every read, never
+  cascaded, no daemon. Contracts do not chain (single-hop, base-alive);
+  unresolvable targets fail closed as dangling and are listed by
+  `doctor` for repair; recall shows up to 3 honest diagnostic lines for
+  withheld matches; `fetch` envelopes the raw file; contract-carrying
+  records are create-only at their destination (no upsert can silently
+  overwrite a contract away); graph traversal untouched; index and
+  federation shard exclude contract-carrying memories with pointer
+  lines (snapshots do not derive); the authorization ledger renders
+  both states (UNBACKED + INVALIDATED) when a grant carries a contract.
+  Bench scenario S7 pins it in CI. Design + T1-T15 matrix:
+  docs/design/invalidated-by.md.
 - **Authorization integrity** — a new `authorization` memory type that
   makes permissions a typed ledger instead of laundered prose (arXiv
   2609.01836). A grant exists only with a live local `event`/`decision`
