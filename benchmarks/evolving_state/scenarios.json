@@ -1,0 +1,89 @@
+{
+  "name": "foldcrumbs evolving-state mini-bench",
+  "inspired_by": "StateMemBench (arXiv 2608.19652) — closed-pool grading of whether a memory system serves the CURRENT state or a superseded one. Their dataset is not public; this is our own smaller, fully reproducible version. No LLM calls: deterministic stdlib-only, runs in CI time.",
+  "grading": {
+    "CURRENT": "the served context reflects the current state",
+    "SUPERSEDED": "the served context leads with an obsolete state",
+    "FAIL": "neither — the query served nothing usable"
+  },
+  "scenarios": [
+    {
+      "id": "S1-supersede-chain",
+      "desc": "a decision is superseded by a newer one; recall must serve the NEW text and must not lead with the old",
+      "topic": "deploy window",
+      "setup": [
+        {"op": "remember", "key": "old", "title": "Deploy window", "content": "We deploy on Fridays at 18:00 UTC.", "type": "decision"},
+        {"op": "remember", "key": "new", "title": "Deploy window v2", "content": "We deploy Tuesdays 10-12 UTC, never Fridays.", "type": "decision"},
+        {"op": "supersede", "old": "old", "new": "new"}
+      ],
+      "query": "deploy window",
+      "expect_current_key": "new",
+      "forbid_key": "old"
+    },
+    {
+      "id": "S2-expiry",
+      "desc": "a memory past its expiry must leave the served view entirely",
+      "topic": "trial license",
+      "setup": [
+        {"op": "remember", "key": "expired", "title": "Trial license", "content": "The trial license covers staging until last month.", "type": "fact", "expires_in_days": -5}
+      ],
+      "query": "trial license staging",
+      "expect_current_key": null,
+      "forbid_key": "expired"
+    },
+    {
+      "id": "S3-contradiction-penalty",
+      "desc": "a memory judged bad stays visible (history is not hidden) but must be served with the tentative marker; search ranking is relevance-based by design (FL-2), the penalty lives in compute_confidence",
+      "topic": "cache config",
+      "setup": [
+        {"op": "remember", "key": "bad", "title": "Cache TTL", "content": "Set the cache TTL to 300 seconds for the API layer.", "type": "fact"},
+        {"op": "outcome_bad", "target": "bad"},
+        {"op": "remember", "key": "good", "title": "Cache TTL corrected", "content": "The API cache TTL is 60 seconds; 300 caused stale reads.", "type": "fact"}
+      ],
+      "query": "cache TTL api",
+      "expect_current_key": "good",
+      "expect_tentative_key": "bad"
+    },
+    {
+      "id": "S4-archived",
+      "desc": "an archived memory must not be served",
+      "topic": "oncall rotation",
+      "setup": [
+        {"op": "remember", "key": "arch", "title": "Oncall rotation", "content": "Marco is oncall this week for payments.", "type": "fact"},
+        {"op": "archive", "target": "arch"}
+      ],
+      "query": "oncall payments",
+      "expect_current_key": null,
+      "forbid_key": "arch"
+    },
+    {
+      "id": "S5-transit-no-authority",
+      "desc": "walking a superseded memory via transit must not make it a served answer",
+      "topic": "auth provider",
+      "setup": [
+        {"op": "remember", "key": "old", "title": "Auth provider", "content": "We use Auth0 for customer auth.", "type": "decision"},
+        {"op": "remember", "key": "new", "title": "Auth provider v2", "content": "We migrated customer auth to Keycloak.", "type": "decision"},
+        {"op": "supersede", "old": "old", "new": "new"},
+        {"op": "transit", "target": "old"}
+      ],
+      "query": "customer auth provider",
+      "expect_current_key": "new",
+      "forbid_key": "old"
+    },
+    {
+      "id": "S6-two-hops",
+      "desc": "a chain of two supersessions must serve only the newest",
+      "topic": "queue choice",
+      "setup": [
+        {"op": "remember", "key": "v1", "title": "Queue", "content": "We use RabbitMQ for the job queue.", "type": "decision"},
+        {"op": "remember", "key": "v2", "title": "Queue v2", "content": "We moved the job queue to Kafka.", "type": "decision"},
+        {"op": "remember", "key": "v3", "title": "Queue v3", "content": "The job queue is Redis Streams now.", "type": "decision"},
+        {"op": "supersede", "old": "v1", "new": "v2"},
+        {"op": "supersede", "old": "v2", "new": "v3"}
+      ],
+      "query": "job queue",
+      "expect_current_key": "v3",
+      "forbid_key": "v1"
+    }
+  ]
+}
