@@ -685,6 +685,87 @@ class TestRtRound2P0(AuthBase):
         self.assertEqual(rec.status, "active")
 
 
+    def test_f1r3_overlong_frontmatter_still_refused(self):
+        # RT r3 residual (GPT): the bounded 80-line scan missed a type key
+        # buried past the limit. The parser-based check cannot be evaded by
+        # padding the frontmatter.
+        from foldcrumbs import cli as cli_mod
+        src_root = Path(self._state) / "migrate_src_long"
+        src_root.mkdir(parents=True)
+        g = _grant(title="Buried grant", backed_by=self.event.id)
+        text = g.to_markdown()
+        # re-emit with 200 filler keys BEFORE the type line
+        head, rest = text.split("---\n", 1)
+        body_fm, content = rest.split("---\n", 1)
+        filler = "".join(f"filler_{i}: pad\n" for i in range(200))
+        type_line = ""
+        kept = []
+        for line in body_fm.splitlines(keepends=True):
+            if line.startswith("type:"):
+                type_line = line
+            else:
+                kept.append(line)
+        (src_root / g.filename()).write_text(
+            "---\n" + "".join(kept) + filler + type_line + "---\n" + content,
+            encoding="utf-8")
+        real_md = _c.memory_dir
+
+        def routed_md(cwd=None):
+            if cwd is not None and str(cwd) == "SRC_LONG":
+                return src_root
+            return real_md()
+        _c.memory_dir = routed_md
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = cli_mod._cmd_migrate(
+                    argparse.Namespace(from_dir="SRC_LONG", force=True))
+        finally:
+            _c.memory_dir = real_md
+        self.assertEqual(rc, 0)
+        names = {m.filename() for m in
+                 store.iter_memories_including_retired(self.dir)}
+        self.assertNotIn(g.filename(), names)
+        self.assertIn("refused", buf.getvalue().lower())
+
+    def test_f1r3_duplicate_type_key_last_wins_refused(self):
+        # RT r3 residual (GPT): duplicate `type` keys — the store parser
+        # takes the LAST value; the line-scan took the first. A file that
+        # reads type: fact first and type: authorization last is a grant
+        # to the parser, so migrate must refuse it.
+        from foldcrumbs import cli as cli_mod
+        src_root = Path(self._state) / "migrate_src_dup"
+        src_root.mkdir(parents=True)
+        f = MemoryRecord(title="Two faced", content="ordinary.", type="fact")
+        text = f.to_markdown()
+        head, rest = text.split("---\n", 1)
+        body_fm, content = rest.split("---\n", 1)
+        forged = "---\n" + body_fm + "type: authorization\n---\n" + content
+        (src_root / f.filename()).write_text(forged, encoding="utf-8")
+        # sanity: the canonical parser must see it as a grant
+        self.assertEqual(MemoryRecord.from_markdown(forged).type,
+                         "authorization")
+        real_md = _c.memory_dir
+
+        def routed_md(cwd=None):
+            if cwd is not None and str(cwd) == "SRC_DUP":
+                return src_root
+            return real_md()
+        _c.memory_dir = routed_md
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = cli_mod._cmd_migrate(
+                    argparse.Namespace(from_dir="SRC_DUP", force=True))
+        finally:
+            _c.memory_dir = real_md
+        self.assertEqual(rc, 0)
+        names = {m.filename() for m in
+                 store.iter_memories_including_retired(self.dir)}
+        self.assertNotIn(f.filename(), names)
+        self.assertIn("refused", buf.getvalue().lower())
+
+
 class TestRtRound2P1(AuthBase):
     """F4-F7 (P1): trace wired into recall, uuid-identity collision,
     doctor expiry coverage, index pointer line."""

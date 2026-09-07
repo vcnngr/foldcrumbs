@@ -1114,20 +1114,23 @@ _strip_reserved_transit = _strip_reserved_keys
 
 
 def _is_authorization_text(text: str) -> bool:
-    """True when a memory file's frontmatter declares type: authorization.
+    """True when a memory file declares type: authorization.
 
-    Cheap line scan (no full parse): migrate only needs the refusal
-    decision, and a file that cannot be recognized stays a copy —
-    grants are recognizable by construction (we write the line).
+    RT r3 (GPT F1 residual): a bounded line-scan missed the type key in
+    over-long frontmatter and was fooled by duplicate keys. The real
+    parser is the canonical contract — what from_markdown derives is
+    what the store would serve, so that is what migrate must refuse on.
+    Unparseable text degrades to "not an authorization": migrate copies
+    ordinary/unknown files as before (they carry no authority by
+    construction — the store's own mint gate stands behind this).
     """
     if not text.startswith("---"):
         return False
-    for line in text.split("\n")[1:80]:   # frontmatter is short; bounded
-        if line.startswith("---"):
-            break
-        if line.strip().lower().startswith("type:"):
-            return line.split(":", 1)[1].strip().lower() == "authorization"
-    return False
+    try:
+        from .schema import MemoryRecord
+        return MemoryRecord.from_markdown(text).type == "authorization"
+    except Exception:
+        return False
 
 
 def _migrate_copy_tree_filtered(src_dir: Path, dst_dir: Path) -> int:
