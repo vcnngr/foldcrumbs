@@ -39,9 +39,10 @@ foldcrumbs timeline decision_postgres_migration.md --window 5
 
 `recall` without `--index` returns the full context block directly — fine
 for small stores, wasteful on token budget for large ones. `answer`
-exists ("answer this question grounded in memory") but needs an LLM
-endpoint configured (`FOLDCRUMBS_LLM_*`); without it, `recall` is your
-answer path.
+exists ("answer this question grounded in memory"); with an LLM
+endpoint configured (`FOLDCRUMBS_LLM_*`) it composes the answer, and
+without one it degrades to serving the relevant memories as raw
+context.
 
 ## What the tool will NOT hide from you (and what it hides for you)
 
@@ -153,11 +154,15 @@ from the outside; nothing in foldcrumbs needs to change for that.)
 | `FOLDCRUMBS_G2=1` | relation proposals during distill (default off) |
 
 Everything degrades gracefully, but know what degradation means: no LLM
-configured → `recall`/`remember` work fully; `answer`/`checkpoint` refuse
-politely; **`distill` still runs** — it falls back to a keyword heuristic
-and writes memories from it (they carry `provenance: inferred` and lower
-confidence). No semantic endpoint → lexical ranking only. That is the
-design, not a failure mode.
+configured → `recall`/`remember` work fully; `answer` returns the
+relevant memories as raw context instead of a composed answer;
+**`distill` still runs** — it falls back to a keyword heuristic and
+writes memories from it (they carry `provenance: inferred` and lower
+confidence); `checkpoint` still writes a handoff — its fallback is the
+scrubbed transcript tail, clearly marked `_(LLM unavailable — raw
+tail)_`. Nothing that degrades stops silently pretending to be the
+LLM version: every fallback labels itself. No semantic endpoint →
+lexical ranking only. That is the design, not a failure mode.
 
 ## MCP
 
