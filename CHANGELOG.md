@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`adopt --check-fresh`** — read-only stale-adoption report (paper
+  arXiv 2609.03340, "Fresh Memory, Stale Plans"): every attested
+  adoption is re-resolved in its source root and classified
+  `fresh` / `source_changed` / `source_dead` / `source_gone` /
+  `source_unreachable`. Incomplete scans never masquerade as evidence
+  of loss (unreachable, not gone); same-second edits are inside the
+  documented tolerance. Strictly read-only — never syncs, never
+  writes, never touches the local copies; rows whose local copy is
+  retired are context, not alarms. Available on the CLI flag and the
+  MCP `adopt` tool (`check_fresh: true`). Also closes the FL-3 P1:
+  `limit` is now declared in the MCP `adopt` catalog.
 - **Invalidation contracts** — a new `invalidated_by` relation predicate
   (arXiv 2609.00243): "this memory holds only while that one holds".
   When the target dies (superseded, archived, expired, hard-forgotten),

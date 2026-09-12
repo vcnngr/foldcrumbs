@@ -116,7 +116,10 @@ registered stores; their memories appear in recall as foreign hits
 another instance's store is refused everywhere — including for grants and
 contradictions: claims are recorded (`supersedes_external`) and wait for
 the owner instance to act. `adopt` copies a foreign memory into your store
-with provenance intact; `outcome` records whether an adopted memory proved
+with provenance intact; `adopt --check-fresh` (or the MCP `adopt` tool with
+`check_fresh: true`) is a read-only report on whether each adopted source
+has since changed, died, or vanished — freshness as information, never
+automatic sync. `outcome` records whether an adopted memory proved
 good or bad in practice (bad penalizes weight, it never hides the memory —
 it gets served with a `(tentative)` marker).
 

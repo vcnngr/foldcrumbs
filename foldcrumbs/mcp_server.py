@@ -219,7 +219,9 @@ TOOLS = [
             "unknown root, unstable/ambiguous id, non-live original, "
             "destination collision, already adopted. Pass 'search' + "
             "'from_root' instead of 'ref' to list live candidates without "
-            "adopting."
+            "adopting. Pass 'check_fresh': true (no ref) for a READ-ONLY "
+            "stale-adoption report: which sources changed, died, or "
+            "vanished since adoption — it never syncs and never writes."
         ),
         "inputSchema": {
             "type": "object",
@@ -238,6 +240,12 @@ TOOLS = [
                 "from_root": {"type": "string",
                               "description": "Root id to search in "
                                              "(with 'search')."},
+                "limit": {"type": "integer",
+                          "description": "Max candidates for 'search' "
+                                         "(default 10, must be >= 0)."},
+                "check_fresh": {"type": "boolean",
+                                "description": "Read-only stale-adoption "
+                                               "report; ignores ref/search."},
             },
             "required": [],
         },
@@ -857,6 +865,28 @@ def tool_ingest(args: dict[str, Any]) -> str:
 
 def tool_adopt(args: dict[str, Any]) -> str:
     from . import adopt as adopt_mod
+    if args.get("check_fresh"):
+        # read-only stale-adoption report (never syncs, never writes)
+        try:
+            rows = adopt_mod.check_fresh()
+        except adopt_mod.AdoptError as exc:
+            return f"refused: {exc}"
+        if not rows:
+            return "no adoptions in the ledger — nothing to check."
+        lines = []
+        actionable = 0
+        for r in rows:
+            retired = "  [local copy retired]" if r["local_retired"] else ""
+            mark = "ok" if r["status"] == "fresh" else "STALE"
+            if r["status"] != "fresh" and not r["local_retired"]:
+                actionable += 1
+            lines.append(f"  {mark} {r['filename']} <- "
+                         f"{r['source_root'][:8]}…  {r['status']}{retired}")
+            if r["detail"]:
+                lines.append(f"       {r['detail']}")
+        lines.append(f"{len(rows)} adoption(s) checked, {actionable} "
+                     "actionable (stale source under an active local copy)")
+        return "\n".join(lines)
     search = str(args.get("search") or "")
     if search:
         from_root = str(args.get("from_root") or "")

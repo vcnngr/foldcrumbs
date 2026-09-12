@@ -265,6 +265,30 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 def _cmd_adopt(args: argparse.Namespace) -> int:
     from . import adopt as adopt_mod
     from .schema import VALID_TYPES
+    if getattr(args, "check_fresh", False):
+        # read-only stale-adoption report; never syncs, never writes
+        try:
+            rows = adopt_mod.check_fresh()
+        except adopt_mod.AdoptError as exc:
+            print(f"adopt: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        if not rows:
+            print("no adoptions in the ledger — nothing to check")
+            return 0
+        actionable = 0
+        for r in rows:
+            retired = "  [local copy retired]" if r["local_retired"] else ""
+            mark = "ok " if r["status"] == "fresh" else "STALE"
+            if r["status"] != "fresh" and not r["local_retired"]:
+                actionable += 1
+            print(f"  {mark} {r['filename']} <- "
+                  f"{r['source_root'][:8]}…:{r['source_memory_id'][:8]}…"
+                  f"  {r['status']}{retired}")
+            if r["detail"]:
+                print(f"       {r['detail']}")
+        print(f"\n{len(rows)} adoption(s) checked, {actionable} actionable "
+              "(stale source under an active local copy)")
+        return 0
     if args.as_type and args.as_type not in VALID_TYPES:
         print(f"adopt refused: --as-type must be one of "
               f"{', '.join(sorted(VALID_TYPES))} (got {args.as_type!r})",
@@ -1472,6 +1496,9 @@ def build_parser() -> argparse.ArgumentParser:
     ad.add_argument("--limit", type=int, default=10, help="max candidates for --search")
     ad.add_argument("--note", help="adoption note stored in the ledger (evidence)")
     ad.add_argument("--as-type", dest="as_type", help="re-type the copy on adoption")
+    ad.add_argument("--check-fresh", dest="check_fresh", action="store_true",
+                    help="read-only: report adoptions whose SOURCE changed, "
+                         "died, or vanished (never syncs, never writes)")
     ad.set_defaults(func=_cmd_adopt)
 
     oc = sub.add_parser("outcome",

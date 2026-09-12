@@ -218,6 +218,124 @@ def _check_live(src: MemoryRecord) -> None:
             "retired memory")
 
 
+def check_fresh(cwd=None) -> list[dict]:
+    """Stale-adoption report (paper 2609.03340 — Fresh Memory, Stale Plans).
+
+    READ-ONLY: never touches the local copies, never writes the ledger,
+    never syncs. For every attested adoption, re-resolve the SOURCE in its
+    root and classify:
+
+    * ``fresh``            — source alive, not edited since adoption
+    * ``source_changed``  — alive, but updated_at moved after adopted_at
+    * ``source_dead``     — alive on disk but retired at source
+                             (superseded/archived/deleted/expired)
+    * ``source_gone``     — the id no longer resolves in the source root
+    * ``source_unreachable`` — the root is deregistered or its store
+                             directory is unavailable
+
+    Each row also carries ``local_retired`` when OUR copy is no longer
+    active — a stale source under a retired copy is context, not an
+    actionable alarm.
+
+    Incomplete scans are reported honestly: if the source root cannot be
+    fully read, a miss is ``source_unreachable`` ("incomplete scan"),
+    never ``source_gone`` — loss of evidence must not masquerade as
+    evidence of loss (same posture as invalidation D2).
+    """
+    ledger = read_ledger(cwd)           # fail-closed on corrupt ledger
+    rows: list[dict] = []
+    roots: dict = {}                    # root_id -> RootRef | None, cached
+    scans: dict = {}                    # root_id -> (records, complete)
+
+    for copy_id, entry in sorted(ledger.items()):
+        row = {
+            "memory_id": copy_id,
+            "filename": entry.get("filename", ""),
+            "source_root": entry.get("root_id", ""),
+            "source_memory_id": entry.get("memory_id", ""),
+            "adopted_at": entry.get("adopted_at", ""),
+            "status": "fresh",
+            "detail": "",
+            "local_retired": False,
+        }
+        rows.append(row)
+
+        # our own copy's state is context, not the verdict
+        local = store.get(row["filename"], cwd)
+        if local is None or local.status != "active" or local.is_expired:
+            row["local_retired"] = True
+
+        rid = entry.get("root_id", "")
+        if rid not in roots:
+            roots[rid] = federation.get_root(rid)
+        root = roots[rid]
+        if root is None:
+            row["status"] = "source_unreachable"
+            row["detail"] = (f"root {rid[:8]}… is no longer registered "
+                             "— the source cannot be consulted from here")
+            continue
+
+        if rid not in scans:
+            memdir = root.memory_dir(cwd)
+            if not memdir.is_dir():
+                scans[rid] = (None, False)
+            else:
+                report: dict = {}
+                recs = list(store.iter_memories_in(memdir, report=report))
+                scans[rid] = (recs, bool(report.get("complete", False)))
+        recs, complete = scans[rid]
+        if recs is None:
+            row["status"] = "source_unreachable"
+            row["detail"] = ("source root store is unavailable "
+                             "(directory missing)")
+            continue
+
+        src = next((r for r in recs if r.id == entry.get("memory_id")), None)
+        if src is None:
+            if not complete:
+                row["status"] = "source_unreachable"
+                row["detail"] = ("source root could not be scanned "
+                                 "completely — cannot say whether the "
+                                 "original still exists")
+            else:
+                row["status"] = "source_gone"
+                row["detail"] = ("the original no longer exists in the "
+                                 "source root (complete scan)")
+            continue
+
+        if src.status != "active":
+            row["status"] = "source_dead"
+            row["detail"] = (f"original was {src.status} at the source — "
+                             "it left their active view")
+        elif src.is_expired:
+            row["status"] = "source_dead"
+            row["detail"] = "original expired at the source"
+        else:
+            adopted = _parse_iso(entry.get("adopted_at", ""))
+            # both sides truncated to whole seconds: the ledger stamps
+            # adopted_at at second precision (_now_iso), while updated_at
+            # carries microseconds — comparing raw would flag the adoption
+            # write itself as a later edit. Same-second edits are therefore
+            # NOT detected; that is the documented tolerance (a stale
+            # source one second newer is caught, sub-second noise is not).
+            if (adopted is not None
+                    and src.updated_at.replace(microsecond=0)
+                    > adopted.replace(microsecond=0)):
+                row["status"] = "source_changed"
+                row["detail"] = ("original was edited after adoption "
+                                 f"({src.updated_at.isoformat()}) — the "
+                                 "local copy may be stale")
+    return rows
+
+
+def _parse_iso(text: str):
+    try:
+        # Z suffix: fromisoformat accepts it only on 3.11+; CI runs 3.10
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def _copy_of(src: MemoryRecord, root_id: str, note: str = "",
              as_type: str | None = None) -> MemoryRecord:
     """Build the local copy per the design's field contract (RT F4/F5)."""
