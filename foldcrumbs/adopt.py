@@ -218,6 +218,165 @@ def _check_live(src: MemoryRecord) -> None:
             "retired memory")
 
 
+def check_fresh(cwd=None) -> list[dict]:
+    """Stale-adoption report (paper 2609.03340 — Fresh Memory, Stale Plans).
+
+    READ-ONLY: never touches the local copies, never writes the ledger,
+    never syncs. For every attested adoption, re-resolve the SOURCE in its
+    root and classify:
+
+    * ``fresh``            — source alive, not edited since adoption
+    * ``source_changed``  — alive, but updated_at moved after adopted_at
+    * ``source_dead``     — alive on disk but retired at source
+                             (superseded/archived/deleted/expired)
+    * ``source_gone``     — the id no longer resolves in the source root
+    * ``source_unreachable`` — the root is deregistered or its store
+                             directory is unavailable
+
+    Each row also carries ``local_retired`` when OUR copy is no longer
+    active — a stale source under a retired copy is context, not an
+    actionable alarm.
+
+    Incomplete scans are reported honestly: if the source root cannot be
+    fully read, a miss is ``source_unreachable`` ("incomplete scan"),
+    never ``source_gone`` — loss of evidence must not masquerade as
+    evidence of loss (same posture as invalidation D2).
+    """
+    ledger = read_ledger(cwd)           # fail-closed on corrupt ledger
+    rows: list[dict] = []
+    roots: dict = {}                    # root_id -> RootRef | None, cached
+    scans: dict = {}                    # root_id -> (records, complete)
+
+    for copy_id, entry in sorted(ledger.items()):
+        row = {
+            "memory_id": copy_id,
+            "filename": entry.get("filename", ""),
+            "source_root": entry.get("root_id", ""),
+            "source_memory_id": entry.get("memory_id", ""),
+            "adopted_at": entry.get("adopted_at", ""),
+            "status": "fresh",
+            "detail": "",
+            "local_retired": False,
+        }
+        rows.append(row)
+
+        # our own copy's state is context, not the verdict
+        local = store.get(row["filename"], cwd)
+        if local is None or local.status != "active" or local.is_expired:
+            row["local_retired"] = True
+
+        rid = entry.get("root_id", "")
+        if rid not in roots:
+            roots[rid] = federation.get_root(rid)
+        root = roots[rid]
+        if root is None:
+            row["status"] = "source_unreachable"
+            row["detail"] = (f"root {rid[:8]}… is no longer registered "
+                             "— the source cannot be consulted from here")
+            continue
+
+        if rid not in scans:
+            memdir = root.memory_dir(cwd)
+            if not memdir.is_dir():
+                scans[rid] = (None, False)
+            else:
+                report: dict = {}
+                recs = list(store.iter_memories_in(memdir, report=report))
+                scans[rid] = (recs, bool(report.get("complete", False)))
+        recs, complete = scans[rid]
+        if recs is None:
+            row["status"] = "source_unreachable"
+            row["detail"] = ("source root store is unavailable "
+                             "(directory missing)")
+            continue
+
+        matches = [r for r in recs if r.id == entry.get("memory_id")]
+        if not matches:
+            if not complete:
+                row["status"] = "source_unreachable"
+                row["detail"] = ("source root could not be scanned "
+                                 "completely — cannot say whether the "
+                                 "original still exists")
+            else:
+                row["status"] = "source_gone"
+                row["detail"] = ("the original no longer exists in the "
+                                 "source root (complete scan)")
+            continue
+        if len(matches) > 1:
+            # RT r1 F2: first-match made the verdict depend on filename
+            # ordering. Ambiguous identity is UNCERTAIN, never a pick.
+            row["status"] = "source_unreachable"
+            row["detail"] = (f"ambiguous source id: {len(matches)} records "
+                             "in the source root share it — cannot say "
+                             "which one was adopted")
+            continue
+        src = matches[0]
+        if not complete:
+            # found, but an incomplete scan cannot PROVE uniqueness (the
+            # unread files may hold a twin) — observation without certainty
+            row["status"] = "source_unreachable"
+            row["detail"] = ("source root could not be scanned completely "
+                             f"— a record was found (status={src.status}) "
+                             "but its identity cannot be proven unique")
+            continue
+
+        if src.status != "active":
+            row["status"] = "source_dead"
+            row["detail"] = (f"original was {src.status} at the source — "
+                             "it left their active view")
+        elif src.is_expired:
+            row["status"] = "source_dead"
+            row["detail"] = "original expired at the source"
+        else:
+            # RT r1 F3: an attested date must be usable — an unparseable
+            # adopted_at is ledger corruption for THIS operation and is
+            # refused visibly, never defaulted to "fresh".
+            adopted = _parse_iso(entry.get("adopted_at", ""))
+            if adopted is None:
+                raise AdoptError(
+                    f"adoption ledger entry {copy_id[:8]}… has an unusable "
+                    f"adopted_at ({entry.get('adopted_at')!r}) — refusing "
+                    "to call anything fresh on a date that cannot be read; "
+                    f"fix or re-attest the entry in {LEDGER}")
+            if getattr(src, "updated_at_missing", False):
+                # RT r1 F4 (P1, fixed): a legacy source without updated_at
+                # gets one INVENTED by the parser — invention is not
+                # evidence of an edit. Report the limitation, not a fake
+                # source_changed.
+                row["detail"] = ("source alive, but it carries no "
+                                 "updated_at timestamp — edit history "
+                                 "cannot be verified")
+                continue
+            # both sides truncated to whole seconds: the ledger stamps
+            # adopted_at at second precision (_now_iso), while updated_at
+            # carries microseconds — comparing raw would flag the adoption
+            # write itself as a later edit. Same-second edits are therefore
+            # NOT detected; that is the documented tolerance (a stale
+            # source one second newer is caught, sub-second noise is not).
+            if (src.updated_at.replace(microsecond=0)
+                    > adopted.replace(microsecond=0)):
+                row["status"] = "source_changed"
+                row["detail"] = ("original was edited after adoption "
+                                 f"({src.updated_at.isoformat()}) — the "
+                                 "local copy may be stale")
+    return rows
+
+
+def _parse_iso(text: str):
+    """Parse an attested timestamp, normalizing naive to UTC (the schema
+    convention) so comparisons never raise TypeError. Returns None when
+    the value is unusable — callers must treat that as corruption, not
+    as 'no reason to complain' (RT r1 F3)."""
+    try:
+        # Z suffix: fromisoformat accepts it only on 3.11+; CI runs 3.10
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _copy_of(src: MemoryRecord, root_id: str, note: str = "",
              as_type: str | None = None) -> MemoryRecord:
     """Build the local copy per the design's field contract (RT F4/F5)."""

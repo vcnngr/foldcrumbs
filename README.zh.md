@@ -481,6 +481,7 @@ foldcrumbs adopt --search "部署窗口" --from <root_id>   # 列出活跃候选
 foldcrumbs adopt <root_id>:<记忆文件> --note "对我们也成立"
 foldcrumbs outcome <记忆> good|bad --note 证据       # 结果回路
 foldcrumbs outcome --list                            # 判定结果，标注采用来源
+foldcrumbs adopt --check-fresh                       # 陈旧采用报告（只读）
 ```
 
 `adopt` **一次只复制一条记忆** — 批量采用就是同步，而同步正是它拒绝的。
@@ -492,6 +493,15 @@ foldcrumbs outcome --list                            # 判定结果，标注采�
 frontmatter 里：文件可以在自己的 `source` 上说谎，台账无法被导入。
 台账损坏时拒绝采用而不是猜测；目标文件名冲突一律拒绝 — 采用永不覆盖；
 只有*活跃*的原件可被采用（superseded、deleted、provisional 或已过期的记忆留在原处）。
+
+`adopt --check-fresh` 回答台账无法回答的问题：*自我们复制以来，源记忆是否
+仍然活跃且未变更？*每条已认证的采用都会在其源 root 中重新解析并分类：
+`fresh`、`source_changed`（采用后被编辑 — 秒级容差）、`source_dead`（在源端
+已退役）、`source_gone`（完整扫描后 id 不再存在）或 `source_unreachable`
+（root 已注销、存储不可用、源 id 歧义或扫描不完整 — 证据丢失绝不会被当作丢失的
+证据）。无法读取的 `adopted_at` 认证时间戳会被显式拒绝，绝不默认按 "fresh" 处理。
+它是严格**只读**的：绝不同步、绝不写入、绝不触碰本地副本 — 新鲜度是信息，
+不是自动化。本地副本已退役的行会标记为上下文而非警报。
 
 `outcome` 记录实际发生了什么：`good` 增加 `validation_count`，
 `bad` 设置持久化的矛盾标志 — 且惩罚永不提升（被矛盾后的权重上限为

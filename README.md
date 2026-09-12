@@ -516,6 +516,7 @@ foldcrumbs adopt --search "deploy window" --from <root_id>   # live candidates, 
 foldcrumbs adopt <root_id>:<memory-file> --note "held for us too"
 foldcrumbs outcome <memory> good|bad --note EVIDENCE # the outcome loop
 foldcrumbs outcome --list                            # verdicts, adoptions annotated
+foldcrumbs adopt --check-fresh                       # stale-adoption report (read-only)
 ```
 
 `adopt` copies **one memory at a time** — batch adoption is sync, and sync
@@ -530,6 +531,18 @@ be imported. A corrupt ledger refuses adoption rather than guessing; a
 destination filename collision is always refused — adoption never
 overwrites; and only *live* originals are adoptable (superseded, deleted,
 provisional or expired memories stay where they are).
+
+`adopt --check-fresh` answers the question the ledger cannot: *is the source
+still alive and unchanged since we copied it?* Every attested adoption is
+re-resolved in its root and reported as `fresh`, `source_changed` (edited
+after adoption — second-granularity tolerance), `source_dead` (retired at
+the source), `source_gone` (complete scan, id no longer resolves) or
+`source_unreachable` (root deregistered, store unavailable, ambiguous
+source id, or an incomplete scan — loss of evidence is never reported as
+evidence of loss). An unusable attested `adopted_at` is refused visibly,
+never defaulted to "fresh". It is strictly **read-only**: it never syncs, never writes, never touches
+the local copies — freshness is information, not automation. Rows whose
+local copy is already retired are marked as context, not alarms.
 
 `outcome` records what actually happened: `good` bumps `validation_count`,
 `bad` sets the persisted contradiction flag — and a penalty never promotes

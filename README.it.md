@@ -520,6 +520,7 @@ foldcrumbs adopt --search "finestra di deploy" --from <root_id>   # candidati vi
 foldcrumbs adopt <root_id>:<file-memoria> --note "ha retto anche da noi"
 foldcrumbs outcome <memoria> good|bad --note EVIDENZA  # il ciclo degli esiti
 foldcrumbs outcome --list                            # verdetti, adozioni annotate
+foldcrumbs adopt --check-fresh                       # report adozioni stale (read-only)
 ```
 
 `adopt` copia **una memoria alla volta** — l'adozione in massa è sync, ed è
@@ -536,6 +537,21 @@ invece di tirare a indovinare; una collisione sul filename di destinazione
 è sempre rifiutata — l'adozione non sovrascrive mai; e solo gli originali
 *vivi* sono adottabili (memorie superseded, deleted, provisional o scadute
 restano dove sono).
+
+`adopt --check-fresh` risponde alla domanda a cui il ledger non può
+rispondere: *la sorgente è ancora viva e invariata da quando l'abbiamo
+copiata?* Ogni adozione attestata viene ri-risolta nel suo root e
+classificata: `fresh`, `source_changed` (modificata dopo l'adozione —
+tolleranza al secondo), `source_dead` (ritirata alla sorgente),
+`source_gone` (scansione completa, l'id non esiste più) o
+`source_unreachable` (root deregistrato, store non disponibile, id sorgente
+ambiguo, scansione incompleta — la perdita di evidenza non viene mai
+spacciata per evidenza di perdita). Un `adopted_at` attestato illeggibile
+viene rifiutato visibilmente, mai degradato a "fresh" di default.
+È strettamente **read-only**: non sincronizza, non scrive,
+non tocca le copie locali — la freschezza è informazione, non
+automazione. Le righe la cui copia locale è già ritirata sono segnalate
+come contesto, non come allarmi.
 
 `outcome` registra ciò che è successo davvero: `good` incrementa
 `validation_count`, `bad` imposta il flag di contraddizione persistente — e
