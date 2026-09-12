@@ -53,21 +53,27 @@ results" has several distinct meanings:
 |---|---|---|
 | `status: archived` | decayed out of relevance, not wrong | `foldcrumbs restore <file>` |
 | `status: superseded` | replaced by a newer memory | follow `superseded_by` in the frontmatter |
-| `expired_at` in the past | it had a date and the date passed | rewrite it fresh; expiry is never extended silently |
-| `contested_by` set | two instances disagree; recall serves **neither side** | `foldcrumbs conflicts` lists the pair + exact resolution command |
+| `expires_at` in the past | it had a date and the date passed | rewrite it fresh; expiry is never extended silently |
+| `contested_by` set | another instance claims this memory is superseded; recall hides **this record** — the claimer's own newer memory may still be served (claims are directional, not symmetric). Read `conflicts` before picking a side | `foldcrumbs conflicts` lists the claim + exact resolution command |
 | `invalidated_by` target died | the fact it depended on is gone | `foldcrumbs doctor` lists dangling/invalidated contracts |
 | type `authorization` | grants are served **only** through the ledger section with derived state (ACTIVE/EXPIRED/UNBACKED/RETIRED), never as plain context | read the `## Authorizations` block in recall output |
 
 Two guarantees worth trusting:
 
-- **Nothing is deleted silently.** `forget` is soft by default (the file
-  stays, auditable); hard-delete is an explicit `--hard`.
+- **Explicit deletion is never silent.** `forget` is soft by default (the
+  file stays, auditable); hard-delete is an explicit `--hard`. But note:
+  the pollution auto-prune that rides along with `distill` DOES unlink
+  files physically (`FOLDCRUMBS_NO_AUTO_PRUNE` disables it). Memory files
+  are only as safe as your git history — version the store.
 - **Snapshots never assert derived state.** `MEMORY.md` (the index) is a
   snapshot; anything whose truth depends on live state — grants, memories
   under an invalidation contract — is excluded from it structurally, with a
-  pointer line. If you read a memory via `fetch`, any state problem comes
-  with an envelope line above the raw file: `[not served as current: …]`.
-  **Treat that envelope as authoritative over the file body.**
+  pointer line. If `fetch` returns an envelope above the raw file
+  (`[not served as current: …]`, `[authorization: …]`), **treat the
+  envelope as authoritative over the body**. The converse does NOT hold:
+  an envelope-free fetch is not a freshness certificate — an expired
+  memory, for instance, comes back with no envelope; check `expires_at`
+  in the frontmatter.
 
 ## Writing memories an agent should write
 
@@ -125,9 +131,13 @@ snapshot a hook injected earlier in the session — re-run `foldcrumbs
 index` or use `recall`, which always reads the files.
 
 An agent may also just `grep -r` the store directory. That is supported,
-not a hack: the files are stable-order, diff-clean markdown. foldcrumbs
-deliberately owns no search infrastructure — retrieval quality comes from
-the frontmatter contract, not from a proprietary index. (If your store ever
+not a hack: the files are stable-order, diff-clean markdown. Hand edits go
+live on the next read — but keep the frontmatter parseable: a malformed
+`relations_json` line, for instance, is dropped at parse time, and a
+dropped line can mean a silently lost invalidation contract. Edit like you
+edit code, with the file under version control. foldcrumbs deliberately
+owns no search infrastructure — retrieval quality comes from the
+frontmatter contract, not from a proprietary index. (If your store ever
 grows past tens of thousands of files and grep itself becomes the
 bottleneck, point a trigram-indexed grep of your choice at the directory
 from the outside; nothing in foldcrumbs needs to change for that.)
@@ -142,9 +152,12 @@ from the outside; nothing in foldcrumbs needs to change for that.)
 | `FOLDCRUMBS_LLM_*` | endpoint for `answer`/`distill`/`checkpoint` LLM calls |
 | `FOLDCRUMBS_G2=1` | relation proposals during distill (default off) |
 
-Everything degrades gracefully: no LLM configured → `recall`/`remember`
-work fully, `answer`/`distill` refuse politely. No semantic endpoint →
-lexical ranking only. That is the design, not a failure mode.
+Everything degrades gracefully, but know what degradation means: no LLM
+configured → `recall`/`remember` work fully; `answer`/`checkpoint` refuse
+politely; **`distill` still runs** — it falls back to a keyword heuristic
+and writes memories from it (they carry `provenance: inferred` and lower
+confidence). No semantic endpoint → lexical ranking only. That is the
+design, not a failure mode.
 
 ## MCP
 
