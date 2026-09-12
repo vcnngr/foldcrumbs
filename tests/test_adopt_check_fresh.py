@@ -9,6 +9,7 @@ Freshness is information, not automation (fleet-learning design: no
 automatic sync, ever).
 """
 
+import json
 import unittest
 import sys
 from datetime import datetime, timedelta, timezone
@@ -181,6 +182,104 @@ class TestCheckFreshCliMcp(unittest.TestCase):
         self.assertIn("check_fresh", props)
         # FL-3 P1 backlog: limit was undocumented in the catalog
         self.assertIn("limit", props)
+
+
+class TestRtRound1P0(CheckFreshEnv):
+    """RT GPT round 1 on 22cc6ba (card t_09bb77e5): F1-F3 probe-reproduced,
+    plus P1 F4 (legacy updated_at invented by the parser)."""
+
+    def test_f1_cli_check_fresh_writes_nothing(self):
+        # F1: cli.main ran federation.ensure_registered() BEFORE the
+        # report — recreating a missing registry shard. "never writes"
+        # must hold for the whole CLI command, not just the function.
+        from foldcrumbs import cli as cli_mod, federation
+        reg_dir = federation.roots_dir()
+        shard_files = sorted(reg_dir.glob("*.json")) \
+            if reg_dir.is_dir() else []
+        for shard in shard_files:
+            shard.unlink()
+        before = {p.name: p.read_bytes()
+                  for p in reg_dir.rglob("*") if p.is_file()} \
+            if reg_dir.is_dir() else {}
+        copy_path = self.my_dir / self.copy_name
+        copy_before = copy_path.read_bytes()
+        led_before = self._ledger_path().read_bytes()
+        import io as _io
+        import contextlib
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli_mod.main(["adopt", "--check-fresh"])
+        self.assertEqual(rc, 0)
+        after = {p.name: p.read_bytes()
+                 for p in reg_dir.rglob("*") if p.is_file()} \
+            if reg_dir.is_dir() else {}
+        self.assertEqual(before, after,
+                         f"CLI check-fresh wrote to the registry: "
+                         f"{set(after) - set(before)}")
+        self.assertEqual(copy_path.read_bytes(), copy_before)
+        self.assertEqual(self._ledger_path().read_bytes(), led_before)
+
+    def test_f2_ambiguous_source_id_is_uncertain(self):
+        # F2: two records in the source root sharing the adopted id —
+        # the verdict must NOT depend on filename ordering (first-match).
+        dup = MemoryRecord.from_markdown(
+            (self.their_dir / self.src.filename()).read_text(encoding="utf-8"))
+        dup.status = "superseded"
+        dup.source_path = "zzz-duplicate.md"
+        (self.their_dir / "zzz-duplicate.md").write_text(
+            dup.to_markdown(), encoding="utf-8")
+        r1 = adopt_mod.check_fresh(cwd=self.proj)[0]
+        # rename the duplicate: same ids/states/contents, different name
+        (self.their_dir / "zzz-duplicate.md").rename(
+            self.their_dir / "aaa-duplicate.md")
+        dup.source_path = "aaa-duplicate.md"
+        r2 = adopt_mod.check_fresh(cwd=self.proj)[0]
+        self.assertEqual(r1["status"], r2["status"],
+                         f"verdict flipped on filename order: "
+                         f"{r1['status']} -> {r2['status']}")
+        self.assertEqual(r1["status"], "source_unreachable")
+        self.assertIn("ambiguous", r1["detail"])
+
+    def test_f3_invalid_adopted_at_refuses_not_fresh(self):
+        # F3: an unusable attested date can't support "fresh" — visible
+        # refusal, never a silent default.
+        led = self._ledger_path()
+        data = json.loads(led.read_text(encoding="utf-8"))
+        data[self.copy_id]["adopted_at"] = "not-a-date"
+        led.write_text(json.dumps(data), encoding="utf-8")
+        # bump the source so staleness is real and visible
+        p = self.their_dir / self.src.filename()
+        rec = MemoryRecord.from_markdown(p.read_text(encoding="utf-8"))
+        rec.updated_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        rec.source_path = rec.filename()
+        p.write_text(rec.to_markdown(), encoding="utf-8")
+        with self.assertRaises(adopt_mod.AdoptError) as ctx:
+            adopt_mod.check_fresh(cwd=self.proj)
+        self.assertIn("adopted_at", str(ctx.exception))
+
+    def test_f3_naive_adopted_at_normalized_utc(self):
+        # naive timestamps: normalized to UTC (the schema convention),
+        # never a TypeError traceback
+        led = self._ledger_path()
+        data = json.loads(led.read_text(encoding="utf-8"))
+        data[self.copy_id]["adopted_at"] = "2026-01-01T00:00:00"
+        led.write_text(json.dumps(data), encoding="utf-8")
+        rows = adopt_mod.check_fresh(cwd=self.proj)  # must not raise
+        self.assertEqual(rows[0]["status"], "source_changed")
+
+    def test_f4_missing_updated_at_is_not_changed(self):
+        # F4 (P1, fixed): a legacy source without updated_at gets one
+        # INVENTED by the parser — that is not evidence of an edit.
+        p = self.their_dir / self.src.filename()
+        text = p.read_text(encoding="utf-8")
+        stripped = "\n".join(
+            ln for ln in text.splitlines()
+            if not ln.startswith("updated_at:"))
+        p.write_text(stripped, encoding="utf-8")
+        r = adopt_mod.check_fresh(cwd=self.proj)[0]
+        self.assertNotEqual(r["status"], "source_changed",
+                            "invented timestamp read as an edit")
+        self.assertIn("timestamp", r["detail"].lower())
 
 
 if __name__ == "__main__":

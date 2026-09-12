@@ -537,9 +537,10 @@ still alive and unchanged since we copied it?* Every attested adoption is
 re-resolved in its root and reported as `fresh`, `source_changed` (edited
 after adoption — second-granularity tolerance), `source_dead` (retired at
 the source), `source_gone` (complete scan, id no longer resolves) or
-`source_unreachable` (root deregistered, store unavailable, or an
-incomplete scan — loss of evidence is never reported as evidence of loss).
-It is strictly **read-only**: it never syncs, never writes, never touches
+`source_unreachable` (root deregistered, store unavailable, ambiguous
+source id, or an incomplete scan — loss of evidence is never reported as
+evidence of loss). An unusable attested `adopted_at` is refused visibly,
+never defaulted to "fresh". It is strictly **read-only**: it never syncs, never writes, never touches
 the local copies — freshness is information, not automation. Rows whose
 local copy is already retired are marked as context, not alarms.
 

@@ -544,9 +544,11 @@ copiata?* Ogni adozione attestata viene ri-risolta nel suo root e
 classificata: `fresh`, `source_changed` (modificata dopo l'adozione —
 tolleranza al secondo), `source_dead` (ritirata alla sorgente),
 `source_gone` (scansione completa, l'id non esiste più) o
-`source_unreachable` (root deregistrato, store non disponibile, scansione
-incompleta — la perdita di evidenza non viene mai spacciata per evidenza
-di perdita). È strettamente **read-only**: non sincronizza, non scrive,
+`source_unreachable` (root deregistrato, store non disponibile, id sorgente
+ambiguo, scansione incompleta — la perdita di evidenza non viene mai
+spacciata per evidenza di perdita). Un `adopted_at` attestato illeggibile
+viene rifiutato visibilmente, mai degradato a "fresh" di default.
+È strettamente **read-only**: non sincronizza, non scrive,
 non tocca le copie locali — la freschezza è informazione, non
 automazione. Le righe la cui copia locale è già ritirata sono segnalate
 come contesto, non come allarmi.

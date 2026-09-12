@@ -13,9 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arXiv 2609.03340, "Fresh Memory, Stale Plans"): every attested
   adoption is re-resolved in its source root and classified
   `fresh` / `source_changed` / `source_dead` / `source_gone` /
-  `source_unreachable`. Incomplete scans never masquerade as evidence
-  of loss (unreachable, not gone); same-second edits are inside the
-  documented tolerance. Strictly read-only — never syncs, never
+  `source_unreachable` — root deregistered, store unavailable, ambiguous
+  source id, or an incomplete scan (loss of evidence never masquerades
+  as evidence of loss); same-second edits are inside the documented
+  tolerance; an unusable attested `adopted_at` is refused visibly,
+  never defaulted to "fresh". Strictly read-only — never syncs, never
   writes, never touches the local copies; rows whose local copy is
   retired are context, not alarms. Available on the CLI flag and the
   MCP `adopt` tool (`check_fresh: true`). Also closes the FL-3 P1:

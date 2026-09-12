@@ -290,8 +290,8 @@ def check_fresh(cwd=None) -> list[dict]:
                              "(directory missing)")
             continue
 
-        src = next((r for r in recs if r.id == entry.get("memory_id")), None)
-        if src is None:
+        matches = [r for r in recs if r.id == entry.get("memory_id")]
+        if not matches:
             if not complete:
                 row["status"] = "source_unreachable"
                 row["detail"] = ("source root could not be scanned "
@@ -302,6 +302,23 @@ def check_fresh(cwd=None) -> list[dict]:
                 row["detail"] = ("the original no longer exists in the "
                                  "source root (complete scan)")
             continue
+        if len(matches) > 1:
+            # RT r1 F2: first-match made the verdict depend on filename
+            # ordering. Ambiguous identity is UNCERTAIN, never a pick.
+            row["status"] = "source_unreachable"
+            row["detail"] = (f"ambiguous source id: {len(matches)} records "
+                             "in the source root share it — cannot say "
+                             "which one was adopted")
+            continue
+        src = matches[0]
+        if not complete:
+            # found, but an incomplete scan cannot PROVE uniqueness (the
+            # unread files may hold a twin) — observation without certainty
+            row["status"] = "source_unreachable"
+            row["detail"] = ("source root could not be scanned completely "
+                             f"— a record was found (status={src.status}) "
+                             "but its identity cannot be proven unique")
+            continue
 
         if src.status != "active":
             row["status"] = "source_dead"
@@ -311,15 +328,32 @@ def check_fresh(cwd=None) -> list[dict]:
             row["status"] = "source_dead"
             row["detail"] = "original expired at the source"
         else:
+            # RT r1 F3: an attested date must be usable — an unparseable
+            # adopted_at is ledger corruption for THIS operation and is
+            # refused visibly, never defaulted to "fresh".
             adopted = _parse_iso(entry.get("adopted_at", ""))
+            if adopted is None:
+                raise AdoptError(
+                    f"adoption ledger entry {copy_id[:8]}… has an unusable "
+                    f"adopted_at ({entry.get('adopted_at')!r}) — refusing "
+                    "to call anything fresh on a date that cannot be read; "
+                    f"fix or re-attest the entry in {LEDGER}")
+            if getattr(src, "updated_at_missing", False):
+                # RT r1 F4 (P1, fixed): a legacy source without updated_at
+                # gets one INVENTED by the parser — invention is not
+                # evidence of an edit. Report the limitation, not a fake
+                # source_changed.
+                row["detail"] = ("source alive, but it carries no "
+                                 "updated_at timestamp — edit history "
+                                 "cannot be verified")
+                continue
             # both sides truncated to whole seconds: the ledger stamps
             # adopted_at at second precision (_now_iso), while updated_at
             # carries microseconds — comparing raw would flag the adoption
             # write itself as a later edit. Same-second edits are therefore
             # NOT detected; that is the documented tolerance (a stale
             # source one second newer is caught, sub-second noise is not).
-            if (adopted is not None
-                    and src.updated_at.replace(microsecond=0)
+            if (src.updated_at.replace(microsecond=0)
                     > adopted.replace(microsecond=0)):
                 row["status"] = "source_changed"
                 row["detail"] = ("original was edited after adoption "
@@ -329,11 +363,18 @@ def check_fresh(cwd=None) -> list[dict]:
 
 
 def _parse_iso(text: str):
+    """Parse an attested timestamp, normalizing naive to UTC (the schema
+    convention) so comparisons never raise TypeError. Returns None when
+    the value is unusable — callers must treat that as corruption, not
+    as 'no reason to complain' (RT r1 F3)."""
     try:
         # Z suffix: fromisoformat accepts it only on 3.11+; CI runs 3.10
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except (TypeError, ValueError, AttributeError):
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _copy_of(src: MemoryRecord, root_id: str, note: str = "",

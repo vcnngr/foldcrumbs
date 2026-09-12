@@ -1743,10 +1743,16 @@ def main(argv: list[str] | None = None) -> int:
     # (wiped state dir, restored backup). Never opts a root in on its own —
     # that stays an explicit act, so `roots remove` is not undone by the next
     # command. Best-effort: a broken registry must not break the CLI.
-    try:
-        federation.ensure_registered()
-    except Exception:  # noqa: BLE001 - registry repair is never worth failing on
-        pass
+    # RT PR66 F1: exempt `adopt --check-fresh` — the report is advertised
+    # read-only, and the repair WRITES a registry shard. Deregistered-root
+    # reporting still works: check_fresh treats a missing root as
+    # source_unreachable instead of silently re-registering it.
+    if not (getattr(args, "cmd", None) == "adopt"
+            and getattr(args, "check_fresh", False)):
+        try:
+            federation.ensure_registered()
+        except Exception:  # noqa: BLE001 - registry repair is never worth failing on
+            pass
     return args.func(args)
 
 
