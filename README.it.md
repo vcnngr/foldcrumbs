@@ -175,13 +175,18 @@ non ne risente.
 Il recall è lessicale — substring, sovrapposizione di parole, fuzzy — e resta esattamente tale a
 meno che tu non lo attivi con `FOLDCRUMBS_SEMANTIC=1`. Con lo switch attivo, il recall interroga
 anche un endpoint OpenAI-compatibile `/v1/embeddings` (gli stessi server che servono la
-distillazione: MLX, Ollama, llama.cpp, LM Studio) e prende il **migliore** dei due segnali di
-rilevanza, con quello semantico limitato sotto un match perfetto per parole — così un vettore può
-soccorrere una parafrasi che le parole mancano, ma non può mai scavalcare ciò che le parole hanno
-già fatto corrispondere esattamente. Niente di nuovo da installare: la chiamata è `urllib` stdlib,
-i vettori sono in cache machine-local (non nello store sincronizzato), e un endpoint mancante o
-morto è un fallback silenzioso al recall lessicale — mai bloccante, mai un errore. Due cancelli,
-entrambi tuoi: nessuno switch → nessuna richiesta; nessuna risposta → nessun cambiamento.
+distillazione: MLX, Ollama, llama.cpp, LM Studio) e fonde i due canali per **rango**, non per
+punteggio (reciprocal-rank fusion, `1/(60+rank_lex) + 1/(60+rank_sem)`): i ratio lessicali e le
+similarità coseno sono scale diverse e non vengono mai confrontati come numeri — l'ammissione
+resta a punteggio (una parafrasi deve superare la stessa barra di evidenza di prima),
+l'ordinamento diventa ordinale. Un vettore può soccorrere una parafrasi che le parole mancano;
+un match esatto mantiene il rango 1 nel suo canale, e due canali che concordano superano un
+canale solo. Con lo switch disattivo — o quando l'endpoint non risponde — la fase di fusione è
+bypassata interamente e il recall è byte-identico a quello puramente lessicale. Niente di nuovo
+da installare: la chiamata è `urllib` stdlib, i vettori sono in cache machine-local (non nello
+store sincronizzato), e un endpoint mancante o morto è un fallback silenzioso — mai bloccante,
+mai un errore. Due cancelli, entrambi tuoi: nessuno switch → nessuna richiesta; nessuna
+risposta → nessun cambiamento.
 
 ## Dashboard
 
