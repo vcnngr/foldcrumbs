@@ -1,6 +1,6 @@
 # Design: RRF fusion for the semantic channel
 
-Status: rev 1 — for red-team
+Status: rev 2 — absorbs RT r1 (GPT t_8b86e7d7 F1-F4, Kimi t_703680b9 F1-F2 + P1s)
 Scope: `foldcrumbs/store.py` `search()` fusion stage only (+ tests, docs).
 No schema change, no new surface, no new dependency, no persisted state.
 
@@ -23,169 +23,198 @@ score = max(lex, capped)                            # store.py:1117-1127
 
 with admission `score >= _RECALL_THRESHOLD` (0.22).
 
-What capped-max cannot express: **agreement**. A memory that is
-*good-but-not-great in both channels* (lex 0.55, sem 0.85 → 0.68) loses
-to a memory that is *strong in one only* (lex 0.75, sem 0.10 → 0.75),
-even though two independent channels concurring is better evidence than
-one channel alone. The cap (0.8) was the fix for the inverse pathology
-(vectors outranking exact word matches); it is a calibration constant
-picked by hand, and every embedding model rescales it silently.
+What capped-max cannot express: **agreement as evidence**. A memory
+ranked well by *both* independent channels and a memory ranked well by
+*one* channel can end up ordered purely by which single number is
+bigger; and the cap (0.8) is a hand-picked calibration constant that
+every embedding-model change silently rescales. RRF (Cormack, Clarke &
+Buettcher, SIGIR 2009) replaces the cross-scale score comparison with
+ordinal evidence — which is what two incommensurable channels actually
+give us.
+
+> **Honesty note (RT r1 F4/F2):** rank fusion does NOT guarantee that
+> agreement always beats single-channel strength — candidates with
+> crossed ranks tie exactly ((rank_lex 1, rank_sem 2) and (rank_lex 2,
+> rank_sem 1) both give 1/61+1/62 to the last float bit), and ties
+> fall to the deterministic tiebreak chain (freschezza/reinforcement).
+> What RRF buys is: no magic cap, no scale mixing, agreement as a
+> factor, and degeneration to today's behavior when one channel is
+> absent. Rev 1 oversold this as a universal inversion property; rev 2
+> does not claim it. (Checked numerically: 1/61+1/63 ≠ 2/62 — only
+> crossed-rank pairs tie.)
 
 ## 2. Proposal: rank-based fusion (RRF)
 
-Reciprocal Rank Fusion (Cormack, Clarke & Buettcher, SIGIR 2009) fuses
-ranked lists without comparing scores across scales — exactly our
-constraint (lexical ratios and cosine similarities are different
-animals; the cap is the scar tissue of mixing them).
-
-### D1 — Admission (unchanged in spirit, explicit in code)
+### D1 — Admission
 
 The candidate set and the lexical pass stay exactly as today
 (visibility, authorization/contested/type/tag filters, contract
 partition, relevance-gated diagnostics — all upstream of fusion, none
-touched). A candidate is **admitted** to fusion when:
+touched). A candidate is **admitted** when:
 
 ```
 lex >= _RECALL_THRESHOLD  OR  sem >= _SEMANTIC_FLOOR
 ```
 
-`_SEMANTIC_FLOOR = 0.275` — chosen so the semantic-only admission bar
-equals today's effective rescue bar (`0.22 / 0.8 = 0.275`): a paraphrase
-that capped-max would have surfaced still surfaces, one that it would
-not still does not. Admission is evidence-based; *ranking* is RRF.
+`_SEMANTIC_FLOOR = 0.275` — equals today's effective semantic rescue
+bar (`0.22 / 0.8`): a paraphrase capped-max would have surfaced still
+surfaces; one it would not still does not. Admission stays
+score-based (magnitude matters at the gate); *ranking* is ordinal.
 
-### D2 — Fusion
+Membership equivalence vs today (RT r1 GPT-F1 attack point): under
+capped-max a record is served iff `max(lex, sem·0.8) ≥ 0.22` iff
+`lex ≥ 0.22 OR sem ≥ 0.275` — the admitted SET is identical by
+construction; only the ORDER within it changes (and only when the
+semantic channel is on).
 
-Each admitted candidate gets a rank in each channel (1-based; the
-semantic rank exists only when the semantic channel answered). Ties
-within a channel before ranking are broken by the existing
-deterministic key (filename), so ranks are total and stable:
+### D2 — Ranked lists and their membership (RT r1 Kimi-F2: made explicit)
+
+Every admitted candidate gets a rank in **every available channel**
+(sparse ranks, no gaps):
+
+- `rank_lex` — position (1-based) in the admitted set sorted by
+  **today's full sort key** `(-round(lex, 2), -tiebreak, is_foreign,
+  filename)`. Deliberately the legacy key, including its 2-decimal
+  quantization: that quantization is *part of the behavior we promise
+  to preserve* (two scores rounding equal are tied, and the tiebreak
+  chain orders them — see D4).
+- `rank_sem` — exists only when the semantic channel answered
+  (`sem_scores is not None`); position in the admitted set sorted by
+  `(-sem, filename)` (deterministic total order).
+
+A candidate below a channel's floor is NOT "absent" from that channel —
+it still holds a (low) rank in it, computed from its actual score.
+There is no second, hidden admission inside the ranking: the floor
+does its one job at D1 and never again. (Rev 1 left membership
+ambiguous; both readings are now excluded in favor of this one.)
+
+### D3 — Fusion and ordering
 
 ```
-rrf(m) = 1/(K + rank_lex(m)) + 1/(K + rank_sem(m))     K = 60
+rrf(m) = 1/(K + rank_lex(m)) [+ 1/(K + rank_sem(m)) when available]
+K = 60 (paper default, no knob)
 ```
-
-Standard K=60 (the paper's value, robust across domains; no tuning
-knob exposed). A candidate absent from a channel's ranked list simply
-has no term for it.
-
-### D3 — Ordering
 
 Final sort key:
 
 ```
-(-round(rrf, _RANK_PRECISION_RRF), -tiebreak(m), m.is_foreign, filename)
+(-rrf_full_float, -tiebreak(m), m.is_foreign, filename)
 ```
 
-- `_RANK_PRECISION_RRF = 5` — RRF values live in ~[0.003, 0.033]; two
-  decimals would collapse everything into ties. Five decimals separate
-  adjacent ranks while still treating float noise as equal.
-- `tiebreak` (freshness/reinforcement) keeps its exact current role:
-  separates memories that matched *equally well*, never promotes a
-  worse match (store.py:1130-1141 comment stays true, mutatis
-  mutandis).
-- Locality then filename: unchanged.
+**No rounding of rrf** (RT r1 GPT-F1/Kimi-F4: rev 1's `round(rrf, 5)`
+collapses adjacent ranks for rank ≳ 250 and could invert distinct
+lexical ranks — the constant is deleted). RRF is computed from integer
+ranks, so its float value is exact and deterministic run-to-run;
+genuine ties (mirrored ranks, D2 note above) fall to the tiebreak
+chain, exactly as today's near-equal scores do.
 
-### D4 — Single-channel degeneration (the compatibility contract)
+`tiebreak` (freshness/reinforcement) keeps its exact current role:
+separates memories whose fused evidence is equal, never promotes a
+worse match. Locality then filename close the chain: unchanged.
 
-When the semantic channel is OFF or failed (`sem_scores is None`), RRF
-must produce **exactly today's lexical ordering**. It does by
-construction: with one channel, `rrf = 1/(K + rank_lex)` is a strictly
-decreasing function of `rank_lex`, and `rank_lex` is derived from the
-lexical score with deterministic tie-breaks — so the order is identical
-to sorting by `(-round(lex, 2), -tiebreak, …)`, which is today's. The
-one subtlety: today ties at two decimals are broken by tiebreak *within*
-the score sort; under RRF the lexical rank already consumed those ties
-by filename. To preserve the reinforcement/freshness behavior exactly,
-`rank_lex` is computed by sorting on `(-round(lex, _RANK_PRECISION),
--tiebreak(m), is_foreign, filename)` — i.e. **today's full sort key
-defines the lexical rank**. Then single-channel RRF ordering ≡ today's
-ordering, provably, and a golden test pins it on a fixture store with
-the semantic channel disabled.
+### D4 — Semantic-off is the legacy path, not a degenerate case (RT r1 GPT-F1)
 
-### D5 — Invariants (each pinned by a test)
+When the semantic channel is OFF or failed (`sem_scores is None`), the
+fusion stage is **bypassed entirely**: served order =
+`(-round(lex, _RANK_PRECISION), -tiebreak, is_foreign, filename)` —
+today's code path, byte-identical, no RRF arithmetic involved. I1 is
+then true by construction, not by numerical argument; the golden test
+asserts ordering equality between old and new code on a fixture with
+deliberate near-ties (scores differing only beyond 2 decimals, plus a
+reinforcement-differentiated tie group).
+
+### D5 — Reinforcement bookkeeping (RT r1 GPT-F2: pinned explicitly)
+
+`_reinforceable(scored, top, limit)` keeps consuming the **final served
+ordering**, as today. Under semantic-off that ordering is the legacy
+one (D4), so which records get reinforced is unchanged. Under
+semantic-on the served list may differ from the lexical ranking — and
+reinforcement following the *served* list is the intended semantics
+(count what was actually used), identical in spirit to today where the
+served list already mixes both channels via capped max. No second
+definition of "score" leaks into the bookkeeping.
+
+### D6 — Invariants (each pinned by a test)
 
 | # | invariant |
 |---|---|
-| I1 | semantic OFF ⇒ byte-identical ordering vs pre-RRF (golden fixture) |
-| I2 | exact lexical match (lex = 1.0) outranks any semantic-only admission (the old cap guarantee, re-expressed: rank_lex 1 ⇒ rrf ≥ 1/61 > 1/62 ≥ any single-channel semantic term… **see §4 objection O2** — the guarantee holds against *single-channel* rivals, not against a rival that is also lexically ranked) |
-| I3 | agreement beats single-channel strength: (lex 0.55, sem 0.85) outranks (lex 0.75, sem 0.10) when both admitted — *this is the whole point; if a red-team probe shows a realistic corpus where this inversion hurts, the design is wrong* |
-| I4 | admission floor: sem < 0.275 and lex < 0.22 ⇒ not served (garbage queries stay empty) |
-| I5 | determinism: same store + same channel outputs ⇒ same order, run to run (no dict-iteration dependence) |
-| I6 | embedding failure mid-flight ⇒ all-or-nothing fallback to lexical-only ordering (existing embed() contract, unchanged) |
+| I1 | semantic OFF/failure ⇒ served ordering identical to the legacy path (D4 bypass; golden fixture with 2-decimal near-ties + reinforcement tie group) |
+| I2 | an exact lexical match (rank_lex 1) is never outranked by a candidate with strictly lower evidence in BOTH channels; against crossed-rank rivals ((1,2) vs (2,1)) the rrf ties exactly and the tiebreak chain decides. **Strictly weaker than the old numeric cap guarantee** (rev 1 proved falsely strong — Kimi F1: a semantic-only rival at rank_sem 1 TIES the lone exact match, tiebreak decides). Declared weakening; CHANGELOG entry required when implemented |
+| I3 | agreement factors into rank: a fixture (explicit rank table, not a universal property) where a both-channel candidate overtakes a single-channel one; companion fixture pinning that crossed-rank pairs tie exactly and the tiebreak decides |
+| I4 | admission floor: sem < 0.275 and lex < 0.22 ⇒ not served; the admitted set equals capped-max's admitted set (D1 equivalence) |
+| I5 | determinism: same store + same channel outputs ⇒ same order (integer ranks, exact float sums, total-order tie-breaks; no dict-iteration dependence) |
+| I6 | embedding failure mid-flight ⇒ all-or-nothing fallback to the legacy ordering (existing embed() contract, unchanged) |
 | I7 | diagnostics tail (collect_invalidated) unchanged: fusion happens strictly after the contract partition |
 
-### D6 — What does NOT change
+### D7 — What does NOT change
 
-- The cap constant disappears (`_SEMANTIC_CAP` deleted) — it exists only
-  to mix scales; RRF never mixes them. The *guarantee* it encoded moves
-  to I2 + the admission floor.
-- `_RECALL_THRESHOLD` stays (lexical admission), gains the sibling
-  `_SEMANTIC_FLOOR`.
+- `_SEMANTIC_CAP` is deleted (its scale-mixing job disappears; its
+  *guarantee* is re-expressed — weaker, ordinal — in I2 and declared).
+- `_RECALL_THRESHOLD` stays; gains the sibling `_SEMANTIC_FLOOR`.
 - Embedding batching, caching, opt-in flag, timeout: untouched.
-- `recalls.reinforce(...)` bookkeeping: untouched (it consumes the
-  final ordering, whatever produced it).
-- Foreign records, federation, snapshots, authorization ledger,
-  invalidation contracts: untouched (all upstream or orthogonal).
+- Foreign records: they participate exactly as today — the semantic
+  channel embeds the same candidate list the lexical pass built
+  (foreign included), fusion changes ordering only. No federation
+  surface is touched (closes the rev-1 silence GPT r1 was asked about).
+- `recalls.reinforce(...)` bookkeeping: see D5.
+- Snapshots, authorization ledger, invalidation contracts: untouched
+  (upstream or orthogonal).
 
-## 3. Test matrix
+## 3. Test matrix (oracles corrected per RT r1)
 
 | # | test | invariant |
 |---|---|---|
-| T1 | golden ordering, semantic off, fixture store with near-ties | I1 |
-| T2 | exact lexical beats semantic-only admission | I2 |
-| T3 | agreement inversion (the §1 example, stubbed embedder) | I3 |
-| T4 | below-floor paraphrase not admitted; above-floor admitted | I4 |
-| T5 | double run equality + filename tie determinism | I5 |
+| T1 | golden ordering, semantic off: legacy vs new code on fixture with 2-decimal near-ties AND a reinforcement tie group | I1 |
+| T2 | exact match (rank_lex 1) vs semantic-only rival (rank_lex ≥ 2): served first — AND the mirrored-rank tie case (exact match + rival rank_lex 2/rank_sem 1 ⇒ rrf tie ⇒ tiebreak decides): both outcomes pinned, no overclaim | I2 |
+| T3 | agreement fixture with EXPLICIT rank table: A ranks (lex 2, sem 1), B ranks (lex 1, sem 3) ⇒ rrf A = 1/62+1/61 = 0.032522 > rrf B = 1/61+1/63 = 0.032266 ⇒ A (agreement) beats B (single-channel strength) — verified numerically | I3 |
+| T3b | crossed-rank tie fixture: A (lex 1, sem 2) vs B (lex 2, sem 1) ⇒ rrf equal to the last float bit (both 1/61+1/62), tiebreak chain decides, filename closes | I3/I5 |
+| T4 | below-floor paraphrase not admitted; above-floor admitted; admitted SET identical to capped-max on a mixed fixture | I4 |
+| T5 | double run equality; filename tie determinism | I5 |
 | T6 | embedder returns None ⇒ ordering ≡ T1 golden | I6 |
-| T7 | invalidated/foreign/grant partition untouched by fusion (existing test_recall_layers + test_invalidation suites green) | I7 |
-| T8 | single admitted candidate ⇒ served (no rank math edge case) | — |
-| T9 | all candidates same lexical score, semantic ranks differ ⇒ semantic order decides | — |
-| T10 | reinforcement still breaks RRF ties (two candidates, equal rrf, different recall counts) | D3 |
+| T7 | partition untouched: existing test_recall_layers + test_invalidation suites green | I7 |
+| T8 | single admitted candidate ⇒ served (no rank-math edge case) | — |
+| T9 | all candidates equal lexical score, semantic ranks differ ⇒ **declared outcome**: equal rank_lex group is ordered by today's tiebreak inside rank_lex assignment; semantic rank then re-orders the fused sum — pinned by explicit expected list, not by a vague "semantic decides" | D2/D3 |
+| T10 | reinforcement breaks rrf ties (two candidates, equal rrf, different recall counts) | D3 |
 
 Stubbed embedder: monkeypatch `embeddings.embed` with deterministic
-vectors (the suite already does this in test_semantic*; no network in
-tests, none added).
+vectors (the suite already does this; no network in tests, none added).
 
-## 4. Anticipated objections (red-team bait, answered up front)
+## 4. Anticipated objections (updated post-r1)
 
-- **O1 "RRF discards score magnitude — a 0.99 lexical match and a 0.23
-  one both become rank 1 and rank N."** True, and intended: admission
-  keeps magnitude where it matters (the floor), ranking uses only
-  ordinal evidence. The golden test I1 pins that lexical-only behavior
-  is unchanged, which is where magnitude was doing real work.
-- **O2 "I2 is weaker than the old cap guarantee."** The old guarantee
-  was *numeric* (sem·0.8 < 1.0 always). The new one is *ordinal*:
-  an exact match is rank_lex 1, so it beats anything not also ranked
-  high lexically; a rival with lex 0.95 AND sem 0.95 *should* beat a
-  lone exact match on a different query term — that is agreement
-  working, not a regression. Stated honestly: this is a behavior
-  change under semantic-on, and it is the point of the feature.
-- **O3 "K=60 is arbitrary."** It is the published default, robust in
-  the source paper across TREC collections; we expose no knob because
-  a knob nobody can calibrate is worse than a constant everybody can
-  read.
-- **O4 "Two-channel RRF with tiny candidate sets is noise."** With n≤3
-  candidates the ranks are nearly flat (1/61 vs 1/62); ordering then
-  falls to the tiebreak chain — exactly today's behavior for near-equal
-  scores. T9/T10 pin this.
+- **O1 "RRF discards score magnitude."** Admission keeps magnitude
+  where it matters (the floor); ranking uses ordinal evidence only.
+  D4 pins that lexical-only users see zero change.
+- **O2 "I2 is weaker than the old cap guarantee."** Yes — and rev 2
+  says so in the invariant itself, with the tie case spelled out
+  (Kimi r1 F1: semantic-only at rank_sem 1 ties the lone exact match;
+  the tiebreak decides). The weakening is the price of removing a
+  cross-scale comparison that was never semantically meaningful; it is
+  a CHANGELOG-declared behavior change under semantic-on.
+- **O3 "K=60 is arbitrary."** Published default, robust across TREC
+  collections in the source paper; no knob because a knob nobody can
+  calibrate is worse than a constant everybody can read.
+- **O4 "Tiny candidate sets are noise."** Corrected per GPT r1: small
+  lists do not *automatically* fall to the tiebreak — only actual
+  (mirrored or same-rank) ties do; adjacent-rank differences are exact
+  float values (1/61 ≠ 1/62), unrounded (D3), so they order normally.
 
 ## 5. Size / rollout
 
-- store.py: ~40 lines net (fusion block replaced, two constants added,
-  one deleted); a `_rrf_fuse()` helper for testability.
-- tests: ~250 lines (T1-T10 + golden fixture).
-- docs: README x3 semantic-recall paragraph (one sentence: fusion is
-  rank-based, admission floors documented), CHANGELOG.
-- No migration, no state, no config surface change. Semantic channel
-  remains opt-in; users with it off see a provably identical recall.
+- store.py: ~40 lines net (fusion block replaced by a `_rrf_fuse()`
+  helper + D4 bypass branch; two constants added, one deleted).
+- tests: ~280 lines (T1-T10 + golden fixture).
+- docs: README x3 semantic-recall paragraph (rank-based fusion;
+  admission floors; **exact-match guarantee weakening declared**),
+  CHANGELOG (behavior change under `FOLDCRUMBS_SEMANTIC=1`).
+- No migration, no state, no config surface change. Semantic-off users
+  get a provably identical recall (D4 bypass + I1 golden test).
 
-Estimated total: ~300 lines, 1 module touched + tests + docs.
+Estimated total: ~330 lines, 1 module touched + tests + docs.
 
 ## 6. Non-goals
 
 - No learned/weighted fusion (weights would need calibration data we
   refuse to collect).
-- No third channel (BM25 etc.) — the lexical pass already owns that
-  space; if it is ever replaced, RRF extends to n lists unchanged.
+- No third channel (BM25 etc.); RRF extends to n lists unchanged if
+  ever needed.
 - No persisted ranks/indexes (violates derive-on-read).
