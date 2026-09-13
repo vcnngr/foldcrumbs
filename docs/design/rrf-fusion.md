@@ -40,8 +40,10 @@ give us.
 > What RRF buys is: no magic cap, no scale mixing, agreement as a
 > factor, and degeneration to today's behavior when one channel is
 > absent. Rev 1 oversold this as a universal inversion property; rev 2
-> does not claim it. (Checked numerically: 1/61+1/63 ≠ 2/62 — only
-> crossed-rank pairs tie.)
+> does not claim it. (Ties are NOT limited to crossed pairs: an
+> exhaustive probe over ranks 1..500 finds hundreds of non-crossed
+> float ties, e.g. (3,24) and (12,12) both sum to the bit-identical
+> 0.027777… — all of them settle on the tiebreak chain.)
 
 ## 2. Proposal: rank-based fusion (RRF)
 
