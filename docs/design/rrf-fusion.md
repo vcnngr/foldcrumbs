@@ -1,6 +1,6 @@
 # Design: RRF fusion for the semantic channel
 
-Status: rev 2 — absorbs RT r1 (GPT t_8b86e7d7 F1-F4, Kimi t_703680b9 F1-F2 + P1s)
+Status: rev 3 — absorbs RT r2 (GPT t_66617c73 F2 residual + P1 float language; Kimi t_a4805ad2 GREEN)
 Scope: `foldcrumbs/store.py` `search()` fusion stage only (+ tests, docs).
 No schema change, no new surface, no new dependency, no persisted state.
 
@@ -104,9 +104,10 @@ Final sort key:
 **No rounding of rrf** (RT r1 GPT-F1/Kimi-F4: rev 1's `round(rrf, 5)`
 collapses adjacent ranks for rank ≳ 250 and could invert distinct
 lexical ranks — the constant is deleted). RRF is computed from integer
-ranks, so its float value is exact and deterministic run-to-run;
-genuine ties (mirrored ranks, D2 note above) fall to the tiebreak
-chain, exactly as today's near-equal scores do.
+ranks, so its values are deterministic run-to-run (D5b: deterministic
+IEEE-754 approximations, not rational arithmetic); genuine ties
+(crossed ranks, D5b) fall to the tiebreak chain, exactly as today's
+near-equal scores do.
 
 `tiebreak` (freshness/reinforcement) keeps its exact current role:
 separates memories whose fused evidence is equal, never promotes a
@@ -123,16 +124,56 @@ asserts ordering equality between old and new code on a fixture with
 deliberate near-ties (scores differing only beyond 2 decimals, plus a
 reinforcement-differentiated tie group).
 
-### D5 — Reinforcement bookkeeping (RT r1 GPT-F2: pinned explicitly)
+### D5 — Reinforcement bookkeeping (RT r1 GPT-F2 + r2 residual, closed)
 
-`_reinforceable(scored, top, limit)` keeps consuming the **final served
-ordering**, as today. Under semantic-off that ordering is the legacy
-one (D4), so which records get reinforced is unchanged. Under
-semantic-on the served list may differ from the lexical ranking — and
+`_reinforceable(scored, top, limit)` does NOT only consume the served
+order: it recognizes the tie group at the cutoff by comparing
+`round(score, _RANK_PRECISION)` (store.py:1181-1183). Under rev 2's
+RRF values (all ≈ 0.03) that comparison rounds EVERY candidate to the
+same 2-decimal bucket — RT r2 PoC: three distinct RRF scores, limit=1,
+all three reinforced. Rev 2's "contract unchanged" claim was false at
+this line.
+
+Fix (design-level, pinned by T11):
+
+- the tuple carried in `scored` gains its **comparison key**: legacy
+  path keeps `round(lex, _RANK_PRECISION)`; RRF path carries the
+  full-float rrf value;
+- `_reinforceable` compares that key for equality instead of rounding
+  it itself — legacy: identical behavior to today (same 2-decimal
+  buckets, same tie-group semantics); RRF: only genuine full-float
+  ties join the cutoff group;
+- semantic-off (D4 bypass) never reaches the RRF key, so I1 covers
+  reinforcement too: byte-identical reinforced set on the golden
+  fixture.
+
+Under semantic-on the served list may differ from the lexical ranking —
 reinforcement following the *served* list is the intended semantics
 (count what was actually used), identical in spirit to today where the
 served list already mixes both channels via capped max. No second
-definition of "score" leaks into the bookkeeping.
+definition of "score" leaks into the bookkeeping; the comparison
+precision is a property of the channel that produced the ordering.
+
+### D5b — Float language correction (RT r2 P1, absorbed)
+
+"Exact float because ranks are integers" was wrong as stated: division
+and addition are deterministic IEEE-754 approximations, not rational
+arithmetic. Two facts are true and sufficient:
+
+- **deterministic**: same integer ranks ⇒ same float values, run to
+  run, on the same platform — no dict-iteration or ordering dependence
+  (I5 stands on determinism, not exactness);
+- **crossed-rank pairs tie bit-for-bit**: 1/(K+a)+1/(K+b) and
+  1/(K+b)+1/(K+a) are the same two float operations in a different
+  order — IEEE-754 addition is commutative, so the sums are identical
+  bit patterns. This is an *example* of a guaranteed tie, NOT a
+  classification of all ties: rational coincidences like (3,174) vs
+  (5,150) (both 11/546) may or may not collide in float, and the
+  design does not depend on either answer — any residual near-tie is
+  settled by the total-order tiebreak chain.
+
+No `Fraction` machinery: full-float ordering plus total tie-breaks is
+sufficient for this stage.
 
 ### D6 — Invariants (each pinned by a test)
 
@@ -142,7 +183,7 @@ definition of "score" leaks into the bookkeeping.
 | I2 | an exact lexical match (rank_lex 1) is never outranked by a candidate with strictly lower evidence in BOTH channels; against crossed-rank rivals ((1,2) vs (2,1)) the rrf ties exactly and the tiebreak chain decides. **Strictly weaker than the old numeric cap guarantee** (rev 1 proved falsely strong — Kimi F1: a semantic-only rival at rank_sem 1 TIES the lone exact match, tiebreak decides). Declared weakening; CHANGELOG entry required when implemented |
 | I3 | agreement factors into rank: a fixture (explicit rank table, not a universal property) where a both-channel candidate overtakes a single-channel one; companion fixture pinning that crossed-rank pairs tie exactly and the tiebreak decides |
 | I4 | admission floor: sem < 0.275 and lex < 0.22 ⇒ not served; the admitted set equals capped-max's admitted set (D1 equivalence) |
-| I5 | determinism: same store + same channel outputs ⇒ same order (integer ranks, exact float sums, total-order tie-breaks; no dict-iteration dependence) |
+| I5 | determinism: same store + same channel outputs ⇒ same order (integer ranks, deterministic full-float sums per D5b, total-order tie-breaks; no dict-iteration dependence) |
 | I6 | embedding failure mid-flight ⇒ all-or-nothing fallback to the legacy ordering (existing embed() contract, unchanged) |
 | I7 | diagnostics tail (collect_invalidated) unchanged: fusion happens strictly after the contract partition |
 
@@ -175,6 +216,7 @@ definition of "score" leaks into the bookkeeping.
 | T8 | single admitted candidate ⇒ served (no rank-math edge case) | — |
 | T9 | all candidates equal lexical score, semantic ranks differ ⇒ **declared outcome**: equal rank_lex group is ordered by today's tiebreak inside rank_lex assignment; semantic rank then re-orders the fused sum — pinned by explicit expected list, not by a vague "semantic decides" | D2/D3 |
 | T10 | reinforcement breaks rrf ties (two candidates, equal rrf, different recall counts) | D3 |
+| T11 | reinforcement cutoff under RRF: three distinct rrf scores, limit=1 ⇒ exactly ONE reinforced (the RT r2 PoC, run against the real helper); legacy path re-pinned: 2-decimal tie group still reinforced together | D5 |
 
 Stubbed embedder: monkeypatch `embeddings.embed` with deterministic
 vectors (the suite already does this; no network in tests, none added).
