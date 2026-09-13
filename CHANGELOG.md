@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Semantic recall now fuses by rank, not by score** (RRF,
+  docs/design/rrf-fusion.md): with `FOLDCRUMBS_SEMANTIC=1`, the lexical
+  and embedding channels are combined via reciprocal-rank fusion
+  (`1/(60+rank_lex) + 1/(60+rank_sem)`) instead of the old capped
+  best-of (`max(lex, sem*0.8)`). Admission is unchanged as a SET
+  (`lex >= 0.22 OR sem >= 0.275` — the same bar the cap produced);
+  ordering under semantic-on may differ: two channels agreeing now
+  outrank one channel alone, and the exact-match guarantee weakens
+  from numeric to ordinal (a crossed-rank rival ties an exact match
+  and the freshness/reinforcement tiebreak decides). **With the flag
+  off or the endpoint down, ordering is byte-identical to before** —
+  the fusion stage is bypassed entirely. Reinforcement bookkeeping
+  keeps its exact tie-group semantics on both paths.
+
 ### Fixed
 
 - **P1 sweep from the red-team backlog** (all declared non-blocking by

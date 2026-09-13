@@ -172,13 +172,16 @@ unaffected.
 
 Recall is lexical — substring, word overlap, fuzzy — and stays exactly that unless you opt in with
 `FOLDCRUMBS_SEMANTIC=1`. With it on, recall also asks an OpenAI-compatible `/v1/embeddings`
-endpoint (the same servers that serve distillation: MLX, Ollama, llama.cpp, LM Studio) and takes
-the **better** of the two relevance signals, with the semantic one capped below a perfect word
-match — so a vector can rescue a paraphrase the words miss, but can never outrank what the words
-already matched exactly. Nothing new to install: the call is stdlib `urllib`, vectors are cached
-machine-locally (not in the synced store), and a missing or dead endpoint is a silent fallback to
-lexical recall — never blocking, never an error. Two gates, both yours: no switch → no requests;
-no answer → no change.
+endpoint (the same servers that serve distillation: MLX, Ollama, llama.cpp, LM Studio) and fuses
+the two channels by **rank**, not by score (reciprocal-rank fusion, `1/(60+rank_lex) + 1/(60+rank_sem)`):
+lexical ratios and cosine similarities are different scales and are never compared as numbers —
+admission stays score-based (a paraphrase needs the same evidence bar as before), ordering becomes
+ordinal. A vector can rescue a paraphrase the words miss; an exact word match keeps rank 1 in its
+channel, and two channels agreeing outrank one channel alone. With the flag off — or when the
+endpoint doesn't answer — the fusion stage is bypassed entirely and recall is byte-identical to
+purely lexical. Nothing new to install: the call is stdlib `urllib`, vectors are cached
+machine-locally (not in the synced store), and a missing or dead endpoint is a silent fallback —
+never blocking, never an error. Two gates, both yours: no switch → no requests; no answer → no change.
 
 ## Dashboard
 

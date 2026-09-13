@@ -151,15 +151,20 @@ _RANK_PRECISION = 2
 _FRESHNESS_SHARE = 0.6
 _REINFORCEMENT_SHARE = 0.4
 
-# Ceiling for the optional semantic signal, as a fraction of a perfect match.
-# Deliberately below 1.0: a strong lexical match (exact substring = 1.0) can
-# never be overtaken by a vector similarity, however high — the semantic score
-# is an additional relevance signal that rescues candidates the words miss
-# (paraphrases, zero word overlap), not a new owner of the ranking. Two stores
-# holding the same memory must still agree on the order, and a signal whose
-# value depends on which model happens to be installed cannot outrank one that
-# doesn't.
-_SEMANTIC_CAP = 0.8
+# RRF fusion constants (docs/design/rrf-fusion.md rev4). The semantic
+# channel no longer mixes scales with the lexical one: admission keeps
+# magnitude, ranking is ordinal (1/(K+rank) sums).
+#
+# _RRF_K: the published default (Cormack/Clarke/Buettcher SIGIR 2009),
+# robust across TREC collections; no knob because a knob nobody can
+# calibrate is worse than a constant everybody can read.
+_RRF_K = 60
+
+# Semantic admission floor. Equals the effective rescue bar of the old
+# capped-max fusion (0.22 / 0.8, the deleted _SEMANTIC_CAP): a record was
+# served iff max(lex, sem*0.8) >= 0.22, i.e. iff lex >= 0.22 OR
+# sem >= 0.275 — the admitted SET is unchanged by construction.
+_SEMANTIC_FLOOR = 0.275
 
 # Minimum relevance a candidate needs to enter recall. Named (not a literal in
 # search) because the optional semantic channel reuses it: a paraphrase rescued
@@ -1025,9 +1030,12 @@ def search(
     replacement is already recorded here is worse than returning nothing.
 
     With ``FOLDCRUMBS_SEMANTIC=1`` an optional embedding channel joins the
-    lexical score (best-of, capped below a perfect word match — see
-    ``_SEMANTIC_CAP``); without the flag, or when the embedding endpoint does
-    not answer, results are purely lexical and identical to before.
+    ranking via reciprocal-rank fusion (docs/design/rrf-fusion.md): admission
+    stays score-based (``_RECALL_THRESHOLD`` / ``_SEMANTIC_FLOOR``), ordering
+    becomes ordinal — the two channels' scores never mix scales. Without the
+    flag, or when the embedding endpoint does not answer, the fusion stage is
+    bypassed entirely and results are purely lexical, byte-identical to the
+    pre-RRF ordering.
     """
     import re
 
@@ -1037,7 +1045,10 @@ def search(
     words = [w for w in re.findall(r"\w+", q) if len(w) > 2]
     want_types = {t.lower() for t in types} if types else None
     want_tags = {t.lower() for t in tags} if tags else None
-    scored: list[tuple[float, MemoryRecord]] = []
+    scored: list[tuple[float, float, MemoryRecord, float]] = []
+    # (score, tiebreak, record, comparison_key) — the key is what the final
+    # sort and _reinforceable compare: round(lex,2) on the legacy path,
+    # full-float rrf under fusion (RRF design §D5).
     # Read once and reused for the claims below. Scoring consumes the whole
     # local store anyway, so holding it costs nothing — while leaving it lazy
     # meant the federated pass parsed every local file a second time.
@@ -1114,32 +1125,60 @@ def search(
             qvec = vectors[0]
             sem_scores = [embeddings.cosine(qvec, v) for v in vectors[1:]]
 
-    for i, (lex, _, m) in enumerate(lexical):
-        score = lex
-        if sem_scores is not None:
-            # Relevance is the best of two independent evidence channels, but
-            # the semantic one is capped below a perfect lexical match: no
-            # vector similarity can outrank what the words already matched
-            # exactly, and it rescues paraphrases the lexical pass could not
-            # see at all (they would never have reached the threshold below).
-            capped = max(0.0, sem_scores[i]) * _SEMANTIC_CAP
-            if capped > score:
-                score = capped
-        if score >= _RECALL_THRESHOLD:
-            scored.append((score, _tiebreak(m, recalled), m))
-    # Relevance decides the order; recency and use only separate memories
-    # that matched *equally well*. Folding either into the score itself let a
-    # near match times its bonus overtake an exact one — 0.9613 x 1.1 beats
-    # 1.0 — so they are a later key, never part of the number compared.
-    # Comparable means equal to two decimals: finer than that is noise from a
-    # fuzzy ratio, not a real difference in how well something matched.
-    # Ties then break by locality (a local memory is the one this instance can
-    # act on) and finally by filename, so the result never depends on
-    # directory order.
-    scored.sort(key=lambda t: (-round(t[0], _RANK_PRECISION), -t[1],
+    if sem_scores is None:
+        # LEGACY PATH (RRF design rev4 §D4): the semantic channel is off or
+        # failed — the fusion stage is bypassed ENTIRELY and the served
+        # ordering is byte-identical to pre-RRF code. Relevance decides the
+        # order; recency and use only separate memories that matched *equally
+        # well* (folding either into the score let a near match times its
+        # bonus overtake an exact one — 0.9613 x 1.1 beats 1.0). Comparable
+        # means equal to two decimals: finer is fuzzy-ratio noise, not a real
+        # difference. Ties break by locality, then filename — never by
+        # directory order.
+        for lex, _hay, m in lexical:
+            if lex >= _RECALL_THRESHOLD:
+                scored.append((lex, _tiebreak(m, recalled), m,
+                               round(lex, _RANK_PRECISION)))
+    else:
+        # RRF FUSION (docs/design/rrf-fusion.md rev4). Two incommensurable
+        # evidence channels are never compared as scores: admission keeps
+        # magnitude (§D1), ranking is ordinal (§D2-D3).
+        admitted = []
+        for i, (lex, hay, m) in enumerate(lexical):
+            sem = max(0.0, sem_scores[i])
+            if lex >= _RECALL_THRESHOLD or sem >= _SEMANTIC_FLOOR:
+                admitted.append((lex, sem, m))
+        # rank_lex: position under TODAY'S full sort key (including its
+        # 2-decimal quantization — that bucketing is part of the behavior
+        # the design promises to preserve). rank_sem: (-sem, filename),
+        # a deterministic total order. Sparse ranks, no gaps: every
+        # admitted candidate ranks in every available channel.
+        def _lex_key(t):
+            return (-round(t[0], _RANK_PRECISION), -_tiebreak(t[2], recalled),
+                    t[2].is_foreign, t[2].source_path or t[2].filename())
+
+        lex_order = sorted(range(len(admitted)), key=lambda i: _lex_key(admitted[i]))
+        sem_order = sorted(range(len(admitted)),
+                           key=lambda i: (-admitted[i][1],
+                                          admitted[i][2].source_path
+                                          or admitted[i][2].filename()))
+        rank_lex = {idx: r + 1 for r, idx in enumerate(lex_order)}
+        rank_sem = {idx: r + 1 for r, idx in enumerate(sem_order)}
+        for idx, (lex, sem, m) in enumerate(admitted):
+            # integer ranks => deterministic float values run-to-run (§D5b:
+            # deterministic IEEE-754 approximations, NOT rational exactness;
+            # crossed-rank pairs tie bit-for-bit by commutativity, and every
+            # residual tie settles on the total-order chain below)
+            rrf = (1.0 / (_RRF_K + rank_lex[idx])
+                   + 1.0 / (_RRF_K + rank_sem[idx]))
+            scored.append((rrf, _tiebreak(m, recalled), m, rrf))
+    # Final ordering. The 4th tuple element is the COMPARISON KEY (§D5):
+    # legacy = round(lex, 2) (today's buckets), RRF = full-float rrf (no
+    # rounding — rev 1's round(rrf, 5) collapsed adjacent ranks past ~250).
+    scored.sort(key=lambda t: (-t[3], -t[1],
                                t[2].is_foreign,
                                t[2].source_path or t[2].filename()))
-    top = [m for _, _, m in scored[:limit]]
+    top = [m for _, _, m, _k in scored[:limit]]
     # None unless the listing is *complete*. A partial one — a directory that
     # exists but a file that would not open — names fewer memories than the
     # store holds, and reconciling against it would erase the counts of every
@@ -1172,15 +1211,21 @@ def _reinforceable(scored: list, top: list[MemoryRecord], limit: int) -> list[st
     of equally-relevant memories is decided by filename, and only the winner is
     ever reinforced: an arbitrary tiebreak would compound into a permanent lead
     that reflects nothing but having been first alphabetically.
+
+    "Just as well" is decided by the tuple's COMPARISON KEY (element 3), not
+    by re-rounding the raw score (RRF design §D5 / RT r2 PoC): legacy keys are
+    already rounded to 2 decimals, RRF keys are full-float — rounding them
+    here would collapse every fused score into one bucket and reinforce the
+    whole candidate list through a limit=1 cut.
     """
     names = [m.id for m in top if _countable(m)]
     if limit <= 0:
         return []       # nothing was returned, so nothing was used
     if len(scored) <= limit:
         return names
-    cutoff = round(scored[limit - 1][0], _RANK_PRECISION)
-    for score, _, m in scored[limit:]:
-        if round(score, _RANK_PRECISION) != cutoff:
+    cutoff = scored[limit - 1][3]
+    for _score, _tb, m, key in scored[limit:]:
+        if key != cutoff:
             break              # sorted, so nothing later can tie either
         if _countable(m):
             names.append(m.id)
