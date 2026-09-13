@@ -543,7 +543,9 @@ rispondere: *la sorgente è ancora viva e invariata da quando l'abbiamo
 copiata?* Ogni adozione attestata viene ri-risolta nel suo root e
 classificata: `fresh`, `source_changed` (modificata dopo l'adozione —
 tolleranza al secondo), `source_dead` (ritirata alla sorgente),
-`source_gone` (scansione completa, l'id non esiste più) o
+`source_gone` (scansione completa, l'id non esiste più),
+`source_unverified` (sorgente viva ma senza `updated_at` — lo storico
+delle modifiche non è verificabile) o
 `source_unreachable` (root deregistrato, store non disponibile, id sorgente
 ambiguo, scansione incompleta — la perdita di evidenza non viene mai
 spacciata per evidenza di perdita). Un `adopted_at` attestato illeggibile

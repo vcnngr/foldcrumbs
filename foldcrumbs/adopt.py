@@ -230,6 +230,8 @@ def check_fresh(cwd=None) -> list[dict]:
     * ``source_dead``     — alive on disk but retired at source
                              (superseded/archived/deleted/expired)
     * ``source_gone``     — the id no longer resolves in the source root
+    * ``source_unverified`` — alive, but carries no updated_at (legacy
+                             record): edit history cannot be checked
     * ``source_unreachable`` — the root is deregistered or its store
                              directory is unavailable
 
@@ -339,10 +341,13 @@ def check_fresh(cwd=None) -> list[dict]:
                     "to call anything fresh on a date that cannot be read; "
                     f"fix or re-attest the entry in {LEDGER}")
             if getattr(src, "updated_at_missing", False):
-                # RT r1 F4 (P1, fixed): a legacy source without updated_at
-                # gets one INVENTED by the parser — invention is not
-                # evidence of an edit. Report the limitation, not a fake
-                # source_changed.
+                # RT r1 F4 + r2 residual (P1 sweep): a legacy source
+                # without updated_at gets one INVENTED by the parser —
+                # invention is not evidence of an edit, and "fresh" would
+                # claim a verification that never happened. A distinct
+                # status carries the uncertainty in the machine-readable
+                # field, not only in prose.
+                row["status"] = "source_unverified"
                 row["detail"] = ("source alive, but it carries no "
                                  "updated_at timestamp — edit history "
                                  "cannot be verified")

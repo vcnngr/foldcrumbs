@@ -234,6 +234,10 @@ def render_authorization_section(cwd=None) -> str:
     if not grants:
         return ""
     grants.sort(key=lambda m: (m.created_at, m.source_path or m.filename()))
+    # P1 sweep (PR64 RT F7): ONE invalidation context for the whole ledger
+    # render, not one per grant.
+    from . import invalidation as _inv
+    _ctx = _inv.ReadContext.for_store(cwd)
     lines = [
         "Authorizations (verify before acting — memory is not the source "
         "of truth; this section is exempt from 'honour it, do not re-ask'):",
@@ -248,7 +252,7 @@ def render_authorization_section(cwd=None) -> str:
         lines.append(
             f"    backed by: {g.backed_by or 'MISSING'}"
             f" ({backing_status(g.backed_by, cwd)}) | {state}"
-            + _invalidation_label(g, cwd))
+            + _invalidation_label(g, ctx=_ctx))
         if state == "RETIRED":
             trace = render_trace(g, cwd)
             for tl in trace.splitlines()[1:]:
@@ -256,15 +260,18 @@ def render_authorization_section(cwd=None) -> str:
     return "\n".join(lines)
 
 
-def _invalidation_label(g: MemoryRecord, cwd=None) -> str:
+def _invalidation_label(g: MemoryRecord, cwd=None, ctx=None) -> str:
     """INV design rev2 T14: a grant carrying an invalidation contract
     renders BOTH states — its own (UNBACKED/…) and the contract's. Neither
     suppressed by the other: the ledger is a repair surface, not a ranking.
+    ``ctx``: a prebuilt ReadContext (P1 sweep, PR64 RT F7 — one per ledger
+    render); None falls back to building one.
     """
     from . import invalidation as _inv
     if not _inv.carries_contract(g):
         return ""
-    ctx = _inv.ReadContext.for_store(cwd)
+    if ctx is None:
+        ctx = _inv.ReadContext.for_store(cwd)
     outcome, detail = _inv.derive(g, ctx)
     if outcome == _inv.VALID:
         return ""

@@ -161,8 +161,11 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     # <root_id>:file.md, memory files only (RT F1/F3).
     from . import mcp_server
     found = 0
+    # P1 sweep (PR64 RT F7): one ReadContext for the whole CLI fetch
+    from . import invalidation as _inv
+    ctx = _inv.ReadContext.for_store() if len(args.names) > 1 else None
     for name in args.names:
-        text, reason = mcp_server._fetch_one(name)
+        text, reason = mcp_server._fetch_one(name, shared_ctx=ctx)
         if text is None:
             print(f"--- {name}: {reason}")
             continue

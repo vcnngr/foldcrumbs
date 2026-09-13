@@ -7,13 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **P1 sweep from the red-team backlog** (all declared non-blocking by
+  the RT gates, none ever vetoed — closed anyway):
+  - recall diagnostics tail now obeys the same query/type/tag filters
+    and relevance as the served list — a record the query would never
+    have surfaced is no longer reported as "matched but not served"
+    (PR #64 RT F5);
+  - `find_conflict_candidates` applies the invalidation derive — an
+    invalidated memory is no longer offered as a conflict candidate
+    (PR #64 RT F6);
+  - one invalidation `ReadContext` per OPERATION: multi-name fetch
+    (CLI + MCP) shares a single context, and the authorization ledger
+    renders with one context instead of one per grant (PR #64 RT F7);
+  - `adopt --check-fresh`: a legacy source without `updated_at` now
+    reports `source_unverified` instead of defaulting to `fresh` —
+    uncertainty lives in the machine-readable status, not only in
+    prose (PR #66 RT r2 residual);
+  - MCP `adopt` note happy-path coverage (explicit note + default
+    "adopted via MCP (agent)" land in the ledger) — FL-3 P1 backlog.
+
 ### Added
 
 - **`adopt --check-fresh`** — read-only stale-adoption report (paper
   arXiv 2609.03340, "Fresh Memory, Stale Plans"): every attested
   adoption is re-resolved in its source root and classified
   `fresh` / `source_changed` / `source_dead` / `source_gone` /
-  `source_unreachable` — root deregistered, store unavailable, ambiguous
+  `source_unverified` / `source_unreachable` — root deregistered, store
+  unavailable, ambiguous
   source id, or an incomplete scan (loss of evidence never masquerades
   as evidence of loss); same-second edits are inside the documented
   tolerance; an unusable attested `adopted_at` is refused visibly,
