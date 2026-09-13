@@ -657,8 +657,16 @@ def find_conflict_candidates(
     pool = iter_memories(cwd)
     if federated:
         pool = itertools.chain(pool, iter_federated(cwd))
+    # P1 sweep (PR64 RT F6): the conflict queue obeys the same derived
+    # visibility as the served context — an invalidated memory is not a
+    # candidate worth conflicting with. One context per call.
+    from . import invalidation as _inv
+    _recs, _complete = _read_local(cwd)
+    _ctx = _inv.ReadContext(_recs, complete=_complete)
     for m in pool:
         if not _visible(m) or m.id == rec.id:
+            continue
+        if _inv.carries_contract(m) and not _inv.is_served(m, _ctx):
             continue
         if _similarity(rec, m) >= _DEDUP_THRESHOLD:
             continue
@@ -1055,17 +1063,6 @@ def search(
     for m in candidates:
         if not _visible(m):
             continue
-        if _inv.carries_contract(m):
-            if m.is_foreign:
-                outcome, detail = (_inv.UNRESOLVED,
-                                   "contract lives in the owner store — "
-                                   "cannot verify from here")
-            else:
-                outcome, detail = _inv.derive(m, _ctx)
-            if outcome != _inv.VALID:
-                if collect_invalidated is not None:
-                    collect_invalidated.append((m, outcome, detail))
-                continue
         # AUTH design rev2 §D4: grants never compete in ordinary search —
         # they are served by the ledger section (authz.render_authorization_
         # section) with derived state, or not at all.
@@ -1078,6 +1075,23 @@ def search(
         if want_tags and not (want_tags & {t.lower() for t in m.tags}):
             continue
         hay = f"{m.title}\n{m.content}\n{' '.join(m.tags)}".lower()
+        # P1 sweep (PR64 RT F5): the diagnostics tail must obey the SAME
+        # filters and relevance as the served list — a record the query
+        # would never have surfaced is not "matched but not served".
+        if _inv.carries_contract(m):
+            if m.is_foreign:
+                outcome, detail = (_inv.UNRESOLVED,
+                                   "contract lives in the owner store — "
+                                   "cannot verify from here")
+            else:
+                outcome, detail = _inv.derive(m, _ctx)
+            if outcome != _inv.VALID:
+                relevant = bool(q) and (
+                    q in hay
+                    or (words and any(w in hay for w in words)))
+                if collect_invalidated is not None and relevant:
+                    collect_invalidated.append((m, outcome, detail))
+                continue
         if q in hay:
             score = 1.0
         elif words:

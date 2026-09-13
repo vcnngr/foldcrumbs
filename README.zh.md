@@ -497,7 +497,8 @@ frontmatter 里：文件可以在自己的 `source` 上说谎，台账无法被�
 `adopt --check-fresh` 回答台账无法回答的问题：*自我们复制以来，源记忆是否
 仍然活跃且未变更？*每条已认证的采用都会在其源 root 中重新解析并分类：
 `fresh`、`source_changed`（采用后被编辑 — 秒级容差）、`source_dead`（在源端
-已退役）、`source_gone`（完整扫描后 id 不再存在）或 `source_unreachable`
+已退役）、`source_gone`（完整扫描后 id 不再存在）、`source_unverified`（源记忆存活但没有
+`updated_at` — 无法核查编辑历史）或 `source_unreachable`
 （root 已注销、存储不可用、源 id 歧义或扫描不完整 — 证据丢失绝不会被当作丢失的
 证据）。无法读取的 `adopted_at` 认证时间戳会被显式拒绝，绝不默认按 "fresh" 处理。
 它是严格**只读**的：绝不同步、绝不写入、绝不触碰本地副本 — 新鲜度是信息，

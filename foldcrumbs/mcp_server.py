@@ -457,13 +457,18 @@ def _is_memory_filename(name: str) -> bool:
     return not store.is_store_artifact(name)
 
 
-def _fetch_one(name: str) -> tuple[str | None, str]:
+def _fetch_one(name: str, shared_ctx=None) -> tuple[str | None, str]:
     """Full text of one memory by ref. Returns (text, refusal_reason).
 
     Two ref shapes, no others (RT F1):
     * ``file.md`` — a LOCAL memory, resolved via store.get (path-safe).
     * ``<root_id>:file.md`` — a FOREIGN memory in a registered federated
       root, read-only, resolved inside that root's memory dir only.
+
+    ``shared_ctx``: an optional prebuilt invalidation.ReadContext. A
+    multi-name fetch builds ONE context for the whole operation (P1
+    sweep, PR64 RT F7) and passes it down; None keeps the old per-call
+    behavior for single fetches.
     """
     if not isinstance(name, str) or not name:
         return None, "not found"
@@ -540,7 +545,10 @@ def _fetch_one(name: str) -> tuple[str | None, str]:
                 "contract unverified (contract lives in the owner "
                 "store — cannot verify from here); verify before use]")
         else:
-            ctx = _inv.ReadContext.for_store()
+            # P1 sweep (PR64 RT F7): reuse the caller's context when one
+            # is supplied — one ReadContext per OPERATION, not per name.
+            ctx = shared_ctx if shared_ctx is not None \
+                else _inv.ReadContext.for_store()
             outcome, detail = _inv.derive(rec, ctx)
             if outcome != _inv.VALID:
                 prefixes.append(
@@ -560,8 +568,11 @@ def tool_fetch(args: dict[str, Any]) -> str:
         return ("refused: fetch needs 'names' — one filename string or a "
                 "flat list of filename strings.")
     out = []
+    # P1 sweep (PR64 RT F7): one ReadContext for the whole fetch operation
+    from . import invalidation as _inv
+    ctx = _inv.ReadContext.for_store() if len(names) > 1 else None
     for n in names:
-        text, reason = _fetch_one(n)
+        text, reason = _fetch_one(n, shared_ctx=ctx)
         if text is None:
             out.append(f"--- {n}: {reason}")
         else:
