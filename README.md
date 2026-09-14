@@ -498,7 +498,11 @@ belong to someone else, but `write_memory`, `upsert` and `mark_superseded_on_dis
 also refuse a foreign record outright. When distillation finds a new memory that
 contradicts one in another instance's store, it records the claim on its own
 record and the federated view marks that entry as contested — their instance
-stays the only one that can retire their file.
+stays the only one that can retire their file. Recall never hides the dispute
+silently: a contested match the query would have served comes back as a
+"matched but not served" diagnostic line that names the claiming memory and
+points at `foldcrumbs conflicts` — visibility over arbitration; the arbitration
+itself stays a human verb.
 
 Leave the shared view with `foldcrumbs roots remove <id>`; the store itself is
 untouched, and only an explicit `install` / `roots add` brings it back.

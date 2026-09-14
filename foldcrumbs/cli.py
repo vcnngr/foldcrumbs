@@ -112,18 +112,25 @@ def _cmd_recall(args: argparse.Namespace) -> int:
     # INV design rev2 §D3: CLI and MCP serve the same honest view — the
     # partition happens in one pass inside search; diagnostics ride the tail.
     invalidated: list = []
+    contested: list = []
     top = store.search(args.query, limit=args.limit,
                        types=args.type or None, tags=args.tag or None,
-                       collect_invalidated=invalidated)
+                       collect_invalidated=invalidated,
+                       collect_contested=contested)
     if getattr(args, "index", False):
         # Layer 1 of 3: compact index — pair with `foldcrumbs fetch`.
         # RT F1: foreign hits are qualified <root_id>:<filename> and marked,
         # so fetch can never resolve them to a local homonym.
         if not top:
-            print("(no matching memories)")
+            print("(no matching memories)" if not (invalidated or contested)
+                  else "(no matching memories served as current)")
             if invalidated:
                 print(f"({len(invalidated)} contract-carrying match(es) not "
                       f"served as current — see full recall diagnostics)")
+            if contested:
+                print(f"({len(contested)} contested match(es) not served — "
+                      f"this store records a replacement; see full recall "
+                      f"diagnostics / `conflicts`)")
             return 0
         for m in top:
             name = m.source_path or m.filename()
@@ -137,13 +144,23 @@ def _cmd_recall(args: argparse.Namespace) -> int:
         if invalidated:
             print(f"({len(invalidated)} contract-carrying match(es) not "
                   f"served as current — see full recall diagnostics)")
+        if contested:
+            print(f"({len(contested)} contested match(es) not served — "
+                  f"this store records a replacement; see full recall "
+                  f"diagnostics / `conflicts`)")
         return 0
     block = format_context_block(top, heading=args.query)
-    print(block or ("(no matching memories)" if not invalidated
+    withheld = invalidated or contested
+    print(block or ("(no matching memories)" if not withheld
                     else "(no matching memories served as current)"))
     if invalidated:
         from .mcp_server import _append_invalidated_tail
         tail = _append_invalidated_tail("", invalidated).strip()
+        print()
+        print(tail)
+    if contested:
+        from .mcp_server import _append_contested_tail
+        tail = _append_contested_tail("", contested).strip()
         print()
         print(tail)
     # AUTH design rev2 §D4: the authorization ledger is served with every
