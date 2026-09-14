@@ -397,6 +397,154 @@ def opencode_paths(global_scope: bool = True) -> dict[str, Path]:
 
 
 # --------------------------------------------------------------------------- #
+# Pi coding agent (pi.dev): TS extension auto-discovered by jiti, no build.
+# Verified against @earendil-works/pi-coding-agent dist types + examples:
+# extensions live in ~/.pi/agent/extensions/*.ts (global) or .pi/extensions/*.ts
+# (project, gated by project trust); registerTool takes a TypeBox schema;
+# before_agent_start may return {systemPrompt} to append context; pi reads
+# AGENTS.md natively (project dir and ~/.pi/agent/AGENTS.md global).
+# No MCP client in pi — the extension shells out to the foldcrumbs CLI and
+# reuses the agent-agnostic Python hook for the session-start index inject.
+# --------------------------------------------------------------------------- #
+
+PI_EXTENSION = '''\
+// foldcrumbs memory extension for the pi coding agent (pi.dev).
+// Installed by `foldcrumbs install --agent pi`. Tools shell out to the
+// foldcrumbs CLI; the session-start index reuses the same agent-agnostic
+// Python hook Claude Code/Codex use. No MCP, no build step (jiti loads TS).
+import {{ execFileSync, spawnSync }} from "node:child_process";
+import type {{ ExtensionAPI }} from "@earendil-works/pi-coding-agent";
+import {{ Type }} from "typebox";
+
+const FOLDCRUMBS_BIN = {bin};
+const HOOK = {hook};
+const PYTHON = {python};
+
+function run(args: string[], cwd?: string): string {{
+  try {{
+    const out = execFileSync(FOLDCRUMBS_BIN, args, {{
+      cwd, encoding: "utf-8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"],
+    }});
+    return out;
+  }} catch (e: any) {{
+    return `foldcrumbs error: ${{e?.message ?? e}}`;
+  }}
+}}
+
+const RECALL_PARAMS = Type.Object({{
+  query: Type.String({{ description: "what to recall" }}),
+  index: Type.Optional(Type.Boolean({{ description: "hit list only (cheap)" }})),
+}});
+
+const REMEMBER_PARAMS = Type.Object({{
+  content: Type.String({{ description: "the durable fact/decision/lesson" }}),
+  type: Type.Optional(Type.String({{ description: "fact|decision|preference|..." }})),
+  expires: Type.Optional(Type.String({{ description: "ISO date; for dated truths" }})),
+}});
+
+export default function foldcrumbsPiExtension(pi: ExtensionAPI) {{
+  let indexBlock = "";
+
+  // Reuse the agent-agnostic hook: it reads {{cwd, session_id}} on stdin and
+  // emits hookSpecificOutput.additionalContext (the MEMORY.md index block).
+  pi.on("session_start", async (_event, ctx) => {{
+    try {{
+      const res = spawnSync(PYTHON, [HOOK], {{
+        input: JSON.stringify({{ cwd: ctx.cwd, session_id: "pi", source: "startup" }}),
+        encoding: "utf-8", timeout: 30_000,
+      }});
+      const parsed = JSON.parse(res.stdout || "{{}}");
+      indexBlock = parsed?.hookSpecificOutput?.additionalContext ?? "";
+    }} catch {{
+      indexBlock = "";
+    }}
+  }});
+
+  pi.on("before_agent_start", async (event) => {{
+    if (!indexBlock) return;
+    return {{ systemPrompt: event.systemPrompt + "\\n\\n" + indexBlock + "\\n" }};
+  }});
+
+  pi.registerTool({{
+    name: "foldcrumbs_recall",
+    label: "Recall memory",
+    description:
+      "Search this project's persistent memory (decisions, conventions, " +
+      "preferences from previous sessions). Use index=true for a cheap hit " +
+      "list, then read a file for detail.",
+    promptSnippet: "search persistent project memory",
+    parameters: RECALL_PARAMS,
+    async execute(_id, params, _signal, _onUpdate, ctx) {{
+      const args = ["recall", params.query];
+      if (params.index) args.push("--index");
+      const text = run(args, ctx.cwd);
+      return {{ content: [{{ type: "text", text: text || "(no matching memories)" }}], details: {{}} }};
+    }},
+  }});
+
+  pi.registerTool({{
+    name: "foldcrumbs_remember",
+    label: "Remember",
+    description:
+      "Persist a durable fact, decision, preference or lesson for future " +
+      "sessions. One fact per call. Authorizations are refused here by " +
+      "design (human CLI path only).",
+    promptSnippet: "persist a durable memory",
+    parameters: REMEMBER_PARAMS,
+    async execute(_id, params, _signal, _onUpdate, ctx) {{
+      const args = ["remember", params.content];
+      if (params.type) args.push("--type", params.type);
+      if (params.expires) args.push("--expires", params.expires);
+      const text = run(args, ctx.cwd);
+      return {{ content: [{{ type: "text", text }}], details: {{}} }};
+    }},
+  }});
+}}
+'''
+
+
+def pi_paths(global_scope: bool = True) -> dict[str, Path]:
+    """Resolve pi extension/AGENTS paths for global or project scope."""
+    if global_scope:
+        base = Path.home() / ".pi" / "agent"
+        return {"extensions": base / "extensions", "agents": base / "AGENTS.md"}
+    base = Path.cwd() / ".pi"
+    return {"extensions": base / "extensions",
+            "agents": Path.cwd() / "AGENTS.md"}
+
+
+def write_pi_extension(extensions_dir: Path,
+                       runtime_root: Path | None = None) -> Path:
+    """Write the foldcrumbs pi extension into an auto-discovered dir.
+
+    Idempotent by filename (pi loads *.ts from the dir); rewrites on every
+    install so the extension tracks the staged runtime location.
+    """
+    hooks_dir = _stage_hook_runtime(runtime_root)
+    py = sys.executable or "python3"
+    d = Path(extensions_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "foldcrumbs.ts"
+    # JSON-string literals: valid TS, correct escaping on every platform
+    body = PI_EXTENSION.format(
+        bin=json.dumps(shutil.which("foldcrumbs") or "foldcrumbs"),
+        hook=json.dumps(str(hooks_dir / "session_start.py")),
+        python=json.dumps(py),
+    )
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def remove_pi_extension(extensions_dir: Path) -> bool:
+    """Delete our extension file (never touches other extensions)."""
+    path = Path(extensions_dir) / "foldcrumbs.ts"
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
 # Claude Code MCP registration
 # --------------------------------------------------------------------------- #
 

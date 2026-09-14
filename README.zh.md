@@ -92,6 +92,7 @@ foldcrumbs install                      # Claude Code，全局（~/.claude/setti
 foldcrumbs install --local              # Claude Code，项目级（.claude/settings.json）
 foldcrumbs install --agent codex        # Codex：hooks.json + 打印 config.toml 的 MCP 片段
 foldcrumbs install --agent opencode     # OpenCode：opencode.json MCP + 插件 + AGENTS.md 块
+foldcrumbs install --agent pi           # Pi（pi.dev）：自动发现的 TS 扩展 + AGENTS.md 块
 ```
 installer 是可合并且幂等的：它只追加自己的 hook 组，不动已有的 hook
 （GSD、graphify 等）。会先写入一份 `.foldcrumbs-bak` 备份。
@@ -701,6 +702,7 @@ Codex 和 OpenCode 由 `foldcrumbs install --agent …` 接入它。注册上面
 | Claude Code | SessionStart hook | PostToolUse 监控器 + SessionEnd | 完整生命周期 hook |
 | Codex | SessionStart hook（`additionalContext`） | Stop + PostToolUse hook | 相同脚本；+ MCP 提供会话内工具调用 |
 | OpenCode | AGENTS.md → agent 调用 `recall`（MCP） | 插件 `session.idle`/`session.compacted` | 没有可注入的 hook，因此由提示词驱动召回 |
+| Pi (pi.dev) | `session_start` hook → 索引块注入系统提示（`before_agent_start`） | 原生工具 `foldcrumbs_recall`/`foldcrumbs_remember`，通过 CLI 执行 | Pi 没有 MCP 客户端 — 单个自动发现的 TS 扩展（`~/.pi/agent/extensions/foldcrumbs.ts`，由 jiti 加载，无需构建） |
 | Hermes | 每个 profile 一行 `FOLDCRUMBS_DIR` | agent 调用 CLI / MCP | 无 hook；每个 profile 一个专属存储，对其余存储只读联邦 |
 
 ## 路线图
