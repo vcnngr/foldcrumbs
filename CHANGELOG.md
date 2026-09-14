@@ -24,45 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transcript distillation on session end is a follow-up (Pi's session
   format differs; v1 covers recall/remember/inject).
 
-### Changed
-
-- **Semantic recall now fuses by rank, not by score** (RRF,
-  docs/design/rrf-fusion.md): with `FOLDCRUMBS_SEMANTIC=1`, the lexical
-  and embedding channels are combined via reciprocal-rank fusion
-  (`1/(60+rank_lex) + 1/(60+rank_sem)`) instead of the old capped
-  best-of (`max(lex, sem*0.8)`). Admission is unchanged as a SET
-  (`lex >= 0.22 OR sem >= 0.275` — the same bar the cap produced);
-  ordering under semantic-on may differ: two channels agreeing now
-  outrank one channel alone, and the exact-match guarantee weakens
-  from numeric to ordinal (a crossed-rank rival ties an exact match
-  and the freshness/reinforcement tiebreak decides). **With the flag
-  off or the endpoint down, ordering is byte-identical to before** —
-  the fusion stage is bypassed entirely. Reinforcement bookkeeping
-  keeps its exact tie-group semantics on both paths.
-
-### Fixed
-
-- **P1 sweep from the red-team backlog** (all declared non-blocking by
-  the RT gates, none ever vetoed — closed anyway):
-  - recall diagnostics tail now obeys the same query/type/tag filters
-    and relevance as the served list — a record the query would never
-    have surfaced is no longer reported as "matched but not served"
-    (PR #64 RT F5);
-  - `find_conflict_candidates` applies the invalidation derive — an
-    invalidated memory is no longer offered as a conflict candidate
-    (PR #64 RT F6);
-  - one invalidation `ReadContext` per OPERATION: multi-name fetch
-    (CLI + MCP) shares a single context, and the authorization ledger
-    renders with one context instead of one per grant (PR #64 RT F7);
-  - `adopt --check-fresh`: a legacy source without `updated_at` now
-    reports `source_unverified` instead of defaulting to `fresh` —
-    uncertainty lives in the machine-readable status, not only in
-    prose (PR #66 RT r2 residual);
-  - MCP `adopt` note happy-path coverage (explicit note + default
-    "adopted via MCP (agent)" land in the ledger) — FL-3 P1 backlog.
-
-### Added
-
 - **`adopt --check-fresh`** — read-only stale-adoption report (paper
   arXiv 2609.03340, "Fresh Memory, Stale Plans"): every attested
   adoption is re-resolved in its source root and classified
@@ -150,7 +111,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The G0 `graph` renderer now draws explicit G1 relations (predicate-
     labelled edges in text/mermaid/dot/html), hostile-label-safe.
 
+### Changed
+
+- **Semantic recall now fuses by rank, not by score** (RRF,
+  docs/design/rrf-fusion.md): with `FOLDCRUMBS_SEMANTIC=1`, the lexical
+  and embedding channels are combined via reciprocal-rank fusion
+  (`1/(60+rank_lex) + 1/(60+rank_sem)`) instead of the old capped
+  best-of (`max(lex, sem*0.8)`). Admission is unchanged as a SET
+  (`lex >= 0.22 OR sem >= 0.275` — the same bar the cap produced);
+  ordering under semantic-on may differ: agreement between the two
+  channels now contributes to the order (it wins the clear cases,
+  though crossed-rank rivals can tie and the tie-break decides), and
+  the exact-match guarantee weakens
+  from numeric to ordinal (a crossed-rank rival ties an exact match
+  and the freshness/reinforcement tiebreak decides). **With the flag
+  off or the endpoint down, ordering is byte-identical to before** —
+  the fusion stage is bypassed entirely. Reinforcement bookkeeping
+  keeps its exact tie-group semantics on both paths.
+
 ### Fixed
+
+- **P1 sweep (RT-declared, non-blocking) closed**: RRF golden tests now
+  pin the declared outcomes instead of weaker claims (embedder-never-called
+  guarantee, explicit legacy order, reinforcement tie-group at limit=1,
+  the design's (2,1)-beats-(1,3) agreement table without an accidental
+  crossed tie, crossed-rank tie winner by tie-break chain, autonomous
+  reinforcement-tiebreak fixture); README x3 + CHANGELOG no longer claim
+  channel agreement *always* outranks single-channel strength (it
+  contributes; crossed-rank rivals can tie). Pi extension: tool failures
+  now surface as `isError` results instead of ordinary text, and
+  query/content starting with `-` (e.g. `--grants=…`) round-trip
+  literally (`--opt=value` + `--` separator; regression-pinned against
+  the reviewer's PoC). The shared AGENTS.md install block is now
+  agent-agnostic (names both the MCP tools and the Pi native
+  `foldcrumbs_*` tools instead of promising "MCP" on agents that have
+  no MCP client).
+
+- **P1 sweep from the red-team backlog** (all declared non-blocking by
+  the RT gates, none ever vetoed — closed anyway):
+  - recall diagnostics tail now obeys the same query/type/tag filters
+    and relevance as the served list — a record the query would never
+    have surfaced is no longer reported as "matched but not served"
+    (PR #64 RT F5);
+  - `find_conflict_candidates` applies the invalidation derive — an
+    invalidated memory is no longer offered as a conflict candidate
+    (PR #64 RT F6);
+  - one invalidation `ReadContext` per OPERATION: multi-name fetch
+    (CLI + MCP) shares a single context, and the authorization ledger
+    renders with one context instead of one per grant (PR #64 RT F7);
+  - `adopt --check-fresh`: a legacy source without `updated_at` now
+    reports `source_unverified` instead of defaulting to `fresh` —
+    uncertainty lives in the machine-readable status, not only in
+    prose (PR #66 RT r2 residual);
+  - MCP `adopt` note happy-path coverage (explicit note + default
+    "adopted via MCP (agent)" land in the ledger) — FL-3 P1 backlog.
 
 - `compute_confidence` with `contradiction_detected` could RAISE a very low
   effective weight via the 0.1 floor; it is now capped at the

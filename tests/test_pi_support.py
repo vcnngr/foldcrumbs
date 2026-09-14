@@ -67,6 +67,14 @@ class TestPiExtensionWrite(unittest.TestCase):
                        'pi.on("before_agent_start"',
                        '@earendil-works/pi-coding-agent', 'from "typebox"'):
             self.assertIn(needle, body)
+        # RT P1 sweep pins: option/positional separation and error surface
+        self.assertIn('args.push("--", params.query)', body)
+        self.assertIn('args.push("--", params.content)', body)
+        self.assertIn('--type=${', body)
+        self.assertIn('isError: true', body)
+        # the old unsafe shapes must NOT come back
+        self.assertNotIn('["recall", params.query]', body)
+        self.assertNotIn('["remember", params.content]', body)
 
     def test_rewrite_is_idempotent_single_file(self):
         from foldcrumbs import install
@@ -85,6 +93,14 @@ class TestPiExtensionWrite(unittest.TestCase):
         self.assertTrue(other.exists())
         self.assertFalse(install.remove_pi_extension(self.d))
 
+    def test_agents_md_block_agent_agnostic(self):
+        # RT P1 F1 (Pi): the shared block must not hardcode "MCP tools" —
+        # Pi exposes native foldcrumbs_* tools, OpenCode exposes MCP ones.
+        from foldcrumbs import install
+        for needle in ("foldcrumbs_recall", "foldcrumbs_remember",
+                       "MCP tools", "shell out"):
+            self.assertIn(needle, install.AGENTS_MD_BLOCK)
+
     def test_agents_md_block_appended_once(self):
         from foldcrumbs import install
         agents = SANDBOX / "pi_agents_test.md"
@@ -96,6 +112,55 @@ class TestPiExtensionWrite(unittest.TestCase):
         self.assertIsNone(install.append_agents_md(agents))
         self.assertEqual(
             agents.read_text(encoding="utf-8").count("Memory (foldcrumbs)"), 1)
+
+
+class TestDashContentRoundTrip(unittest.TestCase):
+    """RT P1 F2 (GPT PoC): content/query starting with "-" must round-trip
+    literally through the exact argv the pi extension now builds."""
+
+    def test_remember_dash_content_literal(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        from foldcrumbs import cli as cli_mod
+        d = Path(tempfile.mkdtemp(prefix="pi_dash_"))
+        env = dict(os.environ)
+        os.environ["FOLDCRUMBS_DIR"] = str(d)
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli_mod.main(["remember", "--type=fact", "--",
+                                   "--grants=synthetic"])
+            self.assertEqual(rc, 0)
+            files = [f for f in d.glob("*.md") if f.name != "MEMORY.md"]
+            self.assertEqual(len(files), 1)
+            self.assertIn("--grants=synthetic",
+                          files[0].read_text(encoding="utf-8"))
+        finally:
+            os.environ.clear()
+            os.environ.update(env)
+
+    def test_recall_dash_query_literal(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        from foldcrumbs import cli as cli_mod
+        d = Path(tempfile.mkdtemp(prefix="pi_dashq_"))
+        env = dict(os.environ)
+        os.environ["FOLDCRUMBS_DIR"] = str(d)
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cli_mod.main(["remember", "--", "--help"])
+            with contextlib.redirect_stdout(buf):
+                rc = cli_mod.main(["recall", "--", "--help"])
+            self.assertEqual(rc, 0)
+            self.assertIn("--help", buf.getvalue())
+        finally:
+            os.environ.clear()
+            os.environ.update(env)
 
 
 class TestPiCliWiring(unittest.TestCase):

@@ -177,8 +177,11 @@ endpoint (the same servers that serve distillation: MLX, Ollama, llama.cpp, LM S
 the two channels by **rank**, not by score (reciprocal-rank fusion, `1/(60+rank_lex) + 1/(60+rank_sem)`):
 lexical ratios and cosine similarities are different scales and are never compared as numbers —
 admission stays score-based (a paraphrase needs the same evidence bar as before), ordering becomes
-ordinal. A vector can rescue a paraphrase the words miss; an exact word match keeps rank 1 in its
-channel, and two channels agreeing outrank one channel alone. With the flag off — or when the
+ordinal. A vector can rescue a paraphrase the words miss; an exact word match keeps lexical rank 1
+(and several exact matches are ordered among themselves by the tie-break chain), and agreement
+between the two channels contributes to the order — it wins the clear cases, though crossed-rank
+rivals can tie (tie-break decides) and agreement does not guarantee an overtake in every
+configuration. With the flag off — or when the
 endpoint doesn't answer — the fusion stage is bypassed entirely and recall is byte-identical to
 purely lexical. Nothing new to install: the call is stdlib `urllib`, vectors are cached
 machine-locally (not in the synced store), and a missing or dead endpoint is a silent fallback —
