@@ -73,44 +73,91 @@ class _SemStore(TmpStore):
 
 class TestT1GoldenLegacy(_SemStore):
     """I1: semantic off/failure => ordering identical to the legacy path,
-    including 2-decimal near-ties and reinforcement tie groups."""
+    including 2-decimal near-ties and reinforcement tie groups.
+
+    RT r3 (GPT, card t_e6983ee3): the previous fixture was vacuous — the
+    two "near-ties" had the SAME raw score (0.9474576271186441 both), so
+    bucket precision was never exercised, and the reinforcement assert
+    could not distinguish the tie group from the served record because
+    an earlier limit=5 search had already reinforced both. Rebuilt per
+    the reviewer's minimal fix: two raw scores DISTINCT in the same
+    2-decimal bucket with the raw order OPPOSITE to the tie-break,
+    explicit created_at timestamps, and reinforcement asserted as a
+    COUNT DELTA from an empty baseline.
+    """
+
+    Q = "deploy tuesday"
+
+    def _lex(self, m):
+        # the production lexical formula (store.py ~1106): overlap*0.9 +
+        # SequenceMatcher ratio *0.1 over the same haystack shape
+        from difflib import SequenceMatcher
+        hay = f"{m.title}\n{m.content}\n{' '.join(m.tags)}".lower()
+        if self.Q in hay:
+            return 1.0
+        words = [w for w in self.Q.split() if len(w) > 2]
+        overlap = sum(1 for w in words if w in hay) / len(words)
+        return overlap * 0.9 + SequenceMatcher(None, self.Q, hay).ratio() * 0.1
 
     def setUp(self):
         super().setUp()
-        # near-ties: scores differing only beyond 2 decimals must stay
-        # tied (round to same bucket) and order by the tiebreak chain
-        self.a = _rec("Deploy window", "We deploy on tuesday mornings.")
-        self.b = _rec("Deploy windows", "We deploy on tuesday morning.")
+        from datetime import datetime, timedelta, timezone
+        # raw-distinct, same 2-decimal bucket (verified below): "morning"
+        # scores higher raw than "morningz" (shorter hay, better ratio)
+        self.a = _rec("Deploy window", "we deploy on tuesday morning")
+        self.b = _rec("Deploy windows", "we deploy on tuesday morningz")
+        # explicit timestamps — do NOT assume same-second creation:
+        # b is 2 days fresher, so the tie-break chain prefers b while
+        # the raw score prefers a. A mutant comparing raw floats
+        # (no bucketing) would serve a first and FAIL.
+        now = datetime.now(timezone.utc)
+        self.a.created_at = now - timedelta(days=2)
+        self.b.created_at = now
         store.write_memory(self.a)
         store.write_memory(self.b)
         config.SEMANTIC = False
 
+    def test_fixture_pair_properties(self):
+        # self-verifying fixture: if difflib ever changes and the pair
+        # stops sharing a bucket, THIS fails — not a misleading golden
+        sa, sb = self._lex(self.a), self._lex(self.b)
+        self.assertNotEqual(sa, sb, "raw scores must be distinct")
+        self.assertEqual(round(sa, 2), round(sb, 2),
+                         "raw scores must share the 2-decimal bucket")
+        self.assertGreater(sa, sb, "raw order must be a > b ...")
+        self.assertGreater(self.b.created_at, self.a.created_at,
+                           "... and tie-break order must be b > a (opposite)")
+
     def test_semantic_off_legacy_order(self):
-        # RT r2 (GPT F1): golden, not just "two fresh runs agree".
         # (a) the embedder must NEVER be called with the flag off;
-        # (b) the served order is pinned explicitly (near-tie: both
-        #     records land in the same 2-decimal bucket, so the
-        #     tie-break chain orders them — newer first);
-        # (c) the whole tie group is reinforced at a limit=1 cut.
+        # (b) golden order pinned: bucket-equal scores => tie-break
+        #     chain decides => b (fresher) first, NOT a (higher raw).
+        #     A precision-3 (or full-float) mutant reorders to [a, b].
         calls = []
 
         def spy(texts):
             calls.append(texts)
             return None
         embeddings.embed = spy
-        r1 = store.search("deploy tuesday", limit=5)
+        counts_before = store.recalls.counts(self.dir)
+        self.assertEqual({k: v for k, v in counts_before.items() if v}, {},
+                         "reinforcement baseline must be empty")
+        r1 = store.search(self.Q, limit=5)
         self.assertEqual(calls, [], "embedder called with SEMANTIC off")
-        names = self._names(r1)
-        self.assertEqual(len(names), 2)
-        # pinned golden: both records share the same second-granularity
-        # created_at (same test second) => recency ties, filename decides
-        self.assertEqual(names, [self.a.filename(), self.b.filename()])
-        # near-tie group reinforcement: limit=1 serves b, but a is in the
-        # same 2-decimal bucket => BOTH reinforced (legacy semantics)
-        store.search("deploy tuesday", limit=1)
-        counts = store.recalls.counts(self.dir)
-        reinforced = {rid for rid, c in counts.items() if c > 0}
-        self.assertEqual(reinforced, {self.a.id, self.b.id})
+        self.assertEqual(self._names(r1),
+                         [self.b.filename(), self.a.filename()])
+        # (c) tie-group reinforcement as a COUNT DELTA: limit=1 serves
+        # only b, but a shares the bucket => delta +1 on BOTH. A
+        # served-only mutant leaves delta_a == 0 and fails. Baseline is
+        # taken AFTER the limit=5 search above (which reinforced both).
+        counts_mid = store.recalls.counts(self.dir)
+        before_a = counts_mid.get(self.a.id, 0)
+        before_b = counts_mid.get(self.b.id, 0)
+        store.search(self.Q, limit=1)
+        counts_after = store.recalls.counts(self.dir)
+        self.assertEqual(counts_after.get(self.b.id, 0) - before_b, 1)
+        self.assertEqual(counts_after.get(self.a.id, 0) - before_a, 1,
+                         "bucket-mate a must be reinforced at a limit=1 cut")
 
     def test_embedder_none_falls_back_to_legacy(self):
         # T6/I6 (RT r2 GPT F1): the flag must be ON and the embedder must

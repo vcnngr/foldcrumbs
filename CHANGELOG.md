@@ -136,7 +136,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guarantee, explicit legacy order, reinforcement tie-group at limit=1,
   the design's (2,1)-beats-(1,3) agreement table without an accidental
   crossed tie, crossed-rank tie winner by tie-break chain, autonomous
-  reinforcement-tiebreak fixture); README x3 + CHANGELOG no longer claim
+  reinforcement-tiebreak fixture). The T1 golden was rebuilt after the
+  gate showed the first fixture was vacuous (identical raw scores;
+  pre-reinforced baseline): raw-distinct scores sharing one 2-decimal
+  bucket with tie-break order OPPOSITE to raw order, explicit timestamps,
+  count-delta asserts — mutation-verified (bucket-precision and
+  served-only mutants both fail the test); README x3 + CHANGELOG no longer claim
   channel agreement *always* outranks single-channel strength (it
   contributes; crossed-rank rivals can tie). Pi extension: tool failures
   now surface as `isError` results instead of ordinary text, and
