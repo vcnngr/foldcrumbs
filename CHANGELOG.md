@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Pi (pi.dev) support** — `foldcrumbs install --agent pi` writes a
+  single auto-discovered TypeScript extension
+  (`~/.pi/agent/extensions/foldcrumbs.ts` global, or `.pi/extensions/`
+  project-local) plus the AGENTS.md instruction block. Pi has no MCP
+  client: the extension registers native `foldcrumbs_recall` /
+  `foldcrumbs_remember` tools that shell out to the CLI, injects the
+  MEMORY.md index at `session_start` via the same agent-agnostic Python
+  hook the Claude/Codex installers use, and appends it to the system
+  prompt at `before_agent_start`. jiti loads the TS directly — no build
+  step. `uninstall --agent pi` removes only our file. Verified against
+  the real `@earendil-works/pi-coding-agent` loader: the generated
+  extension compiles and registers both tools and both handlers.
+  Transcript distillation on session end is a follow-up (Pi's session
+  format differs; v1 covers recall/remember/inject).
+
 ### Changed
 
 - **Semantic recall now fuses by rank, not by score** (RRF,

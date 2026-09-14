@@ -98,6 +98,7 @@ foldcrumbs install                      # Claude Code, globale (~/.claude/settin
 foldcrumbs install --local              # Claude Code, progetto (.claude/settings.json)
 foldcrumbs install --agent codex        # Codex: hooks.json + stampa lo snippet MCP per config.toml
 foldcrumbs install --agent opencode     # OpenCode: MCP opencode.json + plugin + blocco AGENTS.md
+foldcrumbs install --agent pi           # Pi (pi.dev): estensione TS auto-scoperta + blocco AGENTS.md
 ```
 L'installer è merge-safe e idempotente: aggiunge i propri gruppi di hook e lascia intatti
 gli hook esistenti (GSD, graphify, …). Prima scrive un backup `.foldcrumbs-bak`.
@@ -780,6 +781,7 @@ restringere una ricerca.
 | Claude Code | hook SessionStart | monitor PostToolUse + SessionEnd | hook a ciclo di vita completo |
 | Codex | hook SessionStart (`additionalContext`) | hook Stop + PostToolUse | stessi script; + MCP per chiamate tool in-sessione |
 | OpenCode | AGENTS.md → l'agent chiama `recall` (MCP) | plugin `session.idle`/`session.compacted` | nessun hook capace di iniettare, quindi recall guidato dal prompt |
+| Pi (pi.dev) | hook `session_start` → blocco indice nel system prompt (`before_agent_start`) | tool nativi `foldcrumbs_recall`/`foldcrumbs_remember` che invocano la CLI | Pi non ha un client MCP — una singola estensione TS auto-scoperta (`~/.pi/agent/extensions/foldcrumbs.ts`, caricata da jiti, senza build) |
 | Hermes | `FOLDCRUMBS_DIR` per profilo | l'agent chiama la CLI / MCP | niente hook; uno store dedicato per profilo, federato read-only sul resto |
 
 ## Roadmap

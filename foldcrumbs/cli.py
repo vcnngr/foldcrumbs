@@ -1309,6 +1309,18 @@ def _register_root_at_install() -> None:
 def _cmd_install(args: argparse.Namespace) -> int:
     agent = args.agent
     _register_root_at_install()
+    if agent == "pi":
+        # pi.dev coding agent: auto-discovered TS extension + AGENTS.md block.
+        # No settings merge, no MCP (pi has no MCP client — the extension
+        # registers native tools that shell out to the foldcrumbs CLI).
+        paths = install.pi_paths(global_scope=not args.local)
+        ext = install.write_pi_extension(paths["extensions"])
+        agents = install.append_agents_md(paths["agents"])
+        print(f"pi extension: {ext}")
+        print(f"AGENTS.md: {agents or '(block already present)'}")
+        print("(restart pi or /reload to pick up the extension)")
+        _configure_backend_at_install(args)
+        return 0
     if agent == "opencode":
         from . import surface
         paths = install.opencode_paths(global_scope=not args.local)
@@ -1389,6 +1401,13 @@ def _cmd_backend(args: argparse.Namespace) -> int:
 
 
 def _cmd_uninstall(args: argparse.Namespace) -> int:
+    if args.agent == "pi":
+        # pi footprint = our single extension file (AGENTS.md block left for
+        # the user — they may have edited it, same posture as OpenCode).
+        paths = install.pi_paths(global_scope=not args.local)
+        removed = install.remove_pi_extension(paths["extensions"])
+        print(f"pi extension removed: {removed or '(nothing)'}")
+        return 0
     if args.agent == "opencode":
         # OpenCode has no hooks in a settings.json — its footprint is the
         # opencode.json command/MCP entries (plus plugin/AGENTS.md, left for
@@ -1713,7 +1732,7 @@ def build_parser() -> argparse.ArgumentParser:
     pf.set_defaults(func=_cmd_profile)
 
     ins = sub.add_parser("install", help="wire foldcrumbs into a coding agent")
-    ins.add_argument("--agent", choices=["claude", "codex", "opencode"], default="claude")
+    ins.add_argument("--agent", choices=["claude", "codex", "opencode", "pi"], default="claude")
     ins.add_argument("--local", action="store_true", help="project scope instead of global")
     ins.add_argument("--settings", help="explicit settings.json path")
     ins.add_argument("--backend", choices=list(config.BACKENDS),
@@ -1732,7 +1751,7 @@ def build_parser() -> argparse.ArgumentParser:
     bk.set_defaults(func=_cmd_backend)
 
     uns = sub.add_parser("uninstall", help="remove foldcrumbs hooks")
-    uns.add_argument("--agent", choices=["claude", "codex", "opencode"], default="claude")
+    uns.add_argument("--agent", choices=["claude", "codex", "opencode", "pi"], default="claude")
     uns.add_argument("--local", action="store_true")
     uns.add_argument("--settings")
     uns.set_defaults(func=_cmd_uninstall)
