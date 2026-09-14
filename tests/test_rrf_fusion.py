@@ -1,8 +1,9 @@
 """RRF fusion for the semantic channel (docs/design/rrf-fusion.md rev 4).
 
 Test matrix T1-T11. The embedder is stubbed with deterministic 2-D
-vectors (cos(q=(1,0), (s, sqrt(1-s^2))) = s exactly), so every expected
-rank is computed from declared scores, never from a live endpoint.
+vectors (cos(q=(1,0), (s, sqrt(1-s^2))) = s within float precision —
+normalization can move the last bit), so every expected rank is computed
+from declared scores, never from a live endpoint.
 """
 
 import math
@@ -85,15 +86,44 @@ class TestT1GoldenLegacy(_SemStore):
         config.SEMANTIC = False
 
     def test_semantic_off_legacy_order(self):
+        # RT r2 (GPT F1): golden, not just "two fresh runs agree".
+        # (a) the embedder must NEVER be called with the flag off;
+        # (b) the served order is pinned explicitly (near-tie: both
+        #     records land in the same 2-decimal bucket, so the
+        #     tie-break chain orders them — newer first);
+        # (c) the whole tie group is reinforced at a limit=1 cut.
+        calls = []
+
+        def spy(texts):
+            calls.append(texts)
+            return None
+        embeddings.embed = spy
         r1 = store.search("deploy tuesday", limit=5)
-        r2 = store.search("deploy tuesday", limit=5)
-        self.assertEqual(self._names(r1), self._names(r2))
-        self.assertEqual(len(r1), 2)
+        self.assertEqual(calls, [], "embedder called with SEMANTIC off")
+        names = self._names(r1)
+        self.assertEqual(len(names), 2)
+        # pinned golden: both records share the same second-granularity
+        # created_at (same test second) => recency ties, filename decides
+        self.assertEqual(names, [self.a.filename(), self.b.filename()])
+        # near-tie group reinforcement: limit=1 serves b, but a is in the
+        # same 2-decimal bucket => BOTH reinforced (legacy semantics)
+        store.search("deploy tuesday", limit=1)
+        counts = store.recalls.counts(self.dir)
+        reinforced = {rid for rid, c in counts.items() if c > 0}
+        self.assertEqual(reinforced, {self.a.id, self.b.id})
 
     def test_embedder_none_falls_back_to_legacy(self):
-        # T6/I6: mid-flight embedder failure => legacy ordering
-        embeddings.embed = lambda texts: None
+        # T6/I6 (RT r2 GPT F1): the flag must be ON and the embedder must
+        # actually be CALLED, returning None mid-flight => legacy ordering.
+        config.SEMANTIC = True
+        calls = []
+
+        def spy(texts):
+            calls.append(texts)
+            return None
+        embeddings.embed = spy
         with_sem_none = self._names(store.search("deploy tuesday", limit=5))
+        self.assertTrue(calls, "embedder was never called — test vacuous")
         config.SEMANTIC = False
         legacy = self._names(store.search("deploy tuesday", limit=5))
         self.assertEqual(with_sem_none, legacy)
@@ -128,8 +158,12 @@ class TestT2ExactMatchGuarantee(_SemStore):
         res = store.search("alpha query term here", limit=5)
         names = self._names(res)
         self.assertEqual(len(names), 2)
-        # rrf values must be bit-identical => order comes from the
-        # tiebreak chain, deterministically: run twice, same answer
+        # RT r2 (GPT F1): pin the EXPECTED winner, not just repeatability.
+        # rrf ties bit-for-bit (1/61+1/62 == 1/62+1/61 by commutativity);
+        # the tie-break chain decides: same-second created_at and equal
+        # reinforcement => filename order ("alpha" < "beta") => m1 first.
+        self.assertEqual(names[0], m1.filename(),
+                         "crossed-rank tie must settle on the tie-break chain")
         again = self._names(store.search("alpha query term here", limit=5))
         self.assertEqual(names, again)
 
@@ -139,25 +173,26 @@ class TestT3AgreementFixture(_SemStore):
     strength (1,3): 1/62+1/61 > 1/61+1/63 (verified numerically)."""
 
     def test_agreement_outranks_single_channel(self):
-        # A: weaker lexical (rank_lex 2), strong semantic (rank_sem 1)
-        # B: exact lexical (rank_lex 1), weak-but-admitted semantic
-        #    (rank_sem 3 needs a third candidate between them)
-        a = _rec("Migration plan", "the database migration plan for q3.")
-        b = _rec("Migration window", "migration window words exact match.")
-        c = _rec("Migration notes", "migration notes with query words.")
+        # RT r2 (GPT F1): the DESIGN table (2,1) vs (1,3) — the old
+        # fixture accidentally built a crossed TIE (3,1)/(1,3).
+        #   A ranks (lex 2, sem 1): rrf = 1/62+1/61 = 0.032522  <- wins
+        #   B ranks (lex 1, sem 3): rrf = 1/61+1/63 = 0.032266
+        #   C ranks (lex 3, sem 2): rrf = 1/63+1/62 = 0.032008
+        # A (agreement) overtakes B (single-channel exact match): the
+        # declared, honest I3 inversion — no tie involved.
+        a = _rec("Migration plan", "the migration window plan.")
+        b = _rec("Migration window", "migration window tuesday exact.")
+        c = _rec("Migration notes", "migration notes only.")
         store.write_memory(a)
         store.write_memory(b)
         store.write_memory(c)
-        # lexical: query crafted so B is exact, C mid, A low-but-admitted
-        q = "migration window words exact match"
-        self.sem = {a.filename(): 0.95, b.filename(): 0.30,
-                    c.filename(): 0.60}
+        # lexical ranks must come out B=1 (exact substring), A=2, C=3
+        q = "migration window tuesday exact"
+        self.sem = {a.filename(): 0.95, c.filename(): 0.60,
+                    b.filename(): 0.30}
         names = self._names(store.search(q, limit=5))
-        # ranks: lex B=1, C=2, A=3? sem A=1, C=2, B=3
-        # rrf: A=1/63+1/61, B=1/61+1/63 => tie; C=1/62+1/62 = 0.032258
-        # A and B tie EXACTLY (crossed) -> tiebreak decides; C last.
-        self.assertEqual(names[-1], c.filename())
-        self.assertEqual(set(names[:2]), {a.filename(), b.filename()})
+        self.assertEqual(names, [a.filename(), b.filename(), c.filename()],
+                         "agreement (2,1) must overtake single-channel (1,3)")
 
 
 class TestT4AdmissionEquivalence(_SemStore):
@@ -238,6 +273,31 @@ class TestT11ReinforcementCutoff(_SemStore):
         reinforced = [rid for rid, c in counts.items() if c > 0]
         self.assertEqual(len(reinforced), 1,
                          f"expected exactly 1 reinforced, got {reinforced}")
+
+
+class TestT10ReinforcementTieBreak(_SemStore):
+    """D3/T10 (RT r2 GPT F1: autonomous fixture): two candidates with
+    EQUAL rrf (crossed ranks) but different recall counts — the more
+    reinforced one must win the tie-break."""
+
+    def test_equal_rrf_more_recalled_wins(self):
+        # m1: exact lexical (rank_lex 1), weaker sem (rank_sem 2)
+        # m2: weaker lexical (rank_lex 2), best sem (rank_sem 1)
+        # => both rrf = 1/61+1/62, bit-identical tie.
+        m1 = _rec("Gamma exact", "gamma query token here.")
+        m2 = _rec("Delta partial", "delta mentions query loosely y1 y2 y3.")
+        store.write_memory(m1)   # m1 older
+        store.write_memory(m2)   # m2 fresher — would win on recency alone
+        self.sem = {m1.filename(): 0.30, m2.filename(): 0.90}
+        # pre-seed reinforcement: m1 recalled more often in the past
+        store.recalls.reinforce([m1.id, m1.id, m1.id], cwd=self.dir)
+        store.recalls.reinforce([m2.id], cwd=self.dir)
+        names = self._names(store.search("gamma query token here", limit=5))
+        # tie-break = 0.6*recency + 0.4*reinforcement (normalized shares);
+        # the pin is the OBSERVED, declared outcome: with these seeds the
+        # more-recalled older record overtakes the fresher one.
+        self.assertEqual(names[0], m1.filename(),
+                         "reinforcement share must be able to settle an rrf tie")
 
 
 if __name__ == "__main__":

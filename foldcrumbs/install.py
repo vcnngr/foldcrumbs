@@ -357,11 +357,15 @@ export default function foldcrumbsPlugin() {
 AGENTS_MD_BLOCK = """\
 ## Memory (foldcrumbs)
 
-This project has a persistent memory store. Use the `foldcrumbs` MCP tools:
-- At the start of a task, call `recall` with your task to load prior decisions,
+This project has a persistent memory store. Use the foldcrumbs tools if
+your runtime exposes them (MCP tools `recall`/`remember`, or native
+`foldcrumbs_recall`/`foldcrumbs_remember` tools); otherwise shell out to
+the `foldcrumbs` CLI (`foldcrumbs recall "…"` / `foldcrumbs remember "…"`)
+— same store, same semantics:
+- At the start of a task, recall with your task to load prior decisions,
   conventions and preferences — do not re-ask what is already recorded.
-- When a durable decision, rule, preference or lesson is established, call
-  `remember` to persist it for future sessions.
+- When a durable decision, rule, preference or lesson is established,
+  remember it to persist it for future sessions.
 """
 
 
@@ -420,15 +424,34 @@ const FOLDCRUMBS_BIN = {bin};
 const HOOK = {hook};
 const PYTHON = {python};
 
-function run(args: string[], cwd?: string): string {{
+interface RunResult {{ ok: boolean; text: string }}
+
+function run(args: string[], cwd?: string): RunResult {{
+  // RT P1 F3: failures surface as tool errors (isError), not as ordinary
+  // text — a dead CLI must not read like an empty answer.
   try {{
     const out = execFileSync(FOLDCRUMBS_BIN, args, {{
       cwd, encoding: "utf-8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"],
     }});
-    return out;
+    return {{ ok: true, text: out }};
   }} catch (e: any) {{
-    return `foldcrumbs error: ${{e?.message ?? e}}`;
+    const detail = e?.stderr?.toString?.().trim() || e?.message || String(e);
+    return {{ ok: false, text: `foldcrumbs failed: ${{detail}}` }};
   }}
+}}
+
+function toolResult(r: RunResult, emptyText?: string) {{
+  if (!r.ok) {{
+    return {{
+      content: [{{ type: "text" as const, text: r.text }}],
+      details: {{}},
+      isError: true,
+    }};
+  }}
+  return {{
+    content: [{{ type: "text" as const, text: r.text || (emptyText ?? "") }}],
+    details: {{}},
+  }};
 }}
 
 const RECALL_PARAMS = Type.Object({{
@@ -475,10 +498,12 @@ export default function foldcrumbsPiExtension(pi: ExtensionAPI) {{
     promptSnippet: "search persistent project memory",
     parameters: RECALL_PARAMS,
     async execute(_id, params, _signal, _onUpdate, ctx) {{
-      const args = ["recall", params.query];
+      // RT P1 F2: options first, then "--", then the positional query —
+      // a query starting with "-" is content, never an option.
+      const args = ["recall"];
       if (params.index) args.push("--index");
-      const text = run(args, ctx.cwd);
-      return {{ content: [{{ type: "text", text: text || "(no matching memories)" }}], details: {{}} }};
+      args.push("--", params.query);
+      return toolResult(run(args, ctx.cwd), "(no matching memories)");
     }},
   }});
 
@@ -492,11 +517,15 @@ export default function foldcrumbsPiExtension(pi: ExtensionAPI) {{
     promptSnippet: "persist a durable memory",
     parameters: REMEMBER_PARAMS,
     async execute(_id, params, _signal, _onUpdate, ctx) {{
-      const args = ["remember", params.content];
-      if (params.type) args.push("--type", params.type);
-      if (params.expires) args.push("--expires", params.expires);
-      const text = run(args, ctx.cwd);
-      return {{ content: [{{ type: "text", text }}], details: {{}} }};
+      // RT P1 F2: --opt=value form + "--" guard — content starting with
+      // "-" (even "--grants=...") is stored literally, never parsed as
+      // an option. Invalid types fail closed in the CLI (argparse
+      // choices), surfacing as a tool error via isError.
+      const args = ["remember"];
+      if (params.type) args.push(`--type=${{params.type}}`);
+      if (params.expires) args.push(`--expires=${{params.expires}}`);
+      args.push("--", params.content);
+      return toolResult(run(args, ctx.cwd));
     }},
   }});
 }}

@@ -181,8 +181,10 @@ punteggio (reciprocal-rank fusion, `1/(60+rank_lex) + 1/(60+rank_sem)`): i ratio
 similarità coseno sono scale diverse e non vengono mai confrontati come numeri — l'ammissione
 resta a punteggio (una parafrasi deve superare la stessa barra di evidenza di prima),
 l'ordinamento diventa ordinale. Un vettore può soccorrere una parafrasi che le parole mancano;
-un match esatto mantiene il rango 1 nel suo canale, e due canali che concordano superano un
-canale solo. Con lo switch disattivo — o quando l'endpoint non risponde — la fase di fusione è
+un match esatto mantiene il rango lessicale 1 (e più match esatti sono ordinati tra loro dalla
+catena di tie-break), e l'accordo tra i due canali contribuisce all'ordine — vince nei casi
+netti, anche se rivali a ranghi incrociati possono pareggiare (decide il tie-break) e l'accordo
+non garantisce un sorpasso in ogni configurazione. Con lo switch disattivo — o quando l'endpoint non risponde — la fase di fusione è
 bypassata interamente e il recall è byte-identico a quello puramente lessicale. Niente di nuovo
 da installare: la chiamata è `urllib` stdlib, i vettori sono in cache machine-local (non nello
 store sincronizzato), e un endpoint mancante o morto è un fallback silenzioso — mai bloccante,
