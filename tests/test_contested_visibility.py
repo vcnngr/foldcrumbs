@@ -110,6 +110,33 @@ class TestSearchCollector(_ContestedEnv):
                      collect_contested=collected)
         self.assertEqual(collected, [])
 
+    def test_c2b_subthreshold_overlap_not_collected(self):
+        # RT r1 F1 P0 (card t_7d846c3d), reviewer PoC verbatim: ONE shared
+        # word used to be enough for the collector ("any(word in hay)"),
+        # but the real lexical score here is 0.130 < _RECALL_THRESHOLD
+        # (0.22) — recall would NEVER have served it, so a "matched but
+        # not served" line would be a false explanation on the very
+        # surface that promises honesty. The collector must use the same
+        # score + admission threshold as the served list.
+        q = "monday zephyr quartz nebula fjord cobalt tungsten sapphire"
+        # sanity: the query is genuinely sub-threshold for the record
+        every = store.search(q, cwd=self.proj, include_contested=True,
+                             limit=100)
+        self.assertEqual(every, [], "PoC precondition: nothing admitted")
+        collected: list = []
+        store.search(q, cwd=self.proj, collect_contested=collected)
+        self.assertEqual(collected, [],
+                         "sub-threshold contested must NOT be collected")
+
+    def test_c2c_threshold_match_still_collected(self):
+        # the companion: a contested record that WOULD clear admission is
+        # still collected (the feature must not over-correct into silence)
+        collected: list = []
+        top = store.search("deploys run monday morning", cwd=self.proj,
+                           collect_contested=collected)
+        self.assertNotIn("Deploy on Mondays", [m.title for m in top])
+        self.assertEqual(len(collected), 1)
+
     def test_c3_include_contested_disables_collection(self):
         # explicit opt-in serves the record; nothing is withheld, so
         # nothing is collected
@@ -196,6 +223,7 @@ class TestMcpRecallTail(_ContestedEnv):
         def fake_search(query, limit=10, types=None, tags=None,
                         collect_invalidated=None, collect_contested=None,
                         **kw):
+            seen["called"] = True
             seen["contested_passed"] = collect_contested is not None
             return store.search(query, limit=limit, types=types, tags=tags,
                                 collect_invalidated=collect_invalidated,
@@ -227,7 +255,20 @@ class TestMcpRecallTail(_ContestedEnv):
                 llm.chat = real_chat
         finally:
             mcp_server._search = real
-        # answer must NOT collect (and therefore not render) the tail
+        # RT r1 F2 (P1): the test must bind what it promises — assert the
+        # fake search was actually invoked, the prompt is non-empty, it
+        # carries the served claim, and the withheld foreign record and
+        # the diagnostic line are ABSENT from the LLM context.
+        self.assertTrue(seen.get("called", False),
+                        "answer never reached search — test would be vacuous")
+        prompt = captured.get("prompt", "")
+        self.assertTrue(prompt, "captured prompt is empty")
+        self.assertIn("Deploys run Fridays now", prompt,
+                      "served claim missing from answer context")
+        self.assertNotIn("Deploys run Mondays only", prompt,
+                         "withheld contested content leaked into answer")
+        self.assertNotIn("matched but not served", prompt,
+                         "diagnostic tail leaked into answer context")
         self.assertFalse(seen.get("contested_passed", False),
                          "answer passed a contested collector to search")
 

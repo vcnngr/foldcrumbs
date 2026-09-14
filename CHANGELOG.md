@@ -11,15 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Contested visibility in recall** — withholding a contested record is
   no longer silent. A contested match the query would actually have served
-  (same relevance probe as the invalidated tail — never a record the query
-  would not have surfaced) lands in recall's diagnostics as an honest
-  "matched but not served" line: it names the claiming memory, labels the
-  foreign origin, states it is not a verdict, and points at
-  `foldcrumbs conflicts` for the human exit. Max 3 lines + "showing 3 of
-  N", deterministic order, on the CLI and MCP `recall` (full and index
-  mode). Same posture as invalidation diagnostics: the tail never feeds
-  `answer`'s LLM context — a withheld dispute is visibility for the
-  reader, not evidence for the model.
+  (same lexical score and admission threshold as the served list — a
+  sub-threshold near-miss is NOT reported, RT-verified) lands in recall's
+  diagnostics as an honest "matched but not served" line: it names the
+  claiming memory, labels the foreign origin, states it is not a verdict,
+  and points at `foldcrumbs conflicts` for the human exit. Max 3 lines +
+  "showing 3 of N", deterministic order, on the CLI and MCP `recall` (full
+  and index mode). Same posture as invalidation diagnostics: the tail
+  never feeds `answer`'s LLM context — a withheld dispute is visibility
+  for the reader, not evidence for the model.
 - **Pi (pi.dev) support** — `foldcrumbs install --agent pi` writes a
   single auto-discovered TypeScript extension
   (`~/.pi/agent/extensions/foldcrumbs.ts` global, or `.pi/extensions/`

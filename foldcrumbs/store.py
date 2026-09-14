@@ -1031,10 +1031,11 @@ def search(
     replacement is already recorded here is worse than returning nothing.
     Withholding is never silent when the caller passes ``collect_contested``:
     matched-but-withheld records land there as ``(record, claim_title)``
-    pairs (same relevance probe as the served list, PR64 RT F5 lesson), so
-    the served view can say a dispute exists, name the claim, and point at
-    ``conflicts`` — visibility over arbitration, the arbitration itself
-    staying a human verb.
+    pairs — "matched" means the same lexical score clears the same admission
+    threshold as the served list (RT-verified: a sub-threshold near-miss is
+    never reported), so the served view can say a dispute exists, name the
+    claim, and point at ``conflicts`` — visibility over arbitration, the
+    arbitration itself staying a human verb.
 
     With ``FOLDCRUMBS_SEMANTIC=1`` an optional embedding channel joins the
     ranking via reciprocal-rank fusion (docs/design/rrf-fusion.md): admission
@@ -1078,6 +1079,23 @@ def search(
     if federated:
         candidates = itertools.chain(candidates, iter_federated(cwd, local=local))
     lexical: list[tuple[float, str, MemoryRecord]] = []
+
+    # RT r1 F1 (PR73): the contested collector must decide "matched" with
+    # the SAME lexical score the served list uses, not a cheaper word
+    # probe — a sub-threshold record the query would never have served is
+    # not "matched but not served", and claiming so is a false explanation
+    # on the very surface that promises honesty. One shared scorer keeps
+    # the collector and the served admission in lockstep. (The
+    # invalidation tail keeps its own probe: out of scope for this gate,
+    # declared as a known approximation in its design notes.)
+    def _lex_score(hay: str) -> float:
+        if q in hay:
+            return 1.0
+        if words:
+            overlap = sum(1 for w in words if w in hay) / len(words)
+            return overlap * 0.9 + SequenceMatcher(None, q, hay).ratio() * 0.1
+        return SequenceMatcher(None, q, hay).ratio()
+
     for m in candidates:
         if not _visible(m):
             continue
@@ -1093,11 +1111,13 @@ def search(
         hay = f"{m.title}\n{m.content}\n{' '.join(m.tags)}".lower()
         if m.contested_by and not include_contested:
             # Contested visibility (mini-feature): withholding is not
-            # silent. Same relevance probe as every other diagnostic tail
-            # (PR64 RT F5): only a record this query would actually have
-            # surfaced counts as "matched but not served".
-            if collect_contested is not None and bool(q) and (
-                    q in hay or (words and any(w in hay for w in words))):
+            # silent — but only for a record the query would ACTUALLY have
+            # served: same score formula, same admission threshold as the
+            # served list (RT r1 F1; reviewer PoC pinned by C2b). Lexical
+            # scope only, exactly like the legacy admission — the semantic
+            # channel ranks *after* this partition and never admits.
+            if (collect_contested is not None
+                    and _lex_score(hay) >= _RECALL_THRESHOLD):
                 collect_contested.append((m, m.contested_by))
             continue
         # P1 sweep (PR64 RT F5): the diagnostics tail must obey the SAME
@@ -1117,14 +1137,7 @@ def search(
                 if collect_invalidated is not None and relevant:
                     collect_invalidated.append((m, outcome, detail))
                 continue
-        if q in hay:
-            score = 1.0
-        elif words:
-            overlap = sum(1 for w in words if w in hay) / len(words)
-            score = overlap * 0.9 + SequenceMatcher(None, q, hay).ratio() * 0.1
-        else:
-            score = SequenceMatcher(None, q, hay).ratio()
-        lexical.append((score, hay, m))
+        lexical.append((_lex_score(hay), hay, m))
 
     # Optional second relevance channel (FOLDCRUMBS_SEMANTIC=1 + an embedding
     # endpoint that answers; either gate missing and this is a no-op). One
