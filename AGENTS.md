@@ -10,8 +10,11 @@ will do for you.
 
 foldcrumbs is **a folder of markdown files**, one memory per file, with
 YAML-ish frontmatter carrying the metadata. No server, no daemon, no
-database, no network. Every claim in this file can be verified by opening
-those files.
+database — and no network on the core path: files plus lexical recall work
+fully offline. The optional LLM-backed features (distill, semantic recall,
+answer) call whatever local or remote endpoint you point them at; nothing
+phones home. Every claim in this file can be verified by opening those
+files.
 
 ```bash
 foldcrumbs remember "We deploy Tuesdays 10-12 UTC." --type decision
@@ -55,9 +58,9 @@ results" has several distinct meanings:
 | `status: archived` | decayed out of relevance, not wrong | `foldcrumbs restore <file>` |
 | `status: superseded` | replaced by a newer memory | follow `superseded_by` in the frontmatter |
 | `expires_at` in the past | it had a date and the date passed | rewrite it fresh; expiry is never extended silently |
-| `contested_by` set | another instance claims this memory is superseded; recall hides **this record** — the claimer's own newer memory may still be served (claims are directional, not symmetric). Read `conflicts` before picking a side | `foldcrumbs conflicts` lists the claim + exact resolution command |
+| `contested_by` set | another instance claims this memory is superseded; recall hides **this record** — the claimer's own newer memory may still be served (claims are directional, not symmetric) — but a contested match the query would have served comes back as a "matched but not served" diagnostic line naming the claim. Read `conflicts` before picking a side | `foldcrumbs conflicts` lists the claim + exact resolution command |
 | `invalidated_by` target died | the fact it depended on is gone | `foldcrumbs doctor` lists dangling/invalidated contracts |
-| type `authorization` | grants are served **only** through the ledger section with derived state (ACTIVE/EXPIRED/UNBACKED/RETIRED), never as plain context | read the `## Authorizations` block in recall output |
+| type `authorization` | grants are served **only** through the ledger section with derived state (ACTIVE/EXPIRED/UNBACKED/RETIRED), never as plain context | read the `Authorizations (…)` ledger section that **full** recall appends (CLI full mode and MCP `recall` full mode; `recall --index` returns before it). The `## Authorizations` block in `MEMORY.md` is the snapshot *pointer*, not the ledger |
 
 Two guarantees worth trusting:
 
@@ -79,7 +82,10 @@ Two guarantees worth trusting:
 ## Writing memories an agent should write
 
 - One fact per file. `remember` deduplicates near-identical content by
-  fuzzy match — an upsert updates in place instead of piling up.
+  fuzzy match — a near-duplicate VALIDATES the existing record (bumps its
+  trust), it is not a content-replacement command: the old text stays.
+  (Authorizations are excluded from the fuzzy dedup and are create-only —
+  they are never validated in place by a similar-looking new record.)
 - Use `--type` honestly: `fact`, `preference`, `goal`, `decision`,
   `artifact`, `learning`, `event`, `instruction`, `relationship`,
   `context`, `observation`, `commitment`, `error`, `authorization`.
@@ -90,14 +96,19 @@ Two guarantees worth trusting:
   served view while staying on disk.
 - `--tag` for retrieval facets you will actually filter on (`recall --tag`).
 - Provenance is recorded automatically (who/when/source). Do not fabricate
-  `--confidence`; the default (0.85 explicit, lower when inferred) is
-  calibrated for the trust scoring.
+  `--confidence`; the default (0.85 explicit, lower when inferred) is what
+  the trust scoring consumes.
 - **Permissions are not facts.** If the user grants the agent an
   authorization ("you may deploy to prod"), store it as
   `--type authorization --grants … --granted-to … --backed-by <event-id>`
   with an expiry. The MCP `remember` tool refuses to mint authorizations —
-  that is deliberate: grants come from a human CLI path with a backing
-  event, never from the model itself.
+  that is deliberate: grants are minted on the CLI path with a backing
+  event, not by the model mid-conversation. Be honest about what that
+  buys: CLI-only is a *procedural* boundary, not caller authentication —
+  a shell-capable agent can invoke the CLI, and provenance records the
+  process's claim of who/when/source, not a verified identity. The
+  guarantee is that minting is a distinct, auditable, backed-by-an-event
+  act — not that it was necessarily a human hand on the keyboard.
 
 ## Relations, if you use the graph layer
 
@@ -126,12 +137,14 @@ it gets served with a `(tentative)` marker).
 ## Freshness — the honest bit
 
 There is no index to go stale, because there is no index in the retrieval
-path: every served read re-derives visibility from the files as they are
-right now. The two snapshot surfaces that do exist (`MEMORY.md`, the
-published federation shard) exclude derived-state records by construction,
-and `foldcrumbs index` rebuilds on demand. If you edited memory files by
-hand, your edit is live immediately; the only thing that can lag is a
-snapshot a hook injected earlier in the session — re-run `foldcrumbs
+path: every served **live read** re-derives visibility from the files as
+they are right now. (The two snapshot surfaces are the exception by
+construction: `MEMORY.md` and the published federation shard are
+point-in-time captures — they exclude derived-state records, and a
+snapshot injected earlier in the session is not retroactively refreshed.)
+`foldcrumbs index` rebuilds on demand. If you edited memory files by
+hand, your edit is live on the next read; the only thing that can lag is
+a snapshot a hook injected earlier in the session — re-run `foldcrumbs
 index` or use `recall`, which always reads the files.
 
 An agent may also just `grep -r` the store directory. That is supported,
