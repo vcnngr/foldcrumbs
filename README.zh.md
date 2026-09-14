@@ -465,7 +465,9 @@ Memory from this project's other agent instances. … READ-ONLY from here …
 `write_memory`、`upsert` 和 `mark_superseded_on_disk` 也会直接拒绝外部记录。
 当蒸馏发现的新记忆与另一个实例存储中的记忆矛盾时，它把该主张记录在自己的
 记录上，联邦视图会把该条目标记为有争议 — 对方的实例仍是唯一能撤回其文件的
-一方。
+一方。召回绝不会悄悄隐藏争议：查询本会返回的有争议匹配，会以
+"matched but not served" 诊断行返回，指出提出主张的记忆并引导至
+`foldcrumbs conflicts` — 可见性优先于仲裁；仲裁本身始终是人类的操作。
 
 用 `foldcrumbs roots remove <id>` 退出共享视图；存储本身不受影响，只有显式的
 `install` / `roots add` 才会把它带回来。

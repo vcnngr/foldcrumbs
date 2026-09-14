@@ -328,9 +328,11 @@ TOOLS = [
 
 def _search(query: str, limit: int, types: list[str] | None = None,
             tags: list[str] | None = None,
-            collect_invalidated: list | None = None) -> list[MemoryRecord]:
+            collect_invalidated: list | None = None,
+            collect_contested: list | None = None) -> list[MemoryRecord]:
     return store.search(query, limit=limit, types=types, tags=tags,
-                        collect_invalidated=collect_invalidated)
+                        collect_invalidated=collect_invalidated,
+                        collect_contested=collect_contested)
 
 
 def tool_remember(args: dict[str, Any]) -> str:
@@ -365,10 +367,12 @@ def tool_recall(args: dict[str, Any]) -> str:
     # honestly (max 3 + "showing 3 of N"). The tail NEVER feeds answer's
     # LLM context (tool_answer does not pass collect_invalidated).
     invalidated: list = []
+    contested: list = []
     mems = _search(str(args["query"]), int(args.get("limit", 10)),
                    types=list(types) if types else None,
                    tags=list(tags) if tags else None,
-                   collect_invalidated=invalidated)
+                   collect_invalidated=invalidated,
+                   collect_contested=contested)
     mode = args.get("mode", "full")
     if mode is None:
         mode = "full"
@@ -408,15 +412,24 @@ def tool_recall(args: dict[str, Any]) -> str:
             lines.append(
                 f"({len(invalidated)} contract-carrying match(es) not "
                 f"served as current — see full recall diagnostics)")
+        if contested:
+            lines.append(
+                f"({len(contested)} contested match(es) not served — "
+                f"this store records a replacement; see full recall "
+                f"diagnostics / `conflicts`)")
         return "\n".join(lines)
     block = format_context_block(mems, heading=str(args["query"]))
-    text = block or ("(no matching memories)" if not invalidated
+    withheld = invalidated or contested
+    text = block or ("(no matching memories)" if not withheld
                      else "(no matching memories served as current)")
     # INV design rev2 §D3: the diagnostics tail — honest one-liners for
     # contract-carrying hits that were partitioned out, max 3 + count.
     # Deterministic order (created_at, filename). NOT part of the block:
     # answer's LLM context never sees it as evidence.
     text = _append_invalidated_tail(text, invalidated)
+    # Contested visibility: same posture, own tail — the dispute exists,
+    # names its claimer, and stays a human decision.
+    text = _append_contested_tail(text, contested)
     # AUTH design rev2 §D4: the ledger section rides with every full recall
     # (CLI and MCP serve the same honest view).
     from . import authz
@@ -439,6 +452,32 @@ def _append_invalidated_tail(text: str, invalidated: list) -> str:
              for rec, outcome, detail in ordered[:3]]
     if len(ordered) > 3:
         lines.append(f"(showing 3 of {len(ordered)} invalidated matches)")
+    return text + "\n\n" + "\n".join(lines)
+
+
+def _append_contested_tail(text: str, contested: list) -> str:
+    """Contested-visibility tail (mini-feature): the dispute exists, it has
+    a WHO, and exiting it is a human verb. Same contract as the invalidated
+    tail — max 3 lines + count, deterministic order, says only what was
+    observed. Never a verdict: the claim is named, not endorsed."""
+    if not contested:
+        return text
+    from . import invalidation as _inv
+    ordered = sorted(contested,
+                     key=lambda t: (t[0].created_at
+                                    or _inv.datetime.min.replace(
+                                        tzinfo=_inv.timezone.utc),
+                                    t[0].filename()))
+    lines = []
+    for rec, claim_title in ordered[:3]:
+        name = rec.title or rec.filename()
+        where = f" [{rec.origin_root}]" if rec.is_foreign else ""
+        lines.append(
+            f"matched but not served: {name}{where} (contested — this store "
+            f"records {claim_title!r} as its replacement); not a verdict: "
+            f"`foldcrumbs conflicts` lists the claim and how to resolve it")
+    if len(ordered) > 3:
+        lines.append(f"(showing 3 of {len(ordered)} contested matches)")
     return text + "\n\n" + "\n".join(lines)
 
 

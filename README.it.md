@@ -504,7 +504,10 @@ appartengono a qualcun altro, ma `write_memory`, `upsert` e `mark_superseded_on_
 rifiutano anche un record estraneo a prescindere. Quando la distillazione trova una nuova memoria
 che ne contraddice una nello store di un'altra istanza, registra la rivendicazione sul proprio
 record e la vista federata marca quella voce come contestata — la loro istanza resta l'unica
-a poter ritirare il loro file.
+a poter ritirare il loro file. Il recall non nasconde mai la disputa in silenzio: un match
+contestato che la query avrebbe servito torna come riga diagnostica "matched but not served"
+che nomina la memoria reclamante e punta a `foldcrumbs conflicts` — visibilità invece di
+arbitrato; l'arbitrato resta un verbo umano.
 
 Esci dalla vista condivisa con `foldcrumbs roots remove <id>`; lo store stesso non è
 toccato, e solo un `install` / `roots add` esplicito lo riporta.
