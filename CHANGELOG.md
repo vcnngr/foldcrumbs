@@ -142,6 +142,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP schema portability — `graph_path` no longer declares `from`**:
+  `from` is a Python reserved word, and an MCP host that builds a runtime
+  function per tool from the input schema (e.g. `inspect.Parameter`)
+  raised while assembling its tool list — killing the whole bridge, so
+  the host agent lost ALL tools while foldcrumbs looked healthy. The
+  declared parameters are now `source`/`target`; the historical `from`/
+  `to` remain accepted as undeclared input aliases, so existing clients
+  keep working. A suite-level guard now refuses any tool schema whose
+  parameter names are not valid Python identifiers (the oracle is the
+  exact failing call, so soft keywords like `type` stay legal).
+  (Found integrating foldcrumbs into Hermes profiles, 2026-09-17.)
 - **P1 sweep (RT-declared, non-blocking) closed**: RRF golden tests now
   pin the declared outcomes instead of weaker claims (embedder-never-called
   guarantee, explicit legacy order, reinforcement tie-group at limit=1,
