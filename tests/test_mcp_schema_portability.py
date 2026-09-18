@@ -129,13 +129,17 @@ class TestGraphPathNames(_GraphPathBase):
 
     def test_new_names_win_over_aliases(self):
         # both present: declared names take precedence (deterministic,
-        # never an ambiguous merge)
+        # never an ambiguous merge). RT P1 (card t_ac2538c3): the aliases
+        # must be UNRESOLVABLE — with a reversible path and real refs on
+        # both sides, FOUND alone could not tell precedence from its
+        # inverse (mutant reproduced: from/to-privileging wrapper passed).
         text, err = self._call(source="Release slipped",
                                target="Supplier delay",
-                               **{"from": "Supplier delay",
-                                  "to": "Release slipped"})
+                               **{"from": "Nonexistent memory zzz",
+                                  "to": "Another ghost yyy"})
         self.assertFalse(err)
-        self.assertIn("FOUND", text)
+        self.assertIn("FOUND", text,
+                      "declared names must win over the aliases")
 
     def test_missing_target_refused_not_crash(self):
         text, _err = self._call(source="Release slipped")
