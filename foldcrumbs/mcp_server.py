@@ -106,10 +106,10 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "from": {"type": "string",
-                         "description": "Start memory: exact title, memory id, or filename stem."},
-                "to": {"type": "string",
-                       "description": "End memory: exact title, memory id, or filename stem."},
+                "source": {"type": "string",
+                           "description": "Start memory: exact title, memory id, or filename stem. (The historical alias `from` is still accepted.)"},
+                "target": {"type": "string",
+                           "description": "End memory: exact title, memory id, or filename stem. (The historical alias `to` is still accepted.)"},
                 "depth": {"type": "integer",
                           "description": "Max hops (default 3, hard cap 4)."},
                 "max_nodes": {"type": "integer",
@@ -122,7 +122,7 @@ TOOLS = [
                                    "only when you explicitly want model-"
                                    "suggested connections."},
             },
-            "required": ["from", "to"],
+            "required": ["source", "target"],
         },
     },
     {
@@ -808,9 +808,20 @@ def _parse_include_inferred(args: dict[str, Any]) -> bool:
 
 def tool_graph_path(args: dict[str, Any]) -> str:
     from . import relations
+    # `source`/`target` are the declared names. The historical `from`/`to`
+    # stay accepted as undeclared aliases — existing clients keep working —
+    # but they can never be the ONLY names: `from` is a Python reserved
+    # word, and a host that builds runtime functions from the schema
+    # (inspect.Parameter) dies loading the whole server, taking every
+    # other tool down with it. Declared names win when both are present.
+    raw_src = args.get("source", args.get("from"))
+    raw_dst = args.get("target", args.get("to"))
+    if raw_src is None or raw_dst is None:
+        return ("refused: graph_path needs 'source' and 'target' "
+                "(historical aliases 'from'/'to' also accepted)")
     try:
-        src = _resolve_local_ref(str(args["from"]))
-        dst = _resolve_local_ref(str(args["to"]))
+        src = _resolve_local_ref(str(raw_src))
+        dst = _resolve_local_ref(str(raw_dst))
     except ValueError as exc:
         return str(exc)
     try:
