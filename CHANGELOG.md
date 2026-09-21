@@ -142,21 +142,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Auto-prune no longer deletes legitimate memories containing markdown
-  tables or code fences** (data loss, reported 2026-09-18: an architecture
-  memory was physically unlinked twice because it contained a table). The
-  deletion predicate confused *presence* of a tool-output pattern with
-  *prevalence*: tables and fences appear in genuine durable prose
-  (foldcrumbs' own AGENTS.md is full of tables). `_is_hard_artifact` now
-  deletes only (a) unconditional boilerplate markers, or (b) files whose
-  non-blank lines are ≥80% structural (table rows, fence blocks — lines
-  inside a fence count, so one intro line cannot launder a dump). A lone
-  table row with no prose is still junk and still pruned (existing
-  contract). Capture-time skipping (`_is_artifact`) is unchanged: not
-  capturing a table-shaped candidate stays right — deleting an existing
-  memory over it never was. Deletion bias is asymmetric on purpose: a
-  false negative leaves cheap, visible junk; a false positive is
-  unrecoverable data loss.
+- **Auto-prune no longer deletes memories over markdown shapes** (data
+  loss, reported 2026-09-18: an architecture memory was physically
+  unlinked twice because it contained a table). The deletion predicate
+  confused *presence* of a tool-output pattern with proof of junk — and
+  tables and fences appear in genuine durable prose (foldcrumbs' own
+  AGENTS.md is full of tables; a lookup-table memory is 100% "shape" and
+  100% legitimate). The fix splits one predicate into two risk profiles:
+  **deletion-grade** (`_is_hard_artifact`) is now the unconditional
+  boilerplate marker only — the sole thing auto-prune may unlink — while
+  **flag-grade** (`_is_shape_artifact`: ≥80% structural lines, balanced
+  fences counted as blocks, unbalanced fence = no verdict at all) feeds
+  the pollution report, doctor, and the explicit `prune --apply` — a
+  human decision, dry-run default. An ambiguous shape never dies
+  unattended; it gets flagged so a human can look. Capture-time skipping
+  (`_is_artifact`) is unchanged. Deletion bias is asymmetric on purpose:
+  a false negative leaves cheap, visible junk; a false positive is
+  unrecoverable data loss. (RT round: 2 P0 on the first attempt — pure
+  lookup-table auto-deleted, unclosed fence poisoning the tail — both
+  reproduced and closed.)
 - **MCP schema portability — `graph_path` no longer declares `from`**:
   `from` is a Python reserved word, and an MCP host that builds a runtime
   function per tool from the input schema (e.g. `inspect.Parameter`)

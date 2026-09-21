@@ -104,64 +104,83 @@ def _is_artifact(text: str) -> bool:
     return bool(_ARTIFACT_RE.search(text or ""))
 
 
-# Stricter subset for DELETION (auto-prune / prune): only structural artifacts
-# that are never legitimate durable prose. Excludes the MEMORY.md/untitled.md and
-# markdown-link clauses, which can appear in genuine memories (notably foldcrumbs's
-# own architecture notes) — those are fine to skip at capture time but must not
-# trigger deletion of an existing memory.
+# Stricter subset for DELETION (auto-prune / prune): only patterns that are
+# never legitimate durable prose. Excludes the MEMORY.md/untitled.md and
+# markdown-link clauses, which can appear in genuine memories (notably
+# foldcrumbs's own architecture notes) — those are fine to skip at capture
+# time but must not trigger deletion of an existing memory.
 #
-# Tables and code fences appear in GENUINE memories too (foldcrumbs' own
-# AGENTS.md is full of tables), so their *presence* can never be a deletion
-# verdict — only their *prevalence*: a file that IS tool output is (almost)
-# only artifact lines; a memory that merely QUOTES a table is prose plus a
-# table. Reported data-loss bug (2026-09-18): an architecture memory was
-# deleted twice because it contained a markdown table. Deletion bias is
-# asymmetric on purpose: a false negative leaves cheap, visible junk; a
-# false positive is unrecoverable data loss.
+# RT r1 (card t_c82395d2) set the boundary for good: NO markdown SHAPE is
+# ever deletion-grade. Tables and code fences appear in genuine memories
+# (foldcrumbs' own AGENTS.md is full of tables), a pure lookup-table memory
+# is legitimate (F1), and an accidentally unclosed fence makes everything
+# after it look structural (F2). Shape-based junk is FLAGGED (pollution
+# report, doctor) and dies only under the explicit `prune --apply` — a
+# human decision, dry-run default. Auto-prune deletes only the
+# unconditional boilerplate marker below. Deletion bias is asymmetric on
+# purpose: a false negative leaves cheap, visible junk; a false positive
+# is unrecoverable data loss. Reported data-loss bug (2026-09-18): an
+# architecture memory was deleted twice because it contained a table.
 _HARD_ARTIFACT_RE = re.compile(
     r"do not respond to these messages",  # local-command caveat boilerplate
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Structural lines: tool-output shapes that are nonetheless legitimate
-# inside prose. Counted per line; deletion needs prevalence, not presence.
-_HARD_STRUCTURAL_LINE_RE = re.compile(
+
+def _is_hard_artifact(text: str) -> bool:
+    """Deletion-grade: unconditional boilerplate markers only.
+
+    Never a markdown shape — see the comment above _HARD_ARTIFACT_RE.
+    This is what auto-prune (which runs unattended on every distill) is
+    allowed to physically unlink."""
+    if not text:
+        return False
+    return bool(_HARD_ARTIFACT_RE.search(text))
+
+
+# Shape lines: tool-output SHAPES that are nonetheless legitimate inside
+# prose. Counted per line for the flag-grade verdict only.
+_SHAPE_LINE_RE = re.compile(
     r"^\s*(```|~~~)"            # code fence marker
     r"|^\s*\|.*\|"              # markdown table row
     r"|\|\s*:?-{2,}"            # markdown table separator
     r"|^[\s✓✅❌✗]+$",           # line made only of status glyphs (UI output)
     re.MULTILINE,
 )
+_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)")
 
-# A file whose non-blank lines are at least this fraction structural is a
-# dump, not prose. 0.8 lets a real memory quote a sizeable table and still
-# survive, while one intro line cannot launder a dump (tests pin both).
-_HARD_PREVALENCE = 0.8
+# A file whose non-blank lines are at least this fraction shape lines is
+# tool-output shaped — enough to FLAG for the human, never to auto-unlink.
+_SHAPE_PREVALENCE = 0.8
 
 
-def _is_hard_artifact(text: str) -> bool:
-    """Deletion-grade artifact test: unconditional boilerplate markers,
-    OR structural lines (tables/fence blocks) at prevalence >=
-    _HARD_PREVALENCE. Lines INSIDE a code fence count as structural: a
-    file that is entirely a fenced dump is tool output, while prose
-    quoting a fence stays under the threshold."""
+def _is_shape_artifact(text: str) -> bool:
+    """Flag-grade: tool-output SHAPE at prevalence >= _SHAPE_PREVALENCE.
+
+    Lines inside a BALANCED fence count as structural, so one intro line
+    cannot launder a dump. An UNBALANCED fence produces no verdict at all
+    (RT r1 F2): with an unclosed fence the "inside" is ambiguous — it may
+    be a legitimate memory whose author forgot the closing marker — and
+    ambiguity is never deletion-grade, nor even flag-grade."""
     if not text:
         return False
-    if _HARD_ARTIFACT_RE.search(text):
-        return True
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
+        return False
+    fence_markers = sum(1 for ln in lines if _FENCE_OPEN_RE.match(ln))
+    if fence_markers % 2:
+        # unbalanced fence: ambiguous tail — refuse to judge
         return False
     structural = 0
     in_fence = False
     for ln in lines:
-        if re.match(r"^\s*(```|~~~)", ln):
+        if _FENCE_OPEN_RE.match(ln):
             in_fence = not in_fence
             structural += 1
             continue
-        if in_fence or _HARD_STRUCTURAL_LINE_RE.search(ln):
+        if in_fence or _SHAPE_LINE_RE.search(ln):
             structural += 1
-    return structural / len(lines) >= _HARD_PREVALENCE
+    return structural / len(lines) >= _SHAPE_PREVALENCE
 
 
 def build_extraction_question(summary: str) -> str:

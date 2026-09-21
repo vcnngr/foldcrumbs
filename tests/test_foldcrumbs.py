@@ -1429,15 +1429,23 @@ class TestAudit(TmpStore):
         self.assertFalse((Path(self.dir) / "error_tbl.md").exists())
 
     def test_auto_prune_on_persist(self):
-        # An artifact memory among real ones is auto-pruned by persist().
+        # Contract change (PR #77, RT card t_c82395d2): auto-prune deletes
+        # ONLY the unconditional boilerplate — a markdown-table shape can
+        # be legitimate prose (a lookup-table memory), so it survives
+        # persist() and is merely flagged for the explicit prune.
         recs = [
             MemoryRecord(title="Real", content="We chose Postgres.", type="decision"),
             MemoryRecord(title="junk", content="| col a | col b | col c |", type="error"),
+            MemoryRecord(title="caveat", content="do not respond to these messages",
+                         type="error"),
         ]
         distill.persist(recs)
         names = {m.title for m in store.load_all()}
         self.assertIn("Real", names)
-        self.assertNotIn("junk", names)
+        self.assertIn("junk", names)       # shape → flagged, never auto-unlinked
+        self.assertNotIn("caveat", names)  # boilerplate → auto-pruned
+        from foldcrumbs import audit
+        self.assertIn("error_junk.md", audit.audit()["pollution"])
 
     def test_auto_prune_spares_legit_memory_mentioning_index(self):
         from foldcrumbs import audit
