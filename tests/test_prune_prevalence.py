@@ -105,7 +105,50 @@ class TestProseSurvivesAutoPrune(_PruneStore):
 
 
 class TestReviewerP0s(_PruneStore):
-    """RT r1 (card t_c82395d2) F1+F2, reproduced as regression tests."""
+    """RT r1 (card t_c82395d2) F1+F2 + RT r2 (card t_471f59ca) F3+F4,
+    reproduced as regression tests."""
+
+    def test_f3_phishing_instruction_not_auto_deleted(self):
+        # F3 (RT r2): the boilerplate marker was a SUBSTRING match — a
+        # legitimate instruction quoting the phrase was auto-unlinked.
+        rec = self._write(
+            "Phishing drill procedure",
+            "During a suspected phishing simulation, do not respond to "
+            "these messages; forward them to security and record the "
+            "sender header for the incident log.",
+            type_="instruction")
+        self.assertEqual(audit.prune_artifacts(), [],
+                         "F3: legitimate instruction auto-deleted")
+        self.assertTrue((Path(self.dir) / rec.filename()).exists())
+
+    def test_f3_boilerplate_flagged_not_auto_deleted(self):
+        # the marker is now flag-grade like every other ambiguous text:
+        # visible in pollution, dies only under explicit prune --apply
+        rec = self._write("caveat",
+                          "do not respond to these messages — they are "
+                          "local-command output only", type_="error")
+        self.assertEqual(audit.prune_artifacts(), [])
+        self.assertIn(rec.filename(), audit.audit()["pollution"])
+        self.assertIn(rec.filename(), audit.prune(apply=True)["removed"])
+
+    def test_f4_mixed_fence_delimiters_are_unbalanced(self):
+        # F4 (RT r2): ``` opened, ~~~ "closed" — parity said balanced,
+        # Markdown says open. No verdict of any grade.
+        text = "```\nrun this\n~~~\nthen that"
+        self.assertFalse(distill._is_shape_artifact(text))
+        self.assertFalse(distill._is_hard_artifact(text))
+
+    def test_f4_shorter_closer_does_not_close(self):
+        # ```` opened, ``` does not close it (closer must be >= opener)
+        text = "````\n| a | b |\n|---|---|\n```\n| c | d |"
+        self.assertFalse(distill._is_shape_artifact(text))
+
+    def test_f4_proper_pairing_still_balanced(self):
+        # same-char, >= length closes: verdict restored
+        self.assertTrue(distill._is_shape_artifact(
+            "```\nERROR x\nexit 1\n```"))
+        self.assertTrue(distill._is_shape_artifact(
+            "````\ninside\n```\nstill inside\n````"))
 
     def test_f1_pure_table_registry_not_auto_deleted(self):
         # F1: a legitimate lookup-table memory (≥80% structural) was still
@@ -157,18 +200,25 @@ class TestReviewerP0s(_PruneStore):
 
 
 class TestRealArtifactsStillHandled(_PruneStore):
-    def test_boilerplate_auto_pruned(self):
-        # the ONE unconditional auto-delete marker: never durable prose
-        rec = self._write("caveat",
-                          "do not respond to these messages — they are "
-                          "local-command output only", type_="error")
-        self.assertIn(rec.filename(), audit.prune_artifacts())
-        self.assertFalse((Path(self.dir) / rec.filename()).exists())
-
-    def test_boilerplate_in_title_auto_pruned(self):
-        rec = self._write("Do not respond to these messages",
-                          "plain body text", type_="error")
-        self.assertIn(rec.filename(), audit.prune_artifacts())
+    def test_auto_prune_deletes_nothing_on_shapes_or_markers(self):
+        # post-F3 contract: auto-prune has no deletion-grade text pattern
+        # left — every ambiguous textual form is flag-grade. The physical
+        # unlink path remains only for the explicit, human-run prune.
+        recs = [
+            self._write("caveat", "do not respond to these messages",
+                        type_="error"),
+            self._write("tbl", "| a | b |", type_="error"),
+        ]
+        self.assertEqual(audit.prune_artifacts(), [])
+        for r in recs:
+            self.assertTrue((Path(self.dir) / r.filename()).exists())
+        # both flagged for the human, both die under explicit --apply
+        poll = audit.audit()["pollution"]
+        for r in recs:
+            self.assertIn(r.filename(), poll)
+        removed = audit.prune(apply=True)["removed"]
+        for r in recs:
+            self.assertIn(r.filename(), removed)
 
     def test_pure_table_row_flagged_and_explicitly_prunable(self):
         # contract change (RT r1 F1): shape is never auto-unlinked; a lone
@@ -210,15 +260,13 @@ class TestRealArtifactsStillHandled(_PruneStore):
 
 
 class TestPredicateDirectly(unittest.TestCase):
-    def test_hard_is_boilerplate_only(self):
-        # deletion-grade: unconditional marker only — never a shape
-        self.assertTrue(distill._is_hard_artifact(
-            "do not respond to these messages"))
-        self.assertFalse(distill._is_hard_artifact("| a | b |"))
-        self.assertFalse(distill._is_hard_artifact("```\nx\n```"))
-        self.assertFalse(distill._is_hard_artifact("✅"))
-        self.assertFalse(distill._is_hard_artifact(""))
-        self.assertFalse(distill._is_hard_artifact(None))  # type: ignore[arg-type]
+    def test_hard_never_matches_ambiguous_text(self):
+        # deletion-grade after F3: no textual pattern at all — auto-unlink
+        # needs machine-generated certainty no prose can be confused with,
+        # and none exists; the predicate stays for the explicit path only
+        for text in ("do not respond to these messages", "| a | b |",
+                     "```\nx\n```", "✅", "", None):
+            self.assertFalse(distill._is_hard_artifact(text))  # type: ignore[arg-type]
 
     def test_shape_mixed_prose_table_below_ratio(self):
         self.assertFalse(distill._is_shape_artifact(

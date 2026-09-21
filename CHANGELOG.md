@@ -142,25 +142,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Auto-prune no longer deletes memories over markdown shapes** (data
-  loss, reported 2026-09-18: an architecture memory was physically
-  unlinked twice because it contained a table). The deletion predicate
+- **Auto-prune no longer deletes memories over their text** (data loss,
+  reported 2026-09-18: an architecture memory was physically unlinked
+  twice because it contained a markdown table). The deletion predicate
   confused *presence* of a tool-output pattern with proof of junk — and
-  tables and fences appear in genuine durable prose (foldcrumbs' own
-  AGENTS.md is full of tables; a lookup-table memory is 100% "shape" and
-  100% legitimate). The fix splits one predicate into two risk profiles:
-  **deletion-grade** (`_is_hard_artifact`) is now the unconditional
-  boilerplate marker only — the sole thing auto-prune may unlink — while
-  **flag-grade** (`_is_shape_artifact`: ≥80% structural lines, balanced
-  fences counted as blocks, unbalanced fence = no verdict at all) feeds
-  the pollution report, doctor, and the explicit `prune --apply` — a
-  human decision, dry-run default. An ambiguous shape never dies
-  unattended; it gets flagged so a human can look. Capture-time skipping
+  every textual pattern turned out to have a legitimate-prose
+  counterexample: tables and fences appear in genuine memories
+  (foldcrumbs' own AGENTS.md is full of tables; a lookup-table memory is
+  100% "shape" and 100% legitimate — RT r1 F1), an accidentally unclosed
+  code fence poisons the whole tail (RT r1 F2), and even the
+  local-command boilerplate phrase appears in legitimate instructions
+  (a phishing-drill memory: "do not respond to these messages; forward
+  them to security" — RT r2 F3). Conclusion: no text match is
+  deletion-grade, so the unattended auto-prune now deletes NOTHING over
+  text. Junk is instead FLAGGED (pollution report, doctor) and dies only
+  under the explicit `prune --apply` — a human decision, dry-run default.
+  Fence handling became a real CommonMark pairing parser (same
+  character, closer at least as long as the opener; mixed ```/~~~ or
+  shorter closers leave the fence open — RT r2 F4), and an unbalanced
+  fence produces no verdict at all. Capture-time skipping
   (`_is_artifact`) is unchanged. Deletion bias is asymmetric on purpose:
   a false negative leaves cheap, visible junk; a false positive is
-  unrecoverable data loss. (RT round: 2 P0 on the first attempt — pure
-  lookup-table auto-deleted, unclosed fence poisoning the tail — both
-  reproduced and closed.)
+  unrecoverable data loss. (Two RT rounds: 4 P0 total — pure
+  lookup-table auto-deleted, unclosed-fence tail poisoned, boilerplate
+  substring matching legitimate prose, fence "balance" by marker parity
+  — all reproduced with reviewer PoCs and closed.)
 - **MCP schema portability — `graph_path` no longer declares `from`**:
   `from` is a Python reserved word, and an MCP host that builds a runtime
   function per tool from the input schema (e.g. `inspect.Parameter`)

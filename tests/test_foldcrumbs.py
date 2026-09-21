@@ -1429,10 +1429,13 @@ class TestAudit(TmpStore):
         self.assertFalse((Path(self.dir) / "error_tbl.md").exists())
 
     def test_auto_prune_on_persist(self):
-        # Contract change (PR #77, RT card t_c82395d2): auto-prune deletes
-        # ONLY the unconditional boilerplate — a markdown-table shape can
-        # be legitimate prose (a lookup-table memory), so it survives
-        # persist() and is merely flagged for the explicit prune.
+        # Contract change (PR #77, RT cards t_c82395d2 + t_471f59ca):
+        # after F3, NO textual pattern is deletion-grade — not a markdown
+        # shape (F1/F2: a lookup-table or an unclosed fence can be legit
+        # prose) and not even the boilerplate marker (F3: it appears in
+        # legitimate instructions). persist()'s auto-prune therefore
+        # deletes NOTHING over text; junk is flagged for the explicit,
+        # human-run prune instead.
         recs = [
             MemoryRecord(title="Real", content="We chose Postgres.", type="decision"),
             MemoryRecord(title="junk", content="| col a | col b | col c |", type="error"),
@@ -1442,10 +1445,16 @@ class TestAudit(TmpStore):
         distill.persist(recs)
         names = {m.title for m in store.load_all()}
         self.assertIn("Real", names)
-        self.assertIn("junk", names)       # shape → flagged, never auto-unlinked
-        self.assertNotIn("caveat", names)  # boilerplate → auto-pruned
+        self.assertIn("junk", names)    # shape → flagged, never auto-unlinked
+        self.assertIn("caveat", names)  # boilerplate → flagged, never auto-unlinked
         from foldcrumbs import audit
+        # both junk forms are visible to the human via the pollution report
         self.assertIn("error_junk.md", audit.audit()["pollution"])
+        self.assertIn("error_caveat.md", audit.audit()["pollution"])
+        # and die only under the explicit prune
+        removed = audit.prune(apply=True)["removed"]
+        self.assertIn("error_junk.md", removed)
+        self.assertIn("error_caveat.md", removed)
 
     def test_auto_prune_spares_legit_memory_mentioning_index(self):
         from foldcrumbs import audit
