@@ -16,7 +16,17 @@ from __future__ import annotations
 import re
 
 from . import config, store
-from .distill import _is_hard_artifact
+from .distill import _is_hard_artifact, _is_shape_artifact
+
+
+def _flag_artifact(m) -> bool:
+    """Flag-grade: boilerplate OR tool-output shape. Used by the pollution
+    report, doctor, and the EXPLICIT prune (human decision, dry-run
+    default). Auto-prune never uses this — it unlinks only _is_hard_artifact
+    (boilerplate), because an ambiguous shape can be legitimate prose
+    (RT r1 F1/F2)."""
+    return bool(_is_hard_artifact(m.title) or _is_hard_artifact(m.content)
+                or _is_shape_artifact(m.title) or _is_shape_artifact(m.content))
 
 _LINK_RE = re.compile(r"\]\(([^)]+\.md)\)")
 # compute_confidence below this is low-trust (stale/contradicted); prune only on
@@ -57,8 +67,7 @@ def audit(cwd=None) -> dict:
         "retired_links": sorted(t for t in linked
                                 if t in on_disk and t not in active_names),
         "orphans": sorted(n for n in active_names if n not in linked),
-        "pollution": sorted(_name(m) for m in active
-                            if _is_hard_artifact(m.title) or _is_hard_artifact(m.content)),
+        "pollution": sorted(_name(m) for m in active if _flag_artifact(m)),
         "stale": sorted(_name(m) for m in active
                         if m.compute_confidence() < STALE_CONF),
         # Active on disk but past their expires_at: invisible everywhere an
@@ -93,8 +102,12 @@ def _delete(name: str, cwd=None) -> bool:
 
 
 def prune_artifacts(cwd=None) -> list[str]:
-    """Delete active memories whose text is a clear tooling artifact, then rebuild
-    the index. Conservative — only unambiguous artifacts. Returns deleted names."""
+    """AUTO-prune: physically delete active memories whose text is the
+    unconditional tooling boilerplate (deletion-grade only), then rebuild
+    the index. Runs unattended on every distill, so it must never touch an
+    ambiguous markdown shape (a table / fence can be legitimate prose —
+    RT r1 F1/F2). Shape-based junk is left to the explicit `prune --apply`.
+    Returns deleted names."""
     removed = [
         _name(m)
         for m in list(store.iter_memories(cwd))
@@ -204,15 +217,18 @@ def decay(cwd=None, apply: bool = False) -> dict:
 def prune(cwd=None, apply: bool = False, include_stale: bool = False) -> dict:
     """Find (and with ``apply``, delete) prune candidates.
 
-    Candidates: superseded/deleted records (files left behind), active artifact
-    pollution, and — only with ``include_stale`` — low-trust active memories.
+    Candidates: superseded/deleted records (files left behind), active
+    pollution (boilerplate OR tool-output shape — flag-grade: this is the
+    explicit, human-run prune, dry-run by default, so an ambiguous shape
+    the auto-prune must never touch is fair game here), and — only with
+    ``include_stale`` — low-trust active memories.
     Dry-run by default; rebuilds the index when it deletes anything."""
     candidates: dict[str, str] = {}
     for m in store.iter_memories(cwd):
         name = _name(m)
         if m.status in ("deleted", "superseded", "archived"):
             candidates[name] = f"{m.status} (file kept until pruned)"
-        elif m.status == "active" and (_is_hard_artifact(m.title) or _is_hard_artifact(m.content)):
+        elif m.status == "active" and _flag_artifact(m):
             candidates[name] = "artifact"
         elif (include_stale and m.status == "active"
               and m.compute_confidence() < STALE_CONF):

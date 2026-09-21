@@ -104,23 +104,108 @@ def _is_artifact(text: str) -> bool:
     return bool(_ARTIFACT_RE.search(text or ""))
 
 
-# Stricter subset for DELETION (auto-prune / prune): only structural artifacts
-# that are never legitimate durable prose. Excludes the MEMORY.md/untitled.md and
-# markdown-link clauses, which can appear in genuine memories (notably foldcrumbs's
-# own architecture notes) — those are fine to skip at capture time but must not
-# trigger deletion of an existing memory.
-_HARD_ARTIFACT_RE = re.compile(
-    r"```"                       # code fence
-    r"|^\s*\|.*\|"               # markdown table row
-    r"|\|\s*:?-{2,}"             # markdown table separator
-    r"|[✓✅❌✗]"                  # status glyphs from tool/UI output
-    r"|do not respond to these messages",  # local-command caveat boilerplate
+# Stricter subset for DELETION (auto-prune / prune): only patterns that are
+# never legitimate durable prose. Excludes the MEMORY.md/untitled.md and
+# markdown-link clauses, which can appear in genuine memories (notably
+# foldcrumbs's own architecture notes) — those are fine to skip at capture
+# time but must not trigger deletion of an existing memory.
+#
+# RT r1 (card t_c82395d2) set the boundary for good: NO markdown SHAPE is
+# ever deletion-grade. Tables and code fences appear in genuine memories
+# (foldcrumbs' own AGENTS.md is full of tables), a pure lookup-table memory
+# is legitimate (F1), and an accidentally unclosed fence makes everything
+# after it look structural (F2).
+#
+# RT r2 (card t_471f59ca) closed the last loophole: NO TEXT MATCH AT ALL is
+# deletion-grade — not even the local-command boilerplate phrase. F3 PoC: a
+# legitimate phishing-drill instruction ("During a suspected phishing
+# simulation, do not respond to these messages; forward them to security")
+# contains the marker as prose and was auto-unlinked. The exact-match
+# variant fails too: the phrase can itself be a durable title/instruction.
+# Auto-unlink requires machine-generated certainty that prose cannot fake;
+# no regex provides it. The boilerplate moved to FLAG-grade: visible in the
+# pollution report, dies only under the explicit `prune --apply` — a human
+# decision, dry-run default. Deletion bias is asymmetric on purpose: a
+# false negative leaves cheap, visible junk; a false positive is
+# unrecoverable data loss. Reported data-loss bug (2026-09-18): an
+# architecture memory was deleted twice because it contained a table.
+_BOILERPLATE_RE = re.compile(
+    r"do not respond to these messages",  # local-command caveat boilerplate
     re.IGNORECASE | re.MULTILINE,
 )
 
 
 def _is_hard_artifact(text: str) -> bool:
-    return bool(_HARD_ARTIFACT_RE.search(text or ""))
+    """Deletion-grade verdict: after RT r2 F3, NO textual pattern qualifies.
+
+    Kept as the single hook the unattended auto-prune consults (audit.
+    prune_artifacts), permanently returning False: the automatic path
+    never deletes over text. The explicit, human-run prune clears
+    boilerplate and shapes via _is_shape_artifact / audit._flag_artifact."""
+    return False
+
+
+# Shape lines: tool-output SHAPES that are nonetheless legitimate inside
+# prose. Counted per line for the flag-grade verdict only.
+_SHAPE_LINE_RE = re.compile(
+    r"^\s*\|.*\|"               # markdown table row
+    r"|\|\s*:?-{2,}"            # markdown table separator
+    r"|^[\s✓✅❌✗]+$",           # line made only of status glyphs (UI output)
+    re.MULTILINE,
+)
+# A fence line: 3+ backticks or tildes, up to 3 spaces of indent.
+# (Named _FENCE_LINE_RE, not _FENCE_RE: a different _FENCE_RE already
+# exists below for parse_llm_memories — reusing the name silently
+# rebound it and broke the pairing parser. Verified unique.)
+_FENCE_LINE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+
+# A file whose non-blank lines are at least this fraction shape lines is
+# tool-output shaped — enough to FLAG for the human, never to auto-unlink.
+_SHAPE_PREVALENCE = 0.8
+
+
+def _is_shape_artifact(text: str) -> bool:
+    """Flag-grade: boilerplate marker OR tool-output SHAPE at prevalence
+    >= _SHAPE_PREVALENCE. Feeds the pollution report, doctor and the
+    explicit prune — never the automatic one.
+
+    Fence handling is a real pairing parser (RT r2 F4): a closer must use
+    the SAME character and be at least as long as the opener, with only
+    whitespace after it (CommonMark). ``` opened and ~~~ "closed" is an
+    open fence, and so is ```` closed by ```. If a fence is still open at
+    end of input, the tail is ambiguous — it may be a legitimate memory
+    whose author forgot the closing marker — and NO verdict is produced
+    (RT r1 F2)."""
+    if not text:
+        return False
+    if _BOILERPLATE_RE.search(text):
+        return True
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    structural = 0
+    open_fence: tuple[str, int] | None = None  # (char, run length)
+    for ln in lines:
+        m = _FENCE_LINE_RE.match(ln)
+        if m:
+            ch, run = m.group(1)[0], len(m.group(1))
+            if open_fence is None:
+                open_fence = (ch, run)
+                structural += 1
+                continue
+            if (ch == open_fence[0] and run >= open_fence[1]
+                    and not m.group(2).strip()):
+                open_fence = None  # valid closer
+            # else: a fence-looking line INSIDE an open fence is content
+            structural += 1
+            continue
+        if open_fence is not None:
+            structural += 1  # inside a fence: structural
+        elif _SHAPE_LINE_RE.search(ln):
+            structural += 1
+    if open_fence is not None:
+        return False  # unbalanced fence: ambiguous tail, refuse to judge
+    return structural / len(lines) >= _SHAPE_PREVALENCE
 
 
 def build_extraction_question(summary: str) -> str:
