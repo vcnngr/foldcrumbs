@@ -109,18 +109,59 @@ def _is_artifact(text: str) -> bool:
 # markdown-link clauses, which can appear in genuine memories (notably foldcrumbs's
 # own architecture notes) — those are fine to skip at capture time but must not
 # trigger deletion of an existing memory.
+#
+# Tables and code fences appear in GENUINE memories too (foldcrumbs' own
+# AGENTS.md is full of tables), so their *presence* can never be a deletion
+# verdict — only their *prevalence*: a file that IS tool output is (almost)
+# only artifact lines; a memory that merely QUOTES a table is prose plus a
+# table. Reported data-loss bug (2026-09-18): an architecture memory was
+# deleted twice because it contained a markdown table. Deletion bias is
+# asymmetric on purpose: a false negative leaves cheap, visible junk; a
+# false positive is unrecoverable data loss.
 _HARD_ARTIFACT_RE = re.compile(
-    r"```"                       # code fence
-    r"|^\s*\|.*\|"               # markdown table row
-    r"|\|\s*:?-{2,}"             # markdown table separator
-    r"|[✓✅❌✗]"                  # status glyphs from tool/UI output
-    r"|do not respond to these messages",  # local-command caveat boilerplate
+    r"do not respond to these messages",  # local-command caveat boilerplate
     re.IGNORECASE | re.MULTILINE,
 )
 
+# Structural lines: tool-output shapes that are nonetheless legitimate
+# inside prose. Counted per line; deletion needs prevalence, not presence.
+_HARD_STRUCTURAL_LINE_RE = re.compile(
+    r"^\s*(```|~~~)"            # code fence marker
+    r"|^\s*\|.*\|"              # markdown table row
+    r"|\|\s*:?-{2,}"            # markdown table separator
+    r"|^[\s✓✅❌✗]+$",           # line made only of status glyphs (UI output)
+    re.MULTILINE,
+)
+
+# A file whose non-blank lines are at least this fraction structural is a
+# dump, not prose. 0.8 lets a real memory quote a sizeable table and still
+# survive, while one intro line cannot launder a dump (tests pin both).
+_HARD_PREVALENCE = 0.8
+
 
 def _is_hard_artifact(text: str) -> bool:
-    return bool(_HARD_ARTIFACT_RE.search(text or ""))
+    """Deletion-grade artifact test: unconditional boilerplate markers,
+    OR structural lines (tables/fence blocks) at prevalence >=
+    _HARD_PREVALENCE. Lines INSIDE a code fence count as structural: a
+    file that is entirely a fenced dump is tool output, while prose
+    quoting a fence stays under the threshold."""
+    if not text:
+        return False
+    if _HARD_ARTIFACT_RE.search(text):
+        return True
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    structural = 0
+    in_fence = False
+    for ln in lines:
+        if re.match(r"^\s*(```|~~~)", ln):
+            in_fence = not in_fence
+            structural += 1
+            continue
+        if in_fence or _HARD_STRUCTURAL_LINE_RE.search(ln):
+            structural += 1
+    return structural / len(lines) >= _HARD_PREVALENCE
 
 
 def build_extraction_question(summary: str) -> str:
