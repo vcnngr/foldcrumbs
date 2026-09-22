@@ -65,10 +65,14 @@ results" has several distinct meanings:
 Two guarantees worth trusting:
 
 - **Explicit deletion is never silent.** `forget` is soft by default (the
-  file stays, auditable); hard-delete is an explicit `--hard`. But note:
-  the pollution auto-prune that rides along with `distill` DOES unlink
-  files physically (`FOLDCRUMBS_NO_AUTO_PRUNE` disables it). Memory files
-  are only as safe as your git history — version the store.
+  file stays, auditable); hard-delete is an explicit `--hard`. The
+  pollution auto-prune that rides along with `distill`
+  (`FOLDCRUMBS_NO_AUTO_PRUNE` disables it) never unlinks on a text match
+  anymore: no textual pattern proved safe enough for unattended deletion
+  (a table, a fence, even boilerplate can be legitimate prose), so it
+  deletes nothing — shape-based junk is *flagged* for the pollution report
+  and removed only by an explicit `prune --apply` (dry-run by default).
+  Memory files are only as safe as your git history — version the store.
 - **Snapshots never assert derived state.** `MEMORY.md` (the index) is a
   snapshot; anything whose truth depends on live state — grants, memories
   under an invalidation contract — is excluded from it structurally, with a
