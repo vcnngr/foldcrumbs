@@ -3,10 +3,12 @@
 [![tests](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml/badge.svg)](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/foldcrumbs.svg)](https://pypi.org/project/foldcrumbs/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue.svg)](https://pypi.org/project/foldcrumbs/)
+[![Downloads](https://img.shields.io/pypi/dm/foldcrumbs.svg)](https://pypistats.org/packages/foldcrumbs)
 
 [English](README.md) · [Italiano](README.it.md) · **中文**
 
-面向编码 agent 的跨会话持久记忆 — **无需 Docker、无需向量数据库、无需外部服务**。
+面向编码 agent 的跨会话持久记忆 — **不必每个会话重新解释你的项目：无需 Docker、无需向量数据库、无需外部服务**。
 
 `/clear` 和压缩(compaction)会在每个会话中抹掉 Claude Code 的记忆。foldcrumbs 维护一个
 存放类型化记忆文件的小文件夹，让 agent 重新打开时就已经知道你的决策、约定和代码库事实。

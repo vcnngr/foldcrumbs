@@ -3,10 +3,12 @@
 [![tests](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml/badge.svg)](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/foldcrumbs.svg)](https://pypi.org/project/foldcrumbs/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue.svg)](https://pypi.org/project/foldcrumbs/)
+[![Downloads](https://img.shields.io/pypi/dm/foldcrumbs.svg)](https://pypistats.org/packages/foldcrumbs)
 
 [English](README.md) · **Italiano** · [中文](README.zh.md)
 
-Memoria persistente cross-sessione per agent di coding — **niente Docker, niente vector DB, nessun servizio esterno**.
+Memoria persistente cross-sessione per agent di coding — **basta rispiegare il progetto a ogni sessione: niente Docker, niente vector DB, nessun servizio esterno**.
 
 `/clear` e la compaction cancellano la conoscenza di Claude Code a ogni sessione. foldcrumbs mantiene una
 piccola cartella di file di memoria tipizzati, così l'agent si riapre già conoscendo le tue decisioni, le

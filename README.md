@@ -3,10 +3,12 @@
 [![tests](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml/badge.svg)](https://github.com/vcnngr/foldcrumbs/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/foldcrumbs.svg)](https://pypi.org/project/foldcrumbs/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue.svg)](https://pypi.org/project/foldcrumbs/)
+[![Downloads](https://img.shields.io/pypi/dm/foldcrumbs.svg)](https://pypistats.org/packages/foldcrumbs)
 
 **English** · [Italiano](README.it.md) · [中文](README.zh.md)
 
-Persistent cross-session memory for coding agents — **no Docker, no vector DB, no external service**.
+Persistent cross-session memory for coding agents — **no more re-explaining your project every session, no Docker, no vector DB, no external service**.
 
 `/clear` and compaction wipe Claude Code's knowledge every session. foldcrumbs keeps a small
 folder of typed memory files so the agent reopens already knowing your decisions, conventions
