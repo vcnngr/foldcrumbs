@@ -10,10 +10,16 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+
+# REPO derived from THIS file's location (RT PR #82 r4 P0): a hardcoded
+# ~/Documents/claude/foldcrumbs broke on any other checkout — from an
+# ordinary clone it raised ModuleNotFoundError, and on the owner's host it
+# could silently import/write a DIFFERENT checkout, masking the test.
+REPO = str(Path(__file__).resolve().parents[2])
 
 STORE = os.environ.get("FOLDCRUMBS_DIR") or os.path.expanduser(
     "~/.claude/projects/-Users-vincenzoingrosso-Documents-claude-foldcrumbs/memory")
-REPO = os.path.expanduser("~/Documents/claude/foldcrumbs")
 os.environ["FOLDCRUMBS_DIR"] = STORE
 sys.path.insert(0, REPO)
 from foldcrumbs import store  # noqa: E402

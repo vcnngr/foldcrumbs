@@ -11,13 +11,17 @@ import hashlib
 import json
 import os
 import sys
+from pathlib import Path
 
 os.environ["FOLDCRUMBS_SEMANTIC"] = "1"
 os.environ["FOLDCRUMBS_EMBEDDING_MODEL"] = "minilm-bundled"
 os.environ["FOLDCRUMBS_EMBEDDING_ENDPOINT"] = "http://127.0.0.1:1"  # morto → forza il bundled
 os.environ.setdefault("FOLDCRUMBS_STATE_DIR", "/tmp/fc_sem_state")
 
-REPO = os.path.expanduser("~/Documents/claude/foldcrumbs")
+# REPO derived from THIS file's location (RT PR #82 r4 P0): see
+# build_golden.py — a hardcoded owner path breaks any other checkout and
+# can mask the test by importing/writing a different one.
+REPO = str(Path(__file__).resolve().parents[2])
 sys.path.insert(0, REPO)
 from foldcrumbs import config, embeddings_local, recalls, store  # noqa: E402
 
