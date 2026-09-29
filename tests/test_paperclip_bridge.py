@@ -155,6 +155,37 @@ class TestRT83R2ScopeCollisions(BridgeBase):
                                 "query": "proj flat"})
         self.assertEqual(got["count"], 0)
 
+    def test_scope_segment_is_length_bounded(self):
+        # RT r2 P1-2: a 300-char id must not blow the 255-byte filename
+        # limit downstream. Prefix is capped, digest fixed → segment bounded.
+        seg = bridge._scope_seg("x" * 300)
+        self.assertLessEqual(len(seg), 64,
+                             f"segment not bounded: {len(seg)} chars")
+        # and it actually works end-to-end (no Errno 63)
+        long_co = "y" * 300
+        bridge.cmd_ingest({"company": long_co, "text": "long id works"})
+        got = bridge.cmd_query({"company": long_co, "query": "long id"})
+        self.assertEqual(got["count"], 1)
+
+    def test_digest_is_128_bit_not_64(self):
+        # RT r2 P1-1: the isolation digest must be >=128 bits, not a 64-bit
+        # truncation claimed as "injective".
+        seg = bridge._scope_seg("acme")
+        digest = seg.rsplit("--", 1)[-1]
+        self.assertEqual(len(digest), 32, "digest must be 32 hex = 128 bits")
+
+    def test_case_and_unicode_normalization_are_distinct_stores(self):
+        # RT r2 P1-3: raw-id policy is case- and NFC/NFD-sensitive — distinct
+        # raw ids must be distinct stores (documented, now pinned).
+        nfc = "\u00e9"          # é as one codepoint
+        nfd = "e\u0301"         # é as e + combining acute
+        self.assertNotEqual(bridge.scope_cwd("ACME"), bridge.scope_cwd("acme"))
+        self.assertNotEqual(bridge.scope_cwd(nfc), bridge.scope_cwd(nfd))
+        # and they don't cross-read
+        bridge.cmd_ingest({"company": nfc, "text": "nfc tenant secret"})
+        got = bridge.cmd_query({"company": nfd, "query": "nfc tenant"})
+        self.assertEqual(got["count"], 0)
+
     def test_collision_pinned_at_memory_dir_level(self):
         # the ultimate invariant: distinct scope triples → distinct PHYSICAL
         # store dirs (not just distinct synthetic cwds — memory_dir's own
@@ -219,9 +250,11 @@ class TestRT83R2FailSoft(BridgeBase):
             with self.subTest(op=op, req=repr(req)[:60]):
                 payload = _json.dumps(req, default=repr) \
                     if isinstance(req, dict) else '"str"'
-                envelope = (op not in bridge._OPS) or not isinstance(req, dict)
-                # r2: main() answers EVERY refusal as JSON — unknown op is
-                # rc2 envelope (validated by hand, not argparse SystemExit).
+                # r3 contract (RT r2 P0): envelope = malformed PAYLOAD only
+                # (non-object JSON). An unknown op is an OPERATION refusal
+                # → rc1, not envelope. r2 wrongly lumped them together —
+                # that masking is what the reviewer caught.
+                envelope = not isinstance(req, dict)
                 buf_out, buf_err = _io.StringIO(), _io.StringIO()
                 with contextlib.redirect_stdout(buf_out), \
                         contextlib.redirect_stderr(buf_err):
@@ -234,6 +267,38 @@ class TestRT83R2FailSoft(BridgeBase):
                     body = _json.loads(buf_out.getvalue())
                     self.assertFalse(body["ok"])
                     self.assertIn("error", body)
+
+    def test_cli_malformed_argv_is_json_rc2_never_systemexit(self):
+        # RT r2 P0 PoCs: main([]), main(["call"]), main(["call","query"]),
+        # main(["bogus"]) raised SystemExit(2) with prose stderr. Every
+        # invocation shape must answer JSON on stdout with rc2.
+        import contextlib
+        import io as _io
+        import json as _json
+        for argv in ([], ["call"], ["call", "query"], ["bogus"],
+                     ["capabilities", "extra"]):
+            with self.subTest(argv=argv):
+                buf_out, buf_err = _io.StringIO(), _io.StringIO()
+                with contextlib.redirect_stdout(buf_out), \
+                        contextlib.redirect_stderr(buf_err):
+                    rc = bridge.main(argv)       # must NOT raise SystemExit
+                self.assertEqual(rc, 2, f"argv {argv} must be rc2")
+                body = _json.loads(buf_out.getvalue())
+                self.assertFalse(body["ok"])
+                self.assertIn("error", body)
+
+    def test_cli_unknown_op_is_rc1_json(self):
+        # RT r2 P0: `call nope {}` has a VALID envelope → operation refusal
+        # rc1 (r1 wrongly returned rc2), always JSON.
+        import contextlib
+        import io as _io
+        import json as _json
+        buf_out, buf_err = _io.StringIO(), _io.StringIO()
+        with contextlib.redirect_stdout(buf_out), \
+                contextlib.redirect_stderr(buf_err):
+            rc = bridge.main(["call", "nope", "{}"])
+        self.assertEqual(rc, 1)
+        self.assertFalse(_json.loads(buf_out.getvalue())["ok"])
 
     def test_valid_requests_still_work_after_hardening(self):
         # hardening must not break the happy path (guards against over-tight)

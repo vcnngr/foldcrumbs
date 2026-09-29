@@ -70,13 +70,20 @@ store and returns nothing. Paperclip's control plane owns which scope key
 to pass and should pass it consistently.
 
 Every request is a JSON object; every result is JSON with an `ok` boolean.
-Exit codes: `0` ok, `1` operation refused (validation failure, unknown
-handle, wrong field type — always a JSON `ok:false`, never a traceback),
-`2` malformed request envelope (unparsable JSON or non-object). The bridge
-never raises to the caller on a handled error — an optional provider must
-degrade, not crash the control plane. Requests are validated centrally:
-string fields reject non-strings, `limit` must be an integer in 1..200,
-`confidence` must be a finite number in 0..1, booleans must be booleans.
+Exit codes — **every refusal is a JSON `ok:false` on stdout, never a
+traceback and never bare argparse prose**:
+
+- `0` ok
+- `1` operation refused (valid envelope, bad operation): unknown op,
+  validation failure, unknown handle, wrong field type
+- `2` malformed envelope: short/unknown argv, unparsable JSON, non-object
+  payload
+
+The bridge never raises to the caller on a handled error — an optional
+provider must degrade, not crash the control plane. Requests are validated
+centrally: string fields reject non-strings, `limit` must be an integer in
+1..200, `confidence` must be a finite number in 0..1, booleans must be
+booleans.
 
 ## Scoping and isolation
 
@@ -85,10 +92,18 @@ that triple to a synthetic working directory and passes it as `cwd=` to
 every store call, so each scope lands in its **own isolated markdown
 store**. Two important, honest properties:
 
-- **Isolation is by construction and asserted**: distinct scopes → distinct
-  stores. `query` uses `federated=False`, so a company scope never surfaces
-  another company's (or an unrelated federated root's) memories — matching
-  Paperclip's "complete data isolation, company-scoped".
+- **Isolation is by construction and asserted**: each scope segment carries
+  a 128-bit sha256 digest of the raw id, so distinct ids can never collide
+  onto one store (`a/b` ≠ `a_b`, `..` ≠ `_`, `a-agent-b` ≠ `a`+`b`), even
+  through foldcrumbs' own path encoding. `query` uses `federated=False`, so
+  a company scope never surfaces another company's (or an unrelated
+  federated root's) memories — matching Paperclip's "complete data
+  isolation, company-scoped".
+- **Scope id policy**: ids are compared on raw UTF-8 bytes — case-sensitive
+  (`ACME` ≠ `acme`) and normalization-sensitive (NFC `é` ≠ NFD `e+accent`).
+  Distinct raw ids are distinct tenants, always, on every filesystem. Ids of
+  any length are safe: the readable path prefix is capped, the digest is the
+  identity. The control plane should pass ids consistently.
 - **The synthetic cwd is a KEY, not a container**: the physical store
   resolves under foldcrumbs' standard config-dir location derived from that
   key (`config.memory_dir`), namespaced by `FOLDCRUMBS_PAPERCLIP_ROOT`. The

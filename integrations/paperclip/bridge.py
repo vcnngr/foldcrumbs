@@ -94,15 +94,15 @@ def scope_cwd(company: str, agent: str = "", project: str = "") -> str:
     company is required (Paperclip memory is company-scoped); agent/project
     narrow it.
 
-    COLLISION-SAFE BY CONSTRUCTION (RT PR #83 P0-1): sanitizing ids alone is
-    NOT enough — distinct ids can sanitize to the same segment ("a/b" and
-    "a_b" both → "a_b"), and foldcrumbs' memory_dir encoding then flattens
-    "/" to "-", so even distinct paths could share one store
+    COLLISION-RESISTANT BY CONSTRUCTION (RT PR #83 P0-1): sanitizing ids
+    alone is NOT enough — distinct ids can sanitize to the same segment
+    ("a/b" and "a_b" both → "a_b"), and foldcrumbs' memory_dir encoding
+    then flattens "/" to "-", so even distinct paths could share one store
     ("company/a-agent-b" vs "company/a/agent/b"). Every segment therefore
-    carries a sha256 digest of the RAW id: distinct raw ids → distinct
-    digests → distinct segments → distinct stores, whatever downstream
-    encoders do. The sanitized prefix stays for human readability; the
-    digest is the identity.
+    carries a 128-bit sha256 digest of the RAW id (see _scope_seg for the
+    bit-length rationale and the case/Unicode policy): distinct raw ids →
+    distinct digests → distinct stores, whatever downstream encoders do.
+    The readable prefix is convenience; the digest is the identity.
     """
     if not company:
         raise ValueError("company is required for a Paperclip memory scope")
@@ -116,18 +116,31 @@ def scope_cwd(company: str, agent: str = "", project: str = "") -> str:
 
 
 def _scope_seg(part: str) -> str:
-    """One collision-free path segment for a raw scope id.
+    """One collision-resistant path segment for a raw scope id.
 
-    `<sanitized>--<sha256(raw utf-8)[:16]>`: sanitized keeps [alnum-_.]
-    (separators flattened — no traversal) purely for readability; the digest
-    makes the segment injective on the raw id, so "a/b" ≠ "a_b" ≠ ".." ≠ "_"
-    as STORES even where their sanitized prefixes collide. Hex chars pass
-    through any downstream path encoding unchanged.
+    `<readable-prefix>--<sha256(raw utf-8)[:32 hex]>` (RT PR #83 r2 P1s):
+
+    - The digest is **128 bits** (32 hex chars), not 64: for a tenant-
+      isolation guarantee a truncated 64-bit digest is not strong enough
+      to *claim* injectivity (birthday bound ~2^32 chosen inputs). 128
+      bits is collision-resistant for any practical id population — we
+      say "collision-resistant", not "injective".
+    - The readable prefix is **capped at 16 chars** so the segment length
+      is bounded (~50 chars) regardless of id length: a 300-char company
+      id can no longer blow the 255-byte filename limit downstream
+      (memory_dir flattens the whole cwd into ONE encoded component).
+      Readability is a convenience; identity is the digest.
+    - Digest input is the **raw UTF-8 bytes**: ids are case-sensitive and
+      Unicode-normalization-sensitive by policy ("ACME" ≠ "acme", NFC "é"
+      ≠ NFD "e+́"). Distinct raw ids → distinct stores, always; equal
+      raw ids → equal stores, on every platform (digest chars are
+      lowercase hex, immune to case-insensitive filesystems).
     """
     safe = "".join(c if (c.isalnum() or c in "-_.") else "_"
                    for c in part).strip(".") or "_"
-    digest = hashlib.sha256(part.encode("utf-8")).hexdigest()[:16]
-    return f"{safe}--{digest}"
+    prefix = safe[:16] or "_"
+    digest = hashlib.sha256(part.encode("utf-8")).hexdigest()[:32]
+    return f"{prefix}--{digest}"
 
 
 class _BadRequest(ValueError):
@@ -418,38 +431,72 @@ def dispatch(op: str, req: Any) -> dict:
         return {"ok": False, "error": f"store I/O failed: {e}"}
 
 
+class _JsonArgParser(argparse.ArgumentParser):
+    """argparse that answers malformed argv as JSON rc2, never SystemExit.
+
+    RT PR #83 r2 P0: a Paperclip adapter shelling into this CLI must get a
+    machine-readable envelope for EVERY refusal — but stock argparse calls
+    sys.exit(2) with prose on stderr for missing args / unknown commands
+    (main([]), main(["call"]), main(["bogus"])). Override error()/exit() so
+    those become {"ok": false, ...} on stdout and a plain rc we return.
+    """
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.json_error: str | None = None
+
+    def error(self, message):              # noqa: A003 — argparse hook
+        self.json_error = message
+        # do NOT sys.exit; raise a sentinel main() turns into rc2 JSON
+        raise _ArgError(message)
+
+
+class _ArgError(Exception):
+    pass
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: the surface a Paperclip `process`/http adapter shells into.
 
     `bridge capabilities`           → JSON capability manifest
     `bridge call <op> '<json req>'` → JSON result (op ∈ ingest/query/…)
 
-    Exit codes: 0 = ok:true; 1 = operation refused (validation, unknown
-    handle, bad field type — always JSON ok:false, never a traceback);
-    2 = malformed request envelope (unparsable JSON or non-object).
+    Exit codes (every refusal is JSON ok:false on stdout, never a traceback
+    and never bare argparse prose):
+      0 = ok:true
+      1 = operation refused — valid envelope, bad operation (unknown op,
+          validation failure, unknown handle, wrong field type)
+      2 = malformed request envelope — unparsable/short argv, non-JSON or
+          non-object payload (argparse usage errors included)
     """
-    ap = argparse.ArgumentParser(
+    ap = _JsonArgParser(
         prog="foldcrumbs-paperclip-bridge",
         description="foldcrumbs memory-provider bridge for Paperclip")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("capabilities", help="print the provider capability manifest")
     call = sub.add_parser("call", help="invoke one portable-core operation")
-    # op is validated by hand (not argparse choices) so an unknown op still
-    # answers as JSON rc2 — an adapter shelling in gets a machine-readable
-    # envelope for EVERY refusal, never an argparse SystemExit.
+    # op is validated by hand below (not argparse choices) so an unknown op
+    # is an rc1 operation refusal with a JSON body, not an argparse rc2.
     call.add_argument("op")
     call.add_argument("request", help="JSON request object")
-    args = ap.parse_args(argv)
+
+    try:
+        args = ap.parse_args(argv)
+    except _ArgError as e:                 # malformed argv → JSON rc2
+        print(json.dumps({"ok": False, "error": f"bad invocation: {e}"}))
+        return 2
 
     if args.cmd == "capabilities":
         print(json.dumps(CAPABILITIES, indent=1, ensure_ascii=False))
         return 0
 
+    # `call` with an unknown op: the envelope is fine, the OPERATION is not
+    # → rc1 (was wrongly rc2 in r1; the r2 test masked this — RT r2 P0).
     if args.op not in _OPS:
         print(json.dumps({"ok": False,
                           "error": f"unknown op: {args.op!r} "
                                    f"(valid: {', '.join(sorted(_OPS))})"}))
-        return 2
+        return 1
     try:
         req = json.loads(args.request)
     except json.JSONDecodeError as e:
