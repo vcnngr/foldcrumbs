@@ -29,6 +29,12 @@ def derive_query(title: str) -> str:
 
 
 def build():
+    # READ-ONLY GUARANTEE (RT PR #82 P0-1): store.search() reinforces recall
+    # stats (.recalls.json rewrite). A golden-set builder must not mutate the
+    # store it reads — neutralize reinforcement BEFORE the first search.
+    from foldcrumbs import recalls
+    recalls.reinforce = lambda *a, **k: None  # noqa: E731
+
     recs = list(store.iter_memories())
     recs = [r for r in recs if getattr(r, "status", "active") == "active"]
     pairs = []
@@ -44,18 +50,19 @@ def build():
             used_titles.add(r.title)
         if len(pairs) >= 40:
             break
-    # negativi: per ogni query positiva, memorie che quella query NON serve
-    # e con cui condividono al più 1 termine (overlap minimo, non ambiguo)
+    # negativi: AL PIÙ UNO per query positiva, a giro (RT PR #82 P0-3:
+    # 10 negativi tutti sulla prima query non misuravano copertura).
+    # Criterio oggettivo: la query non serve quella memoria e l'overlap di
+    # termini titolo-vs-query è ≤1.
     neg_needed = 10
-    for p in list(pairs):
+    positives = list(pairs)
+    for p in positives:
         if neg_needed <= 0:
             break
         qterms = set(p["query"].split())
         served = store.search(p["query"], limit=10)
         served_titles = {m.title for m in served}
         for r in recs:
-            if neg_needed <= 0:
-                break
             if r.title in used_titles or r.title in served_titles:
                 continue
             terms = set(re.findall(r"[a-z0-9]+", r.title.lower()))
@@ -65,6 +72,7 @@ def build():
                           "label": "irrelevant"})
             used_titles.add(r.title)
             neg_needed -= 1
+            break                           # max 1 negativo per query
     return pairs
 
 
