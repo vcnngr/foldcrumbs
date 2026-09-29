@@ -5,6 +5,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Paperclip memory-provider bridge** (`integrations/paperclip/bridge.py`)
+  — foldcrumbs as a local markdown-first memory provider for
+  [Paperclip](https://github.com/paperclipai/paperclip) (94k-star agent-orchestration
+  platform whose Memory/Knowledge surface is roadmap ⚪). Implements their
+  Memory-API discussion #1155 portable core as six JSON ops —
+  `ingest`/`query`/`get`/`browse`/`forget`/`usage` — with company/agent/project
+  scoping (one isolated store per scope triple, `federated=False` so tenants
+  never cross), Paperclip-entity provenance (issue/run/comment/document refs
+  echoed on every result), soft-delete governance, and a `capabilities`
+  manifest. Stdlib-only like the core; an optional provider must degrade, not
+  crash — every handled error returns JSON `ok:false`, never a traceback.
+  Honest limits stated in `docs/paperclip.md`: usage is structural (no invented
+  token cost), the adapter glue is the integrator's thin layer, and the scope
+  key must be consistent across ops (each distinct triple is its own store).
+  33 contract tests incl. cross-tenant-leak, store-escape, collision-safe
+  scope digest, and total-CLI-contract regressions.
+
 ## [0.12.0] — 2026-09-29
 
 ### Added
