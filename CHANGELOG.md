@@ -23,7 +23,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Honest limits stated in `docs/paperclip.md`: usage is structural (no invented
   token cost), the adapter glue is the integrator's thin layer, and the scope
   key must be consistent across ops (each distinct triple is its own store).
-  20 contract tests incl. cross-tenant-leak and store-escape regressions.
+  33 contract tests incl. cross-tenant-leak, store-escape, collision-safe
+  scope digest, and total-CLI-contract regressions.
+
+## [0.12.0] — 2026-09-29
+
+### Added
+
+- **Versioned quality benchmark** (`benchmarks/quality/`) — the gate behind
+  any future quality claim: a deterministic, cross-host-reproducible golden
+  set builder (sorted selection, host-local recall counts neutralized,
+  REPO derived from `__file__`), 50-pair golden + 20-pair paraphrase sets
+  audited pair-by-pair against real store content, `verify_reproducible.py`
+  (3-scenario sidecar proof), and `RESULTS.md` with the honest numbers and
+  every limitation stated. Measured on this release: paraphrase recall
+  7/10 lexical → 10/10 with the bundled channel, 0 FP both; the three
+  rescues counter-proved individually (pure synonym/morphology matches).
 
 - **Opt-in local embeddings discovery** — `FOLDCRUMBS_EMBEDDING_AUTO=1`
   lets a machine without an explicit endpoint find a local
