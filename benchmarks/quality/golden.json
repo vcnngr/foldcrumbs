@@ -1,0 +1,252 @@
+[
+ {
+  "query": "durable memories decisions rules preferences facts",
+  "memory": "97 +- Durable memories (decisions, rules, preferences, facts) \u2014 always re-in",
+  "label": "relevant"
+ },
+ {
+  "query": "all api keys env plaintext live",
+  "memory": "ALL API KEYS.env plaintext live keys is a liability",
+  "label": "relevant"
+ },
+ {
+  "query": "all imac claude instances migrated foldcrumbs",
+  "memory": "All 4 iMac Claude instances migrated to foldcrumbs hooks",
+  "label": "relevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Automatic memory distillation trigger",
+  "label": "relevant"
+ },
+ {
+  "query": "now gates ruff lint",
+  "memory": "CI now gates on ruff lint",
+  "label": "relevant"
+ },
+ {
+  "query": "claude config dir honored per instance",
+  "memory": "CLAUDE CONFIG DIR honored for per-instance memory namespacing",
+  "label": "relevant"
+ },
+ {
+  "query": "creating new vcnngr engram repo breaks",
+  "memory": "Creating new vcnngr/engram repo breaks the redirect",
+  "label": "relevant"
+ },
+ {
+  "query": "data extraction logic",
+  "memory": "Data Extraction Logic",
+  "label": "relevant"
+ },
+ {
+  "query": "not reinstall hooks macbook after rename",
+  "memory": "Do not reinstall hooks on MacBook after rename",
+  "label": "relevant"
+ },
+ {
+  "query": "dual layer memory architecture",
+  "memory": "Dual-layer memory architecture",
+  "label": "relevant"
+ },
+ {
+  "query": "durabile memory decisioni regole preferenze sempre",
+  "memory": "Durabile ( MEMORY.md ) \u2014 decisioni/regole/preferenze, sempre re-iniettato",
+  "label": "relevant"
+ },
+ {
+  "query": "engram cli commands",
+  "memory": "Engram CLI commands",
+  "label": "relevant"
+ },
+ {
+  "query": "engram context budget configuration",
+  "memory": "Engram Context Budget Configuration",
+  "label": "relevant"
+ },
+ {
+  "query": "engram context monitoring",
+  "memory": "Engram Context Monitoring",
+  "label": "relevant"
+ },
+ {
+  "query": "engram handoff implementation",
+  "memory": "Engram Handoff Implementation",
+  "label": "relevant"
+ },
+ {
+  "query": "engram memory persistence",
+  "memory": "Engram Memory Persistence",
+  "label": "relevant"
+ },
+ {
+  "query": "engram derives trust decay hooks memanto",
+  "memory": "Engram derives trust/decay + hooks from memanto (MIT)",
+  "label": "relevant"
+ },
+ {
+  "query": "engram hook interpreter usr local bin",
+  "memory": "Engram hook interpreter is /usr/local/bin/python3",
+  "label": "relevant"
+ },
+ {
+  "query": "engram memory store per project keyed",
+  "memory": "Engram memory store is per-project (keyed by cwd)",
+  "label": "relevant"
+ },
+ {
+  "query": "engram multi machine setup decentralized ssh",
+  "memory": "Engram multi-machine setup is decentralized, no SSH",
+  "label": "relevant"
+ },
+ {
+  "query": "engram project status",
+  "memory": "Engram project status",
+  "label": "relevant"
+ },
+ {
+  "query": "engram repo github com vcnngr engram",
+  "memory": "Engram repo is github.com/vcnngr/engram",
+  "label": "relevant"
+ },
+ {
+  "query": "environment configuration",
+  "memory": "Environment Configuration",
+  "label": "relevant"
+ },
+ {
+  "query": "extraction prompt guardrail",
+  "memory": "Extraction Prompt Guardrail",
+  "label": "relevant"
+ },
+ {
+  "query": "force memory write instance",
+  "memory": "Force a memory write for an instance",
+  "label": "relevant"
+ },
+ {
+  "query": "force engram memory write claude config",
+  "memory": "Force engram memory write for a CLAUDE CONFIG DIR instance",
+  "label": "relevant"
+ },
+ {
+  "query": "github repo renamed vcnngr foldcrumbs",
+  "memory": "GitHub repo renamed to vcnngr/foldcrumbs",
+  "label": "relevant"
+ },
+ {
+  "query": "handoff injection mechanism",
+  "memory": "Handoff injection mechanism",
+  "label": "relevant"
+ },
+ {
+  "query": "heuristic fallback hardening",
+  "memory": "Heuristic Fallback Hardening",
+  "label": "relevant"
+ },
+ {
+  "query": "hooks load session start",
+  "memory": "Hooks load at session start",
+  "label": "relevant"
+ },
+ {
+  "query": "hooks pin interpreter usr local bin",
+  "memory": "Hooks pin interpreter /usr/local/bin/python3 for cross-machine",
+  "label": "relevant"
+ },
+ {
+  "query": "install engram hooks into new instance",
+  "memory": "Install engram hooks into a new instance",
+  "label": "relevant"
+ },
+ {
+  "query": "llm server model ids",
+  "memory": "LLM Server Model IDs",
+  "label": "relevant"
+ },
+ {
+  "query": "launch engram reddit",
+  "memory": "Launch engram on Reddit",
+  "label": "relevant"
+ },
+ {
+  "query": "local llm server port 8081",
+  "memory": "Local LLM server on port 8081",
+  "label": "relevant"
+ },
+ {
+  "query": "local folder stays engram despite foldcrumbs",
+  "memory": "Local folder stays 'engram' despite foldcrumbs rename",
+  "label": "relevant"
+ },
+ {
+  "query": "macbook also runs claude instances",
+  "memory": "MacBook also runs 4 Claude instances",
+  "label": "relevant"
+ },
+ {
+  "query": "main claude settings synced aliases not",
+  "memory": "Main ~/.claude settings synced; 3 aliases not synced",
+  "label": "relevant"
+ },
+ {
+  "query": "manual handoff commands",
+  "memory": "Manual Handoff Commands",
+  "label": "relevant"
+ },
+ {
+  "query": "memory extraction integrity",
+  "memory": "Memory Extraction Integrity",
+  "label": "relevant"
+ },
+ {
+  "query": "durable memories decisions rules preferences facts",
+  "memory": "Memory Sanitization Strategy",
+  "label": "irrelevant"
+ },
+ {
+  "query": "all api keys env plaintext live",
+  "memory": "Model ID Error Type",
+  "label": "irrelevant"
+ },
+ {
+  "query": "all imac claude instances migrated foldcrumbs",
+  "memory": "Model ID Naming Convention",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Old vcnngr/engram GitHub URL 301-redirects to foldcrumbs",
+  "label": "irrelevant"
+ },
+ {
+  "query": "now gates ruff lint",
+  "memory": "One editable engram install serves all instances",
+  "label": "irrelevant"
+ },
+ {
+  "query": "claude config dir honored per instance",
+  "memory": "Only ~/.claude is Syncthing-synced",
+  "label": "irrelevant"
+ },
+ {
+  "query": "creating new vcnngr engram repo breaks",
+  "memory": "Only ~/.claude is Syncthing-synced, not work/peo/3sez",
+  "label": "irrelevant"
+ },
+ {
+  "query": "data extraction logic",
+  "memory": "Per-instance memory, shared ~/.engram backend",
+  "label": "irrelevant"
+ },
+ {
+  "query": "not reinstall hooks macbook after rename",
+  "memory": "Perdi lo stato vivo, ma le decisioni/regole/preferenze tornano auto-iniettate.",
+  "label": "irrelevant"
+ },
+ {
+  "query": "dual layer memory architecture",
+  "memory": "Project renamed engram - foldcrumbs (v0.3.0, 2026-07-06). PyPI/GitHub/CLI/impor",
+  "label": "irrelevant"
+ }
+]
