@@ -1465,6 +1465,40 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_embeddings(args: argparse.Namespace) -> int:
+    """Manage the OPTIONAL bundled local embedding model (foldcrumbs[semantic]).
+
+    The core stays stdlib-only; this never forces anything. `status` works
+    even without the extra installed (it reports what's missing and how to
+    get it). `setup`/`remove` need onnxruntime; without it they print the
+    honest install line and exit non-zero rather than crashing.
+    """
+    from . import embeddings_local as el
+
+    action = getattr(args, "emb_action", None) or "status"
+    if action == "status":
+        st = el.status()
+        print(f"bundled channel : {'AVAILABLE' if st['available'] else 'not available'}")
+        print(f"runtime         : {st['runtime']}")
+        print(f"model           : {'present' if st['model_present'] else 'absent'}"
+              f" (sha256 {'ok' if st['model_sha256_ok'] else 'missing/bad'})")
+        print(f"vocab           : {'present' if st['vocab_present'] else 'absent'}"
+              f" (sha256 {'ok' if st['vocab_sha256_ok'] else 'missing/bad'})")
+        print(f"revision        : {st['revision'][:12]}")
+        if not st["available"]:
+            print("\nto enable: pip install 'foldcrumbs[semantic]' "
+                  "&& foldcrumbs embeddings setup")
+        return 0
+    if action == "setup":
+        return 0 if el.setup() else 1
+    if action == "remove":
+        return 0 if el.remove() else 1
+    # no sub-action given: argparse default is status (set above), so this
+    # is unreachable, but be honest rather than silently doing nothing.
+    print("usage: foldcrumbs embeddings {setup|status|remove}")
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="foldcrumbs", description=__doc__)
     p.add_argument("--version", action="version", version=_version_string(),
@@ -1784,6 +1818,16 @@ def build_parser() -> argparse.ArgumentParser:
     uns.add_argument("--local", action="store_true")
     uns.add_argument("--settings")
     uns.set_defaults(func=_cmd_uninstall)
+
+    emb = sub.add_parser(
+        "embeddings",
+        help="manage the OPTIONAL bundled local embedding model "
+             "(foldcrumbs[semantic])")
+    emb_sub = emb.add_subparsers(dest="emb_action")
+    emb_sub.add_parser("setup", help="download + verify the pinned local model")
+    emb_sub.add_parser("status", help="show the bundled-channel state")
+    emb_sub.add_parser("remove", help="delete the downloaded model")
+    emb.set_defaults(func=_cmd_embeddings)
 
     return p
 

@@ -41,3 +41,44 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Evolving-state mini-bench
         run: python benchmarks/evolving_state/run.py
+
+  # The OPTIONAL bundled-embedding channel with its extra installed, plus a
+  # real (non-mocked) inference smoke test against the pinned model. Kept
+  # non-blocking on purpose: it depends on a HuggingFace download and an
+  # optional dependency — a flake there must not red the core suite, which
+  # already proves the channel degrades to "absent" cleanly.
+  semantic-extra:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with the semantic extra
+        run: python -m pip install -e ".[semantic]"
+      - name: Download the pinned bundle
+        run: foldcrumbs embeddings setup
+        env:
+          FOLDCRUMBS_STATE_DIR: ${{ runner.temp }}/fc-state
+      - name: Bundled channel tests (with onnxruntime present)
+        run: python -m unittest tests.test_embeddings_local tests.test_wordpiece -v
+        env:
+          FOLDCRUMBS_STATE_DIR: ${{ runner.temp }}/fc-state
+      - name: Real inference smoke test
+        run: |
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, ".")
+          from foldcrumbs import embeddings_local as el
+          assert el.available(), el.status()
+          v = el.embed(["deploy tuesday utc", "deployment happens tuesday",
+                        "the coffee machine is broken"])
+          assert v and len(v) == 3 and len(v[0]) == 384
+          from foldcrumbs.embeddings import cosine
+          assert cosine(v[0], v[1]) > 0.5, "paraphrase pair too low"
+          assert cosine(v[0], v[2]) < 0.3, "unrelated pair too high"
+          print("bundled inference smoke: OK")
+          PY
+        env:
+          FOLDCRUMBS_STATE_DIR: ${{ runner.temp }}/fc-state

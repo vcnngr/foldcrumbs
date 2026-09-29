@@ -217,6 +217,36 @@ non scavalca mai ciò che hai configurato, non tocca mai indirizzi non-loopback,
 risponde il recall resta lessicale esattamente come prima. `foldcrumbs doctor` riporta quale
 endpoint è attivo e come è stato risolto.
 
+#### Modello locale incluso — all-inclusive, sempre opzionale
+
+Nessun server da avviare? Installa l'extra opzionale e scarica il modello
+pinnato una sola volta:
+
+```bash
+pip install 'foldcrumbs[semantic]'   # onnxruntime + numpy — NON nel core
+foldcrumbs embeddings setup          # ~23 MB, verificato sha256, machine-local
+foldcrumbs embeddings status         # cosa è installato, quale revisione
+foldcrumbs embeddings remove         # rimuovilo di nuovo
+```
+
+Fatto — il recall ha ora un canale semantico locale **senza API key, senza
+server, senza rete** dopo il setup. Il bundle è
+[Xenova/all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2)
+(ONNX, quantizzato, revisione pinnata; il setup rifiuta qualsiasi download
+il cui sha256 non corrisponda). Il tokenizer WordPiece è codice stdlib
+nostro, validato ID-per-ID contro il tokenizer HF ufficiale.
+
+Il **core resta stdlib-only, per sempre**: senza l'extra non cambia nulla —
+`available()` è False, il canale viene saltato, il recall è lessicale. La
+catena di fallback è endpoint esplicito → discovery loopback → modello
+bundled → lessicale, ogni gradino una degradazione onesta. I vettori bundled
+sono cachati sotto la chiave della propria revisione, mai mescolati con lo
+spazio vettoriale di un server.
+
+Nota piattaforme (verificata su PyPI): onnxruntime pubblica wheel macOS
+x86_64 fino alla 1.23.x e arm64 dalla 1.24+; `pip` risolve quella giusta.
+Linux x86_64/arm64 e Windows coperti. Python ≥3.10.
+
 ## Dashboard
 
 `foldcrumbs dashboard` rende l'intero store come **una singola pagina HTML autocontenuta** — CSS

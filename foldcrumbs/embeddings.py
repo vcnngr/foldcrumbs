@@ -304,24 +304,67 @@ def embed(texts: list[str], candidates=None) -> list[list[float]] | None:
 
 def _embed_inner(texts: list[str]) -> list[list[float]] | None:
     cache = _load_cache()
+    # A vector's space depends on the channel that made it, so the cache key
+    # folds in a basis: the server endpoint for served vectors, the bundle
+    # revision for bundled ones. A machine normally uses ONE channel, but if
+    # it switches (server dies, bundle installed) the old entries simply stop
+    # matching — never mixed into one ranking (that would compare two scales).
+    bundle_basis = _bundled_basis()          # None when the extra is absent
+    server_basis = _resolve()[1]
+
     out: list[list[float] | None] = [None] * len(texts)
-    missing: list[tuple[int, str, str]] = []
+    missing: list[tuple[int, str]] = []      # (index, text)
     for i, text in enumerate(texts):
-        key = _key(text)
-        hit = cache.get(key)
+        # lookup: server space first, then bundle space
+        hit = cache.get(_key(text, server_basis))
+        if hit is None and bundle_basis is not None:
+            hit = cache.get(_key(text, bundle_basis))
         if hit is not None:
             out[i] = hit
         else:
-            missing.append((i, key, text))
+            missing.append((i, text))
+
     if missing:
-        got = _post([text for _, _, text in missing])
-        if got is None:      # gate 2: the endpoint did not answer — lexical
+        miss_texts = [t for _, t in missing]
+        basis = server_basis
+        got = _post(miss_texts)
+        if got is None and bundle_basis is not None:
+            got = _embed_bundled(miss_texts)   # channel 3
+            if got is not None:
+                basis = bundle_basis           # bundle space, not server's
+        if got is None:                        # gate 2: nothing — lexical
             return None
-        for (i, key, _), vec in zip(missing, got):
+        for (i, text), vec in zip(missing, got):
             out[i] = vec
-            cache[key] = vec
+            cache[_key(text, basis)] = vec
         _save_cache(cache)
     return out               # type: ignore[return-value]
+
+
+def _bundled_basis() -> str | None:
+    """The bundle's cache basis, or None when it cannot serve right now.
+
+    Cheap and side-effect-free: an availability check, never a model load.
+    Import is guarded so a machine without the extra pays nothing.
+    """
+    try:
+        from . import embeddings_local
+    except ImportError:
+        return None
+    return embeddings_local.cache_basis() if embeddings_local.available() else None
+
+
+def _embed_bundled(texts: list[str]) -> list[list[float]] | None:
+    """The optional bundled model (foldcrumbs[semantic]) as channel 3.
+
+    Import is local and guarded: a machine without the extra never loads
+    the module's heavy parts. Any failure is an honest None → lexical.
+    """
+    try:
+        from . import embeddings_local
+    except ImportError:
+        return None
+    return embeddings_local.embed(texts)
 
 
 def cosine(a: list[float], b: list[float]) -> float:
