@@ -131,6 +131,28 @@ def _discovery_cache_path():
     return config.STATE_DIR / "embedding-endpoint-discovered"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse HTTP redirects outright (RT PR #80 r2, new P0).
+
+    The loopback guarantee is end-to-end only if a validated 127.0.0.1
+    endpoint cannot 302 the request — and its ``Authorization: Bearer``
+    header — to a remote host. An OpenAI-compatible /v1/embeddings server
+    never needs a redirect, so we simply never follow one: a 3xx raises
+    and the caller treats it as "did not answer".
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _open_no_redirect(req: urllib.request.Request, timeout: float):
+    """urlopen with redirects disabled — the only way this module talks HTTP."""
+    return _OPENER.open(req, timeout=timeout)
+
+
 def _probe_endpoint(base: str) -> bool:
     """True when ``base`` answers a minimal /v1/embeddings POST in time."""
     url = base.rstrip("/") + "/embeddings"
@@ -139,8 +161,8 @@ def _probe_endpoint(base: str) -> bool:
         url, data=payload, headers={"Content-Type": "application/json"},
         method="POST")
     try:
-        with urllib.request.urlopen(
-                req, timeout=config.EMBEDDING_PROBE_TIMEOUT) as resp:
+        with _open_no_redirect(
+                req, config.EMBEDDING_PROBE_TIMEOUT) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return False
@@ -239,7 +261,7 @@ def _post(texts: list[str], url_base: str | None = None) -> list[list[float]] | 
         url, data=json.dumps(payload).encode("utf-8"),
         headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=config.EMBEDDING_TIMEOUT) as resp:
+        with _open_no_redirect(req, config.EMBEDDING_TIMEOUT) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return None

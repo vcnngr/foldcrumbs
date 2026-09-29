@@ -70,7 +70,7 @@ def _fake_server():
 
 _DISCOVERY_VARS = ("FOLDCRUMBS_EMBEDDING_AUTO", "FOLDCRUMBS_EMBEDDING_ENDPOINT",
                    "FOLDCRUMBS_EMBEDDING_MODEL", "FOLDCRUMBS_SEMANTIC",
-                   "FOLDCRUMBS_LLM_ENDPOINT")
+                   "FOLDCRUMBS_LLM_ENDPOINT", "FOLDCRUMBS_LLM_API_KEY")
 
 
 class _EnvCase(unittest.TestCase):
@@ -230,6 +230,8 @@ class TestRT80P0Regressions(_EnvCase):
     def test_p0_3_historical_cache_key_unchanged_with_auto_off(self):
         # AUTO off + endpoint esplicito: la key deve essere byte-identica
         # a quella storica (basis = raw config endpoint, non normalizzato).
+        # P1 r2: pin the PRODUCTION call shape _key(text) — no explicit
+        # second argument, exactly like _embed_inner does.
         import hashlib
         self._set(FOLDCRUMBS_EMBEDDING_ENDPOINT="http://127.0.0.1:9999",
                   FOLDCRUMBS_EMBEDDING_MODEL="m", FOLDCRUMBS_SEMANTIC="1")
@@ -237,8 +239,77 @@ class TestRT80P0Regressions(_EnvCase):
         historical = hashlib.sha256(
             f"http://127.0.0.1:9999\x00m\x00{text}".encode("utf-8")
         ).hexdigest()
-        self.assertEqual(embeddings._key(text, embeddings._resolve()[1]),
-                         historical)
+        self.assertEqual(embeddings._key(text), historical)
+
+
+class _RedirectHandler(BaseHTTPRequestHandler):
+    """302s every POST to a forbidden sink URL (set as class attr)."""
+
+    sink = "http://127.0.0.1:1/v1"
+
+    def do_POST(self):  # noqa: N802
+        self.send_response(302)
+        self.send_header("Location", type(self).sink)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format, *args):  # noqa: A002
+        pass
+
+
+class _SinkHandler(BaseHTTPRequestHandler):
+    """Records any request that reaches the forbidden target."""
+
+    hits = []
+
+    def do_GET(self):  # noqa: N802
+        type(self).hits.append(dict(self.headers))
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    do_POST = do_GET
+
+    def log_message(self, format, *args):  # noqa: A002
+        pass
+
+
+class TestRedirectNeverFollowed(_EnvCase):
+    """New P0 (RT t_01a931cf): a loopback endpoint must not be able to
+    302 the request — and the Bearer key — to a host outside loopback.
+    The reviewer's counterexample, as a regression."""
+
+    def test_redirect_to_forbidden_host_is_refused_no_key_leak(self):
+        self._set(FOLDCRUMBS_EMBEDDING_AUTO="1", FOLDCRUMBS_SEMANTIC="1",
+                  FOLDCRUMBS_EMBEDDING_MODEL="m",
+                  FOLDCRUMBS_LLM_API_KEY="***")
+        threading_ = __import__("threading")
+        sink_srv = ThreadingHTTPServer(("127.0.0.1", 0), _SinkHandler)
+        red_srv = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        _SinkHandler.hits = []
+        _RedirectHandler.sink = f"http://127.0.0.1:{sink_srv.server_address[1]}/v1"
+        # NOTE: the sink is loopback in this test (a real remote host in CI
+        # would be flaky); what matters is the redirect is NEVER followed:
+        # zero hits on the sink, no Authorization header anywhere.
+        for srv in (sink_srv, red_srv):
+            threading_.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{red_srv.server_address[1]}/v1"
+            # probe refuses the redirecting endpoint
+            self.assertFalse(embeddings._probe_endpoint(base))
+            # discovery does not accept it
+            self.assertIsNone(embeddings.discover_local_endpoint(
+                candidates=[base]))
+            # direct embed POST does not follow it either → None, no leak
+            self.assertIsNone(embeddings._post(["secret text"], base))
+        finally:
+            sink_srv.shutdown()
+            sink_srv.server_close()
+            red_srv.shutdown()
+            red_srv.server_close()
+        self.assertEqual(_SinkHandler.hits, [],
+                         "redirect target must receive ZERO requests")
 
 
 class TestAgentsMdLoop(unittest.TestCase):
