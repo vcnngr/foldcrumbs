@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Paperclip memory-provider bridge** (`integrations/paperclip/bridge.py`)
+  — foldcrumbs as a local markdown-first memory provider for
+  [Paperclip](https://github.com/paperclipai/paperclip) (94k-star agent-orchestration
+  platform whose Memory/Knowledge surface is roadmap ⚪). Implements their
+  Memory-API discussion #1155 portable core as six JSON ops —
+  `ingest`/`query`/`get`/`browse`/`forget`/`usage` — with company/agent/project
+  scoping (one isolated store per scope triple, `federated=False` so tenants
+  never cross), Paperclip-entity provenance (issue/run/comment/document refs
+  echoed on every result), soft-delete governance, and a `capabilities`
+  manifest. Stdlib-only like the core; an optional provider must degrade, not
+  crash — every handled error returns JSON `ok:false`, never a traceback.
+  Honest limits stated in `docs/paperclip.md`: usage is structural (no invented
+  token cost), the adapter glue is the integrator's thin layer, and the scope
+  key must be consistent across ops (each distinct triple is its own store).
+  20 contract tests incl. cross-tenant-leak and store-escape regressions.
+
 - **Opt-in local embeddings discovery** — `FOLDCRUMBS_EMBEDDING_AUTO=1`
   lets a machine without an explicit endpoint find a local
   OpenAI-compatible embeddings server on **loopback only** (ollama
