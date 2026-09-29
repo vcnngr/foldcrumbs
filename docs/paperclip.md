@@ -70,9 +70,13 @@ store and returns nothing. Paperclip's control plane owns which scope key
 to pass and should pass it consistently.
 
 Every request is a JSON object; every result is JSON with an `ok` boolean.
-Exit codes: `0` ok, `1` operation returned `ok:false`, `2` bad request /
-missing scope. The bridge never raises to the caller on a handled error —
-an optional provider must degrade, not crash the control plane.
+Exit codes: `0` ok, `1` operation refused (validation failure, unknown
+handle, wrong field type — always a JSON `ok:false`, never a traceback),
+`2` malformed request envelope (unparsable JSON or non-object). The bridge
+never raises to the caller on a handled error — an optional provider must
+degrade, not crash the control plane. Requests are validated centrally:
+string fields reject non-strings, `limit` must be an integer in 1..200,
+`confidence` must be a finite number in 0..1, booleans must be booleans.
 
 ## Scoping and isolation
 
@@ -99,10 +103,13 @@ export FOLDCRUMBS_PAPERCLIP_ROOT=/var/lib/paperclip/foldcrumbs   # namespace key
 ## Provenance
 
 Pass Paperclip entity refs (`issue`, `run`, `comment`, `document`, plus
-`company`/`agent`/`project`) on `ingest`; they are stored as tags and echoed
-back in `results[].paperclip` on query/get. A memory always traces to the
-run/issue/comment that produced it — Paperclip's "keeps provenance back to
-Paperclip runs, issues, comments, and documents".
+`company`/`agent`/`project`) on `ingest`; when provided they are stored as
+tags and echoed back in `results[].paperclip` on query/get — a memory then
+traces to the run/issue/comment that produced it (Paperclip's "keeps
+provenance back to Paperclip runs, issues, comments, and documents"). The
+refs are OPTIONAL at the provider level (only `company` and `text` are
+required): enforcing them per workflow is the control plane's policy, which
+is where Paperclip puts it.
 
 ## Optional capabilities (never required)
 

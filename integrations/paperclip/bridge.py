@@ -56,7 +56,9 @@ comments, and documents."
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -90,38 +92,119 @@ def scope_cwd(company: str, agent: str = "", project: str = "") -> str:
     """Map a Paperclip scope to a synthetic cwd → its own isolated store.
 
     company is required (Paperclip memory is company-scoped); agent/project
-    narrow it. The path is deterministic and collision-safe by construction:
-    distinct scopes → distinct encoded cwds → distinct stores. Slashes are
-    flattened so a malicious company id cannot escape the root.
+    narrow it.
+
+    COLLISION-SAFE BY CONSTRUCTION (RT PR #83 P0-1): sanitizing ids alone is
+    NOT enough — distinct ids can sanitize to the same segment ("a/b" and
+    "a_b" both → "a_b"), and foldcrumbs' memory_dir encoding then flattens
+    "/" to "-", so even distinct paths could share one store
+    ("company/a-agent-b" vs "company/a/agent/b"). Every segment therefore
+    carries a sha256 digest of the RAW id: distinct raw ids → distinct
+    digests → distinct segments → distinct stores, whatever downstream
+    encoders do. The sanitized prefix stays for human readability; the
+    digest is the identity.
     """
     if not company:
         raise ValueError("company is required for a Paperclip memory scope")
 
-    def _safe(part: str) -> str:
-        # flatten separators so a scope id can't traverse out of the root
-        return "".join(c if (c.isalnum() or c in "-_.") else "_"
-                       for c in part).strip(".") or "_"
-
-    segs = ["company", _safe(company)]
+    segs = ["company", _scope_seg(company)]
     if agent:
-        segs += ["agent", _safe(agent)]
+        segs += ["agent", _scope_seg(agent)]
     if project:
-        segs += ["project", _safe(project)]
+        segs += ["project", _scope_seg(project)]
     return str(_root().joinpath(*segs))
 
 
+def _scope_seg(part: str) -> str:
+    """One collision-free path segment for a raw scope id.
+
+    `<sanitized>--<sha256(raw utf-8)[:16]>`: sanitized keeps [alnum-_.]
+    (separators flattened — no traversal) purely for readability; the digest
+    makes the segment injective on the raw id, so "a/b" ≠ "a_b" ≠ ".." ≠ "_"
+    as STORES even where their sanitized prefixes collide. Hex chars pass
+    through any downstream path encoding unchanged.
+    """
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "_"
+                   for c in part).strip(".") or "_"
+    digest = hashlib.sha256(part.encode("utf-8")).hexdigest()[:16]
+    return f"{safe}--{digest}"
+
+
+class _BadRequest(ValueError):
+    """A request that fails validation — never a crash, always ok:false."""
+
+
+def _require_str(req: dict, key: str, required: bool = False) -> str:
+    v = req.get(key, "")
+    if v is None:
+        v = ""
+    if not isinstance(v, str):
+        raise _BadRequest(f"{key} must be a string, got {type(v).__name__}")
+    if required and not v:
+        raise _BadRequest(f"{key} is required")
+    return v
+
+
+def _opt_str_list(req: dict, key: str) -> list[str] | None:
+    v = req.get(key)
+    if v is None or v == "":
+        return None
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        raise _BadRequest(f"{key} must be a list of strings")
+    return v
+
+
+def _opt_bool(req: dict, key: str) -> bool:
+    v = req.get(key, False)
+    if not isinstance(v, bool):
+        raise _BadRequest(f"{key} must be a boolean, got {type(v).__name__}")
+    return v
+
+
+def _opt_limit(req: dict, key: str = "limit", default: int = 10,
+               cap: int = 200) -> int:
+    v = req.get(key, default)
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise _BadRequest(f"{key} must be a positive integer, "
+                          f"got {type(v).__name__}")
+    if v < 1 or v > cap:
+        raise _BadRequest(f"{key} must be in 1..{cap}, got {v}")
+    return v
+
+
+def _opt_confidence(req: dict) -> float:
+    v = req.get("confidence", 0.8)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise _BadRequest(f"confidence must be a number, got {type(v).__name__}")
+    v = float(v)
+    if not math.isfinite(v) or not (0.0 <= v <= 1.0):
+        raise _BadRequest(f"confidence must be finite and in 0..1, got {v!r}")
+    return v
+
+
 def _cwd_of(req: dict) -> str:
-    """Resolve the store cwd for a request dict (company/agent/project)."""
-    return scope_cwd(req.get("company", ""), req.get("agent", ""),
-                     req.get("project", ""))
+    """Resolve + validate the store cwd (company required, all str)."""
+    return scope_cwd(_require_str(req, "company", required=True),
+                     _require_str(req, "agent"),
+                     _require_str(req, "project"))
+
+
+_ENTITY_KEYS = ("company", "agent", "project", "issue", "run", "comment",
+                "document")
 
 
 def _provenance_tags(req: dict) -> list[str]:
-    """Paperclip entity refs as retrieval tags (their provenance concern)."""
-    tags = [f"pc:{k}={req[k]}" for k in
-            ("company", "agent", "project", "issue", "run", "comment",
-             "document") if req.get(k)]
-    tags += [f"tag:{t}" for t in (req.get("tags") or [])]
+    """Paperclip entity refs as retrieval tags (their provenance concern).
+
+    Entity refs are OPTIONAL (P1 fix: docs no longer claim otherwise); when
+    present they must be strings — a non-string ref is a bad request, not a
+    crash.
+    """
+    for k in _ENTITY_KEYS:
+        if req.get(k) is not None and not isinstance(req[k], str):
+            raise _BadRequest(f"{k} must be a string, got {type(req[k]).__name__}")
+    tags = [f"pc:{k}={req[k]}" for k in _ENTITY_KEYS if req.get(k)]
+    tags += [f"tag:{t}" for t in (_opt_str_list(req, "tags") or [])]
     return tags
 
 
@@ -158,15 +241,14 @@ def _record_to_dict(rec: MemoryRecord) -> dict[str, Any]:
 def cmd_ingest(req: dict) -> dict:
     """ingest / write — store a memory from text, scoped + with provenance."""
     cwd = _cwd_of(req)
-    text = req.get("text") or ""
-    if not text:
-        return {"ok": False, "error": "text is required"}
+    text = _require_str(req, "text", required=True)
+    mtype = _require_str(req, "type") or "fact"
     rec = MemoryRecord(
-        title=req.get("title") or text[:80],
+        title=_require_str(req, "title") or text[:80],
         content=text,
-        type=req.get("type", "fact"),
-        confidence=float(req.get("confidence", 0.8)),
-        provenance=req.get("provenance", "paperclip"),
+        type=mtype,
+        confidence=_opt_confidence(req),
+        provenance=_require_str(req, "provenance") or "paperclip",
         source="paperclip",
         tags=_provenance_tags(req),
     )
@@ -189,10 +271,11 @@ def cmd_query(req: dict) -> dict:
     leak through the provider.
     """
     cwd = _cwd_of(req)
-    limit = int(req.get("limit", 10))
-    hits = store.search(req.get("query", ""), limit=limit, cwd=cwd,
-                        types=req.get("types") or None,
-                        tags=req.get("tags") or None,
+    query = _require_str(req, "query")
+    limit = _opt_limit(req)
+    hits = store.search(query, limit=limit, cwd=cwd,
+                        types=_opt_str_list(req, "types"),
+                        tags=_opt_str_list(req, "tags"),
                         federated=False)
     return {"ok": True, "count": len(hits),
             "results": [_record_to_dict(m) for m in hits]}
@@ -208,10 +291,11 @@ def cmd_get(req: dict) -> dict:
     recall would surface it.
     """
     cwd = _cwd_of(req)
-    rec = store.get(req.get("handle", ""), cwd)
+    handle = _require_str(req, "handle", required=True)
+    rec = store.get(handle, cwd)
     if rec is None:
         return {"ok": False, "error": "no such handle in scope",
-                "handle": req.get("handle")}
+                "handle": handle}
     out = {"ok": True, "memory": _record_to_dict(rec),
            "served": rec.status == "active"}
     return out
@@ -226,7 +310,7 @@ def cmd_browse(req: dict) -> dict:
     (foldcrumbs' visibility-over-arbitration: don't hide lifecycle, show it).
     """
     cwd = _cwd_of(req)
-    include_inactive = bool(req.get("include_inactive", False))
+    include_inactive = _opt_bool(req, "include_inactive")
     recs = list(store.iter_memories(cwd))
     if not include_inactive:
         recs = [r for r in recs if r.status == "active"]
@@ -244,8 +328,8 @@ def cmd_forget(req: dict) -> dict:
     destructive operations" is honored by making hard-delete explicit.
     """
     cwd = _cwd_of(req)
-    action = store.forget(req.get("handle", ""), cwd,
-                          hard=bool(req.get("hard", False)))
+    handle = _require_str(req, "handle", required=True)
+    action = store.forget(handle, cwd, hard=_opt_bool(req, "hard"))
     store.rebuild_index(cwd)
     if action is None:
         return {"ok": False, "error": "no such handle in scope",
@@ -311,9 +395,27 @@ CAPABILITIES = {
 }
 
 
-def dispatch(op: str, req: dict) -> dict:
-    """Run one portable-core op. Raises KeyError on unknown op."""
-    return _OPS[op](req)
+def dispatch(op: str, req: Any) -> dict:
+    """Run one portable-core op. NEVER raises on a handled error (RT P0-2).
+
+    An optional provider must degrade, not crash the control plane: bad op,
+    non-dict request, or any validation/store error comes back as a JSON
+    result with ok:false. Only truly exceptional conditions (bugs) escape.
+    """
+    fn = _OPS.get(op) if isinstance(op, str) else None
+    if fn is None:
+        return {"ok": False, "error": f"unknown op: {op!r}"}
+    if not isinstance(req, dict):
+        return {"ok": False,
+                "error": f"request must be a JSON object, got {type(req).__name__}"}
+    try:
+        return fn(req)
+    except _BadRequest as e:
+        return {"ok": False, "error": str(e)}
+    except ValueError as e:            # scope/store contract violations
+        return {"ok": False, "error": str(e)}
+    except OSError as e:               # dying disk, unreadable store dir
+        return {"ok": False, "error": f"store I/O failed: {e}"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -321,6 +423,10 @@ def main(argv: list[str] | None = None) -> int:
 
     `bridge capabilities`           → JSON capability manifest
     `bridge call <op> '<json req>'` → JSON result (op ∈ ingest/query/…)
+
+    Exit codes: 0 = ok:true; 1 = operation refused (validation, unknown
+    handle, bad field type — always JSON ok:false, never a traceback);
+    2 = malformed request envelope (unparsable JSON or non-object).
     """
     ap = argparse.ArgumentParser(
         prog="foldcrumbs-paperclip-bridge",
@@ -328,7 +434,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("capabilities", help="print the provider capability manifest")
     call = sub.add_parser("call", help="invoke one portable-core operation")
-    call.add_argument("op", choices=sorted(_OPS))
+    # op is validated by hand (not argparse choices) so an unknown op still
+    # answers as JSON rc2 — an adapter shelling in gets a machine-readable
+    # envelope for EVERY refusal, never an argparse SystemExit.
+    call.add_argument("op")
     call.add_argument("request", help="JSON request object")
     args = ap.parse_args(argv)
 
@@ -336,19 +445,23 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(CAPABILITIES, indent=1, ensure_ascii=False))
         return 0
 
+    if args.op not in _OPS:
+        print(json.dumps({"ok": False,
+                          "error": f"unknown op: {args.op!r} "
+                                   f"(valid: {', '.join(sorted(_OPS))})"}))
+        return 2
     try:
         req = json.loads(args.request)
     except json.JSONDecodeError as e:
         print(json.dumps({"ok": False, "error": f"bad JSON request: {e}"}))
         return 2
+    # dispatch is total: every handled failure is JSON ok:false (rc 1), never
+    # a traceback. rc 2 stays reserved for a malformed request envelope
+    # (unparsable JSON / non-object), which we check here before dispatching.
     if not isinstance(req, dict):
         print(json.dumps({"ok": False, "error": "request must be a JSON object"}))
         return 2
-    try:
-        result = dispatch(args.op, req)
-    except ValueError as e:            # e.g. missing company scope
-        print(json.dumps({"ok": False, "error": str(e)}))
-        return 2
+    result = dispatch(args.op, req)
     print(json.dumps(result, indent=1, ensure_ascii=False))
     return 0 if result.get("ok", False) else 1
 

@@ -50,7 +50,9 @@ class TestScoping(BridgeBase):
         self.assertNotEqual(a, b)
         self.assertNotEqual(a, c)
         # company alone is a valid, narrower scope
-        self.assertTrue(bridge.scope_cwd("acme").endswith("acme"))
+        # readable prefix preserved, digest appended (r2: identity is the digest)
+        seg = bridge.scope_cwd("acme").rsplit("/", 1)[-1]
+        self.assertTrue(seg.startswith("acme--"), seg)
 
     def test_company_required(self):
         with self.assertRaises(ValueError):
@@ -119,6 +121,133 @@ class TestScoping(BridgeBase):
                          "a different scope key must not see the web store")
 
 
+class TestRT83R2ScopeCollisions(BridgeBase):
+    """RT #83 P0-1 PoCs, pinned: distinct raw ids must never share a store."""
+
+    def test_slash_vs_underscore_companies_do_not_share_store(self):
+        bridge.cmd_ingest({"company": "a/b", "text": "tenant a-slash-b secret"})
+        # the colliding id: sanitizes to the same prefix, different digest
+        got = bridge.cmd_query({"company": "a_b", "query": "tenant"})
+        self.assertEqual(got["count"], 0,
+                         "a_b must NOT read a/b's store (cross-tenant leak)")
+        # and the real tenant still sees its own
+        own = bridge.cmd_query({"company": "a/b", "query": "tenant"})
+        self.assertEqual(own["count"], 1)
+
+    def test_dots_vs_underscore_do_not_share_store(self):
+        bridge.cmd_ingest({"company": "..", "text": "dotdot tenant secret"})
+        got = bridge.cmd_query({"company": "_", "query": "dotdot"})
+        self.assertEqual(got["count"], 0)
+
+    def test_agent_hyphen_vs_agent_level_do_not_share_store(self):
+        # company "a-agent-b" vs company "a" + agent "b": the r1 encoding
+        # produced distinct PATHS but memory_dir flattened both onto one
+        # store (the reviewer's memory_dir_equal=True PoC).
+        bridge.cmd_ingest({"company": "a-agent-b", "text": "flat tenant"})
+        got = bridge.cmd_query({"company": "a", "agent": "b",
+                                "query": "flat"})
+        self.assertEqual(got["count"], 0,
+                         "company a+agent b must not read company a-agent-b")
+
+    def test_project_hyphen_vs_project_level_do_not_share_store(self):
+        bridge.cmd_ingest({"company": "a-project-b", "text": "proj flat"})
+        got = bridge.cmd_query({"company": "a", "project": "b",
+                                "query": "proj flat"})
+        self.assertEqual(got["count"], 0)
+
+    def test_collision_pinned_at_memory_dir_level(self):
+        # the ultimate invariant: distinct scope triples → distinct PHYSICAL
+        # store dirs (not just distinct synthetic cwds — memory_dir's own
+        # "/"→"-" flattening is what bit r1).
+        from foldcrumbs import config as cfg
+        triples = [("a/b", "", ""), ("a_b", "", ""), ("a-agent-b", "", ""),
+                   ("a", "b", ""), ("a", "", "b"), ("a-project-b", "", ""),
+                   ("..", "", ""), ("_", "", ""), ("ACME", "", ""),
+                   ("acme", "", "")]
+        dirs = {str(cfg.memory_dir(bridge.scope_cwd(*t))) for t in triples}
+        # The digest makes even "ACME" vs "acme" distinct stores (raw ids
+        # differ → digests differ), and digests differ in the filename itself,
+        # so a case-insensitive FS cannot merge them either. Policy: company
+        # ids are case-SENSITIVE tenants. All 10 triples → 10 stores.
+        self.assertEqual(len(dirs), 10,
+                         f"scope triples collapsed onto one store: {sorted(dirs)}")
+
+
+class TestRT83R2FailSoft(BridgeBase):
+    """RT #83 P0-2 PoCs, pinned: handled errors are JSON ok:false, never
+    tracebacks — via dispatch() AND via the CLI (main())."""
+
+    HOSTILE = [
+        # (op, request) — every case the reviewer crashed r1 with, plus more
+        ("query", "not a dict"),
+        ("ingest", {"company": 42, "text": "x"}),
+        ("ingest", {"company": "c", "text": 42}),
+        ("get", {"company": "c", "handle": 42}),
+        ("query", {"company": "c", "query": {"nested": "dict"}}),
+        ("query", {"company": "c", "query": "x", "limit": object()}),
+        ("query", {"company": "c", "query": "x", "limit": -1}),
+        ("query", {"company": "c", "query": "x", "limit": 10**9}),
+        ("ingest", {"company": "c", "text": "x", "confidence": float("nan")}),
+        ("ingest", {"company": "c", "text": "x", "confidence": "NaN"}),
+        ("ingest", {"company": "c", "text": "x", "confidence": 2.5}),
+        ("ingest", {"company": "c", "text": "x", "tags": 7}),
+        ("browse", {"company": "c", "include_inactive": "yes"}),
+        ("forget", {"company": "c", "handle": "h", "hard": "yes"}),
+        ("ingest", {"company": "c", "text": "x", "issue": 42}),
+        ("query", {}),                      # missing company
+        ("get", {"company": "c"}),          # missing handle
+        ("nope", {"company": "c"}),         # unknown op
+    ]
+
+    def test_dispatch_never_raises_on_hostile_requests(self):
+        for op, req in self.HOSTILE:
+            with self.subTest(op=op, req=repr(req)[:60]):
+                out = bridge.dispatch(op, req)
+                self.assertIsInstance(out, dict)
+                self.assertFalse(out["ok"], f"{op} {req!r} should be refused")
+                self.assertIn("error", out)
+
+    def test_cli_never_tracebacks_on_hostile_requests(self):
+        # Contract split (documented in bridge main()): rc1 = op refused with
+        # JSON ok:false; rc2 = malformed ENVELOPE (non-object JSON payload,
+        # or unknown op — main() validates by hand so even that answers as
+        # JSON, never an argparse SystemExit). No Python traceback anywhere.
+        import contextlib
+        import io as _io
+        import json as _json
+        for op, req in self.HOSTILE:
+            with self.subTest(op=op, req=repr(req)[:60]):
+                payload = _json.dumps(req, default=repr) \
+                    if isinstance(req, dict) else '"str"'
+                envelope = (op not in bridge._OPS) or not isinstance(req, dict)
+                # r2: main() answers EVERY refusal as JSON — unknown op is
+                # rc2 envelope (validated by hand, not argparse SystemExit).
+                buf_out, buf_err = _io.StringIO(), _io.StringIO()
+                with contextlib.redirect_stdout(buf_out), \
+                        contextlib.redirect_stderr(buf_err):
+                    rc = bridge.main(["call", op, payload])
+                expected = 2 if envelope else 1
+                self.assertEqual(rc, expected, f"{op} rc mismatch")
+                self.assertNotIn("Traceback", buf_err.getvalue(),
+                                 "no traceback may reach stderr")
+                if not envelope:
+                    body = _json.loads(buf_out.getvalue())
+                    self.assertFalse(body["ok"])
+                    self.assertIn("error", body)
+
+    def test_valid_requests_still_work_after_hardening(self):
+        # hardening must not break the happy path (guards against over-tight)
+        ing = bridge.cmd_ingest({"company": "acme", "text": "still works",
+                                 "confidence": 1.0, "tags": ["t"],
+                                 "issue": "PAP-1"})
+        self.assertTrue(ing["ok"])
+        q = bridge.cmd_query({"company": "acme", "query": "still works",
+                              "limit": 200})
+        self.assertEqual(q["count"], 1)
+        b = bridge.cmd_browse({"company": "acme", "include_inactive": True})
+        self.assertEqual(b["count"], 1)
+
+
 class TestPortableCore(BridgeBase):
     def test_ingest_query_get_roundtrip(self):
         ing = bridge.cmd_ingest({
@@ -146,8 +275,13 @@ class TestPortableCore(BridgeBase):
         self.assertEqual(g["memory"]["title"], "Deploy window")
 
     def test_ingest_requires_text(self):
-        r = bridge.cmd_ingest({"company": "acme", "text": ""})
-        self.assertFalse(r["ok"])
+        # r2 contract: cmd_* validate centrally (raise _BadRequest); the
+        # JSON ok:false surface is dispatch(). Test both levels.
+        with self.assertRaises(ValueError):
+            bridge.cmd_ingest({"company": "acme", "text": ""})
+        out = bridge.dispatch("ingest", {"company": "acme", "text": ""})
+        self.assertFalse(out["ok"])
+        self.assertIn("text", out["error"])
 
     def test_query_missing_scope_is_error_via_cli(self):
         # dispatch-level: query with no company raises through scope_cwd
@@ -240,10 +374,15 @@ class TestCLI(BridgeBase):
         self.assertEqual(rc, 2)
         self.assertFalse(json.loads(out)["ok"])
 
-    def test_cli_missing_company_is_rc2(self):
+    def test_cli_missing_company_is_rc1_json_error(self):
+        # r2 contract: rc2 = malformed ENVELOPE only. A valid JSON object
+        # missing "company" is an op-level refusal → rc1 + JSON ok:false
+        # (was rc2 before validation was centralized).
         rc, out = self._run(["call", "query", json.dumps({"query": "x"})])
-        self.assertEqual(rc, 2)
-        self.assertFalse(json.loads(out)["ok"])
+        self.assertEqual(rc, 1)
+        body = json.loads(out)
+        self.assertFalse(body["ok"])
+        self.assertIn("company", body["error"])
 
 
 class TestStdlibOnly(unittest.TestCase):
