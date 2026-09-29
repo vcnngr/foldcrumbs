@@ -167,6 +167,8 @@ plus a read-only federated view of every shared store on the machine. Details un
 | `FOLDCRUMBS_EMBEDDING_ENDPOINT` | `FOLDCRUMBS_LLM_ENDPOINT` | OpenAI-compatible `/v1/embeddings` server |
 | `FOLDCRUMBS_EMBEDDING_MODEL` | `FOLDCRUMBS_LLM_MODEL` | embedding model name |
 | `FOLDCRUMBS_EMBEDDING_TIMEOUT` | `10` | seconds; a slow server falls back to lexical recall |
+| `FOLDCRUMBS_EMBEDDING_AUTO` | off | set to `1` to discover a local embeddings server on loopback (ollama :11434, llama-server :8080, MLX/LM Studio :8081) when no explicit endpoint is set |
+| `FOLDCRUMBS_EMBEDDING_PROBE_TIMEOUT` | `2` | seconds per discovery probe; loopback only |
 
 Swap the LLM for a remote gateway or OpenRouter by changing `FOLDCRUMBS_LLM_ENDPOINT` — recall is
 unaffected.
@@ -188,6 +190,28 @@ endpoint doesn't answer — the fusion stage is bypassed entirely and recall is 
 purely lexical. Nothing new to install: the call is stdlib `urllib`, vectors are cached
 machine-locally (not in the synced store), and a missing or dead endpoint is a silent fallback —
 never blocking, never an error. Two gates, both yours: no switch → no requests; no answer → no change.
+
+#### Local semantic recall in 5 minutes (no API keys)
+
+The embedding endpoint can be a server on your own machine — no cloud, no keys, nothing leaves
+localhost. With [ollama](https://ollama.com):
+
+```bash
+ollama pull nomic-embed-text          # ~137 MB, English; embeddinggemma: ~123 MB, multilingual
+export FOLDCRUMBS_SEMANTIC=1
+export FOLDCRUMBS_EMBEDDING_MODEL=nomic-embed-text
+# either point at the server explicitly:
+export FOLDCRUMBS_EMBEDDING_ENDPOINT=http://127.0.0.1:11434/v1
+# …or let loopback discovery find it for you (instead of the line above):
+export FOLDCRUMBS_EMBEDDING_AUTO=1
+```
+
+With `EMBEDDING_AUTO=1` and no explicit endpoint, foldcrumbs probes **loopback only**
+(ollama `:11434`, llama-server `:8080`, MLX/LM Studio `:8081`), once per process, caching the
+winner in the machine-local state dir. An explicit endpoint always wins — discovery never
+overrides what you configured, never touches non-loopback addresses, and when nothing answers
+recall stays lexical exactly as before. `foldcrumbs doctor` reports which endpoint is active
+and how it was resolved.
 
 ## Dashboard
 

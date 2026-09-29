@@ -437,6 +437,18 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
         print(f"contracts  : {len(inv_lines)} invalidation finding(s)")
         for ln in inv_lines:
             print(f"  ! {ln}")
+    # 0.12.0 local-semantic design: where does the embedding channel point?
+    from . import config as cfg_mod
+    from . import embeddings as emb_mod
+    if cfg_mod.SEMANTIC:
+        if cfg_mod.EMBEDDING_ENDPOINT_EXPLICIT:
+            src = "explicit config"
+            base = cfg_mod.EMBEDDING_ENDPOINT
+        else:
+            found = emb_mod.discover_local_endpoint()
+            src = "discovered (loopback)" if found else "default (no local server answered)"
+            base = found or cfg_mod.EMBEDDING_ENDPOINT
+        print(f"semantic   : {base} — {src}")
     return 0
 
 

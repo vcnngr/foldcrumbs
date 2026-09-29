@@ -361,11 +361,18 @@ This project has a persistent memory store. Use the foldcrumbs tools if
 your runtime exposes them (MCP tools `recall`/`remember`, or native
 `foldcrumbs_recall`/`foldcrumbs_remember` tools); otherwise shell out to
 the `foldcrumbs` CLI (`foldcrumbs recall "…"` / `foldcrumbs remember "…"`)
-— same store, same semantics:
-- At the start of a task, recall with your task to load prior decisions,
-  conventions and preferences — do not re-ask what is already recorded.
-- When a durable decision, rule, preference or lesson is established,
-  remember it to persist it for future sessions.
+— same store, same semantics.
+
+The loop — **understand → work → update**:
+- **understand**: at the start of a task, `foldcrumbs recall` it. Load what
+  past sessions decided, the conventions in force, the known pitfalls.
+  Do not re-ask what is already recorded.
+- **work**: do the task. When you hit a recorded decision or constraint,
+  follow it; when memory and code disagree, the code wins — and fix the
+  stale memory rather than leaving the trap for the next session.
+- **update**: when the task establishes something durable (a decision, a
+  rule, a preference, a lesson), `foldcrumbs remember` it before the
+  session ends. Memory that lives only in the transcript is lost.
 """
 
 

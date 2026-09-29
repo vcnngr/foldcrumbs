@@ -66,7 +66,7 @@ def _save_cache(cache: dict[str, list[float]]) -> None:
 def _key(text: str) -> str:
     # Endpoint and model both shape the vector: same text through a different
     # one is a different point in a different space, so they share no keys.
-    basis = f"{config.EMBEDDING_ENDPOINT}\x00{_model()}\x00{text}"
+    basis = f"{_endpoint()}\x00{_model()}\x00{text}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
@@ -74,9 +74,114 @@ def _model() -> str:
     return config.EMBEDDING_MODEL or config.LLM_MODEL
 
 
+# --- Opt-in loopback discovery (0.12.0, design docs/design/local-semantic) ---
+# FOLDCRUMBS_EMBEDDING_AUTO=1 lets a machine WITHOUT an explicit endpoint find
+# a local embeddings server by itself: ollama, llama-server, MLX/LM Studio —
+# all speak /v1/embeddings. Rules, all deliberate:
+#   * opt-in: without the switch this code never runs (zero behaviour change);
+#   * loopback-only: candidates are 127.0.0.1/localhost, never a remote host;
+#   * never overrides the user: an explicit endpoint (env or state file) wins;
+#   * once per process, then cached in the state dir (non-synced: machines
+#     differ); a dead cached endpoint is simply re-probed on next process;
+#   * honest failure: nothing answers → None → the lexical fallback engages.
+_DEFAULT_CANDIDATES = (
+    "http://127.0.0.1:11434/v1",   # ollama (OpenAI-compatible shim)
+    "http://127.0.0.1:8080/v1",    # llama-server
+    "http://localhost:8081/v1",    # MLX / LM Studio compat (distill default)
+)
+_DISCOVERED: str | None = None
+
+
+def _discovery_reset() -> None:
+    """Test hook: forget the in-process discovery result."""
+    global _DISCOVERED
+    _DISCOVERED = None
+
+
+def _discovery_cache_path():
+    return config.STATE_DIR / "embedding-endpoint-discovered"
+
+
+def _probe_endpoint(base: str) -> bool:
+    """True when ``base`` answers a minimal /v1/embeddings POST in time."""
+    url = base.rstrip("/") + "/embeddings"
+    payload = json.dumps({"model": _model(), "input": ["ping"]}).encode()
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(
+                req, timeout=config.EMBEDDING_PROBE_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return False
+    # A real embeddings server returns aligned vectors — accept only that.
+    data = body.get("data") if isinstance(body, dict) else None
+    return bool(data) and all(isinstance(d, dict) and d.get("embedding")
+                              for d in data)
+
+
+def discover_local_endpoint(probe=None, candidates=None) -> str | None:
+    """Return a working local /v1 base, or None. Pure-ish: ``probe`` and
+    ``candidates`` are injectable so tests never touch the network.
+
+    Precedence: an endpoint the user configured explicitly always wins (this
+    function is then a no-op returning None — nothing to discover). Otherwise:
+    in-process result, then the state-dir cache (validated by a probe — a dead
+    cache entry costs one short timeout, not a wrong answer), then the default
+    loopback candidates in order.
+    """
+    global _DISCOVERED
+    if not config.EMBEDDING_AUTO:
+        return None
+    if config.EMBEDDING_ENDPOINT_EXPLICIT:
+        return None                      # the user chose; never surprise them
+    if probe is None:
+        probe = _probe_endpoint
+    if candidates is None:
+        candidates = _DEFAULT_CANDIDATES
+    if _DISCOVERED and probe(_DISCOVERED):
+        return _DISCOVERED
+    try:
+        cached = _discovery_cache_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        cached = ""
+    ordered = ([cached] if cached else []) + [c for c in candidates if c != cached]
+    for base in ordered:
+        if probe(base):
+            _DISCOVERED = base
+            try:
+                config.STATE_DIR.mkdir(parents=True, exist_ok=True)
+                _discovery_cache_path().write_text(base, encoding="utf-8")
+            except OSError:
+                pass                     # cache is best-effort
+            return base
+    _DISCOVERED = None
+    return None
+
+
+def _endpoint() -> str:
+    """The /v1 base _post() should use: explicit config, else discovered.
+
+    Normalises the historical convention: config.EMBEDDING_ENDPOINT is the
+    server root ("http://host:8081", the code appends "/v1/embeddings"),
+    while discovery candidates carry "/v1" already. Both end up here as a
+    base ending in "/v1".
+    """
+    if config.EMBEDDING_ENDPOINT_EXPLICIT:
+        base = config.EMBEDDING_ENDPOINT
+    else:
+        found = discover_local_endpoint(candidates=_TEST_CANDIDATES)
+        base = found or config.EMBEDDING_ENDPOINT
+    base = base.rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    return base
+
+
 def _post(texts: list[str]) -> list[list[float]] | None:
     """One batched /v1/embeddings call. None on any failure or odd payload."""
-    url = config.EMBEDDING_ENDPOINT.rstrip("/") + "/v1/embeddings"
+    url = _endpoint().rstrip("/") + "/embeddings"
     payload = {"model": _model(), "input": texts}
     headers = {"Content-Type": "application/json"}
     if config.LLM_API_KEY:
@@ -103,18 +208,33 @@ def _post(texts: list[str]) -> list[list[float]] | None:
     return [list(map(float, v)) for v in vectors]
 
 
-def embed(texts: list[str]) -> list[list[float]] | None:
+def embed(texts: list[str], candidates=None) -> list[list[float]] | None:
     """Vectors for ``texts``, aligned, or None when any of them is unavailable.
 
     All-or-nothing on purpose: a mix of semantic and missing vectors would rank
     on two different scales at once, which is worse than ranking on one.
     Cache hits never touch the network; on a miss exactly one batched request
     covers everything missing.
+
+    ``candidates`` overrides the discovery candidate list (test hook; the
+    production path uses _DEFAULT_CANDIDATES via discover_local_endpoint).
     """
     if not texts:
         return []
     if not config.SEMANTIC:
         return None          # gate 1: the user did not opt in — never call
+    global _TEST_CANDIDATES
+    _TEST_CANDIDATES = candidates
+    try:
+        return _embed_inner(texts)
+    finally:
+        _TEST_CANDIDATES = None
+
+
+_TEST_CANDIDATES = None
+
+
+def _embed_inner(texts: list[str]) -> list[list[float]] | None:
     cache = _load_cache()
     out: list[list[float] | None] = [None] * len(texts)
     missing: list[tuple[int, str, str]] = []
