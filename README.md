@@ -197,7 +197,7 @@ The embedding endpoint can be a server on your own machine — no cloud, no keys
 localhost. With [ollama](https://ollama.com):
 
 ```bash
-ollama pull nomic-embed-text          # ~137 MB, English; embeddinggemma: ~123 MB, multilingual
+ollama pull nomic-embed-text          # 274 MB download, English; embeddinggemma: 622 MB, multilingual
 export FOLDCRUMBS_SEMANTIC=1
 export FOLDCRUMBS_EMBEDDING_MODEL=nomic-embed-text
 # either point at the server explicitly:

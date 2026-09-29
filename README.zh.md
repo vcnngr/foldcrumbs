@@ -188,7 +188,7 @@ foldcrumbs profile env <name>                     # 选中存储所需的那一�
 以 [ollama](https://ollama.com) 为例：
 
 ```bash
-ollama pull nomic-embed-text          # 约 137 MB，英文；embeddinggemma：约 123 MB，多语言
+ollama pull nomic-embed-text          # 下载 274 MB，英文；embeddinggemma：622 MB，多语言
 export FOLDCRUMBS_SEMANTIC=1
 export FOLDCRUMBS_EMBEDDING_MODEL=nomic-embed-text
 # 显式指向该服务器：

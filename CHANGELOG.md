@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   endpoint always winning, and nothing answering meaning recall stays
   lexical exactly as before. `foldcrumbs doctor` reports the active
   endpoint and how it was resolved. Still zero dependencies: the client
-  remains stdlib `urllib`. Documented local models: `nomic-embed-text`
-  (~137 MB, EN) and `embeddinggemma` (~123 MB, multilingual).
+  remains stdlib `urllib`. Documented local models (`ollama pull`
+  download sizes): `nomic-embed-text` 274 MB (EN) and `embeddinggemma`
+  622 MB (multilingual).
 - **AGENTS.md loop `understand → work → update`** — the block installed
   into agent config files now states the retrieval loop explicitly:
   recall before a task, follow recorded decisions while working (code

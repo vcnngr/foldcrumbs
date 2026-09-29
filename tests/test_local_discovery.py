@@ -94,8 +94,6 @@ class _EnvCase(unittest.TestCase):
         importlib.reload(embeddings)
         embeddings._discovery_reset()
 
-
-class TestDiscoveryOptIn(_EnvCase):
     def _set(self, **env):
         """Set env vars AND reload config/embeddings so the new env is law."""
         for k, v in env.items():
@@ -104,6 +102,8 @@ class TestDiscoveryOptIn(_EnvCase):
         importlib.reload(embeddings)
         embeddings._discovery_reset()
 
+
+class TestDiscoveryOptIn(_EnvCase):
     def test_off_by_default_no_probe(self):
         # AUTO unset: discover_local_endpoint() never probes anything.
         probed = []
@@ -146,7 +146,7 @@ class TestDiscoveryOptIn(_EnvCase):
         # _post goes to the user's endpoint: no answer → None (gate 2 intact)
         self.assertIsNone(embeddings.embed(["hello"]))
         self.assertTrue(
-            embeddings._endpoint().startswith("http://example.invalid"))
+            embeddings._resolve()[0].startswith("http://example.invalid"))
 
     def test_nothing_answers_returns_none_lexical_fallback(self):
         self._set(FOLDCRUMBS_EMBEDDING_AUTO="1", FOLDCRUMBS_SEMANTIC="1",
@@ -166,6 +166,79 @@ class TestDiscoveryOptIn(_EnvCase):
         self.assertIsNotNone(got)
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0], [0.0, 1.0])
+
+
+class TestRT80P0Regressions(_EnvCase):
+    """I quattro P0 della RT t_4b1afee2, ognuno con la sua regressione."""
+
+    def test_p0_1_poisoned_remote_cache_never_probed(self):
+        self._set(FOLDCRUMBS_EMBEDDING_AUTO="1")
+        cache = embeddings._discovery_cache_path()
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text("https://attacker.example/v1", encoding="utf-8")
+        probed = []
+        found = embeddings.discover_local_endpoint(
+            probe=lambda b: probed.append(b) or None,
+            candidates=["http://127.0.0.1:1/v1"])
+        self.assertIsNone(found)
+        self.assertNotIn("https://attacker.example/v1", probed)
+        for b in probed:
+            self.assertTrue(embeddings._loopback_ok(b))
+        self.assertFalse(cache.exists(), "invalid cache must be deleted")
+
+    def test_p0_1_loopback_validator_cases(self):
+        ok = embeddings._loopback_ok
+        self.assertTrue(ok("http://127.0.0.1:11434/v1"))
+        self.assertTrue(ok("http://localhost:8081/v1"))
+        self.assertFalse(ok("https://127.0.0.1/v1"))       # https
+        self.assertFalse(ok("http://127.0.0.1.evil.com/v1"))
+        self.assertFalse(ok("http://user:***@127.0.0.1/v1"))
+        self.assertTrue(ok("http://[::1]:8080/v1"))
+        self.assertFalse(ok("file:///etc/passwd"))
+        self.assertFalse(ok("http://192.168.1.10/v1"))     # LAN host
+        self.assertFalse(ok("not a url"))
+
+    def test_p0_2_failure_memoised_no_repeat_probes(self):
+        self._set(FOLDCRUMBS_EMBEDDING_AUTO="1")
+        probed = []
+        probe = lambda b: probed.append(b) or None  # noqa: E731
+        embeddings.discover_local_endpoint(probe=probe)
+        first = len(probed)
+        self.assertGreater(first, 0)
+        embeddings.discover_local_endpoint(probe=probe)
+        embeddings.discover_local_endpoint(probe=probe)
+        self.assertEqual(len(probed), first,
+                         "failure must be memoised: no re-probe in-process")
+
+    def test_p0_2_embed_post_counts(self):
+        # warm cache → zero network; miss → exactly ONE embeddings POST
+        self._set(FOLDCRUMBS_EMBEDDING_AUTO="1", FOLDCRUMBS_SEMANTIC="1",
+                  FOLDCRUMBS_EMBEDDING_MODEL="test-model")
+        _EmbedHandler.hits = 0
+        with _fake_server() as base:
+            got1 = embeddings.embed(["alpha", "beta"], candidates=[base + "/v1"])
+            hits_after_first = _EmbedHandler.hits
+            got2 = embeddings.embed(["alpha", "beta"], candidates=[base + "/v1"])
+            hits_after_second = _EmbedHandler.hits
+        self.assertIsNotNone(got1)
+        # 1 probe + 1 batched embed per la prima chiamata (2 testi, 1 POST)
+        self.assertEqual(hits_after_first, 2)
+        # seconda chiamata tutta warm-cache: ZERO POST ulteriori
+        self.assertEqual(hits_after_second, 2)
+        self.assertEqual(got1, got2)
+
+    def test_p0_3_historical_cache_key_unchanged_with_auto_off(self):
+        # AUTO off + endpoint esplicito: la key deve essere byte-identica
+        # a quella storica (basis = raw config endpoint, non normalizzato).
+        import hashlib
+        self._set(FOLDCRUMBS_EMBEDDING_ENDPOINT="http://127.0.0.1:9999",
+                  FOLDCRUMBS_EMBEDDING_MODEL="m", FOLDCRUMBS_SEMANTIC="1")
+        text = "deploy window"
+        historical = hashlib.sha256(
+            f"http://127.0.0.1:9999\x00m\x00{text}".encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(embeddings._key(text, embeddings._resolve()[1]),
+                         historical)
 
 
 class TestAgentsMdLoop(unittest.TestCase):

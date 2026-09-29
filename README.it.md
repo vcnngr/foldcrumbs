@@ -201,7 +201,7 @@ L'endpoint embeddings può essere un server sulla tua macchina — niente cloud,
 nulla esce da localhost. Con [ollama](https://ollama.com):
 
 ```bash
-ollama pull nomic-embed-text          # ~137 MB, inglese; embeddinggemma: ~123 MB, multilingue
+ollama pull nomic-embed-text          # 274 MB di download, inglese; embeddinggemma: 622 MB, multilingue
 export FOLDCRUMBS_SEMANTIC=1
 export FOLDCRUMBS_EMBEDDING_MODEL=nomic-embed-text
 # punta al server in modo esplicito:

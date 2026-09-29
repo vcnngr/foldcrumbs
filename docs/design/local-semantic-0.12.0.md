@@ -21,7 +21,7 @@ HF (verificato via API HF).
 | bge-m3 | ~567MB | 1024 | multi | MTEB multi forte | pesante |
 
 Scelta proposta (misurabile, non ideologica):
-- **Default documentato EN: nomic-embed-text-v1.5** — 137MB è ~6× MiniLM ma
+- **Default documentato EN: nomic-embed-text-v1.5** — 274MB di download ollama (137MB è l'artefatto q4 su HF) è ~12× MiniLM ma
   resta "piccolo" in assoluto; qualità EN dichiarata superiore; è il modello
   embeddings più usato nell'ecosistema ollama.
 - **Opzione multilingual documentata: embeddinggemma-300m** — stesso ordine

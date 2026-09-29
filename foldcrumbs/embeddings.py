@@ -28,6 +28,7 @@ import math
 import os
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import config
@@ -63,10 +64,14 @@ def _save_cache(cache: dict[str, list[float]]) -> None:
         pass
 
 
-def _key(text: str) -> str:
+def _key(text: str, key_basis: str | None = None) -> str:
     # Endpoint and model both shape the vector: same text through a different
     # one is a different point in a different space, so they share no keys.
-    basis = f"{_endpoint()}\x00{_model()}\x00{text}"
+    # key_basis is the RAW explicit endpoint for configured machines —
+    # byte-identical to the historical key, so warm caches survive (P0-3).
+    if key_basis is None:
+        key_basis = _resolve()[1]
+    basis = f"{key_basis}\x00{_model()}\x00{text}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
@@ -90,12 +95,36 @@ _DEFAULT_CANDIDATES = (
     "http://localhost:8081/v1",    # MLX / LM Studio compat (distill default)
 )
 _DISCOVERED: str | None = None
+_DISCOVERY_DONE = False            # memoises failures too: probe once/process
 
 
 def _discovery_reset() -> None:
-    """Test hook: forget the in-process discovery result."""
-    global _DISCOVERED
+    """Test hook: forget the in-process discovery result (success or failure)."""
+    global _DISCOVERED, _DISCOVERY_DONE
     _DISCOVERED = None
+    _DISCOVERY_DONE = False
+
+
+def _loopback_ok(base: str) -> bool:
+    """True only for a plain-HTTP loopback base with no userinfo.
+
+    Everything discovery accepts — candidates AND the state-dir cache — passes
+    through here before any probe or any request: a poisoned cache file must
+    never be able to redirect embeddings traffic (text, and the API key header
+    when one is set) to a remote host. (RT PR #80, P0-1.)
+    """
+    try:
+        url = urllib.parse.urlsplit(base)
+    except ValueError:
+        return False
+    if url.scheme != "http":
+        return False               # no https, no file:, no exotic schemes
+    host = (url.hostname or "").lower()
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return False
+    if url.username or url.password or "@" in (url.netloc or ""):
+        return False               # no userinfo smuggling
+    return True
 
 
 def _discovery_cache_path():
@@ -127,29 +156,39 @@ def discover_local_endpoint(probe=None, candidates=None) -> str | None:
 
     Precedence: an endpoint the user configured explicitly always wins (this
     function is then a no-op returning None — nothing to discover). Otherwise:
-    in-process result, then the state-dir cache (validated by a probe — a dead
-    cache entry costs one short timeout, not a wrong answer), then the default
-    loopback candidates in order.
+    in-process memo (a past failure is NOT retried within the process —
+    RT PR #80 P0-2), then the state-dir cache and the default loopback
+    candidates — every base validated as loopback BEFORE probing (P0-1); an
+    invalid cache entry is deleted, not trusted.
     """
-    global _DISCOVERED
+    global _DISCOVERED, _DISCOVERY_DONE
     if not config.EMBEDDING_AUTO:
         return None
     if config.EMBEDDING_ENDPOINT_EXPLICIT:
         return None                      # the user chose; never surprise them
+    if _DISCOVERY_DONE:
+        return _DISCOVERED               # success or failure: decided once
     if probe is None:
         probe = _probe_endpoint
     if candidates is None:
         candidates = _DEFAULT_CANDIDATES
-    if _DISCOVERED and probe(_DISCOVERED):
-        return _DISCOVERED
     try:
         cached = _discovery_cache_path().read_text(encoding="utf-8").strip()
     except OSError:
         cached = ""
-    ordered = ([cached] if cached else []) + [c for c in candidates if c != cached]
+    if cached and not _loopback_ok(cached):
+        # Poisoned/stale cache pointing off-loopback: delete, never probe it.
+        try:
+            _discovery_cache_path().unlink()
+        except OSError:
+            pass
+        cached = ""
+    ordered = ([cached] if cached else []) + \
+        [c for c in candidates if c != cached and _loopback_ok(c)]
     for base in ordered:
         if probe(base):
             _DISCOVERED = base
+            _DISCOVERY_DONE = True
             try:
                 config.STATE_DIR.mkdir(parents=True, exist_ok=True)
                 _discovery_cache_path().write_text(base, encoding="utf-8")
@@ -157,31 +196,41 @@ def discover_local_endpoint(probe=None, candidates=None) -> str | None:
                 pass                     # cache is best-effort
             return base
     _DISCOVERED = None
+    _DISCOVERY_DONE = True               # failure memoised too
     return None
 
 
-def _endpoint() -> str:
-    """The /v1 base _post() should use: explicit config, else discovered.
+def _resolve() -> tuple[str, str]:
+    """(url_base, key_basis) for the current configuration.
 
-    Normalises the historical convention: config.EMBEDDING_ENDPOINT is the
-    server root ("http://host:8081", the code appends "/v1/embeddings"),
-    while discovery candidates carry "/v1" already. Both end up here as a
-    base ending in "/v1".
+    Pure per call — the expensive part (network probing) is memoised inside
+    discover_local_endpoint via _DISCOVERY_DONE, so calling this repeatedly
+    never re-probes (RT PR #80 P0-2). ``url_base`` always ends in /v1 for
+    the POST. ``key_basis`` is what the vector-cache key folds in: for an
+    explicit endpoint it is the RAW config value — byte-identical to the
+    historical key, so machines with AUTO off keep their warm cache (P0-3);
+    discovery results key on the discovered base itself.
     """
     if config.EMBEDDING_ENDPOINT_EXPLICIT:
-        base = config.EMBEDDING_ENDPOINT
+        raw = config.EMBEDDING_ENDPOINT
+        found = None
     else:
+        raw = config.EMBEDDING_ENDPOINT
         found = discover_local_endpoint(candidates=_TEST_CANDIDATES)
-        base = found or config.EMBEDDING_ENDPOINT
-    base = base.rstrip("/")
+    base = (found or raw).rstrip("/")
     if not base.endswith("/v1"):
         base += "/v1"
-    return base
+    return (base, found or raw)
 
 
-def _post(texts: list[str]) -> list[list[float]] | None:
+_TEST_CANDIDATES = None
+
+
+def _post(texts: list[str], url_base: str | None = None) -> list[list[float]] | None:
     """One batched /v1/embeddings call. None on any failure or odd payload."""
-    url = _endpoint().rstrip("/") + "/embeddings"
+    if url_base is None:
+        url_base = _resolve()[0]
+    url = url_base.rstrip("/") + "/embeddings"
     payload = {"model": _model(), "input": texts}
     headers = {"Content-Type": "application/json"}
     if config.LLM_API_KEY:
@@ -229,9 +278,6 @@ def embed(texts: list[str], candidates=None) -> list[list[float]] | None:
         return _embed_inner(texts)
     finally:
         _TEST_CANDIDATES = None
-
-
-_TEST_CANDIDATES = None
 
 
 def _embed_inner(texts: list[str]) -> list[list[float]] | None:
