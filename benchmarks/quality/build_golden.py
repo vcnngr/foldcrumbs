@@ -37,6 +37,11 @@ def build():
 
     recs = list(store.iter_memories())
     recs = [r for r in recs if getattr(r, "status", "active") == "active"]
+    # Deterministic on ANY machine (RT PR #82 r2 P0): iter_memories() walks
+    # the directory in filesystem order, which differs between hosts — the
+    # reviewer regenerated a different golden.json from the same store and
+    # script. Sorting by title makes selection order-independent.
+    recs.sort(key=lambda r: r.title)
     pairs = []
     used_titles = set()
     # positivi: query derivata dal titolo → la memoria deve essere servita

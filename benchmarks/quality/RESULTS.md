@@ -29,11 +29,14 @@ channel stays opt-in and these numbers bound what we say about it.
 ## Method
 
 - `build_golden.py` derives the golden set deterministically from the real
-  store: positives = memories `store.search()` actually serves for a query
-  derived from their title; negatives = **at most one per positive query**
-  (10 distinct queries), never served by it, ≤1 title-term overlap. Labels
-  come from objective signals, not committer judgment. Reinforcement is
-  neutralized before the first search (read-only).
+  store: records are **sorted by title before selection** (filesystem walk
+  order differs between hosts — RT r2 P0 — so the committed snapshot is
+  reproducible on any machine, not just this one), positives = memories
+  `store.search()` actually serves for a query derived from their title;
+  negatives = **at most one per positive query** (10 distinct queries),
+  never served by it, ≤1 title-term overlap. Labels come from objective
+  signals, not committer judgment. Reinforcement is neutralized before
+  the first search (read-only).
 - `paraphrase_golden.json` is hand-written (declared) and was audited
   pair-by-pair against the real memory descriptions: every positive is a
   genuine answer to its query; every negative is genuinely unrelated.
@@ -61,6 +64,18 @@ channel stays opt-in and these numbers bound what we say about it.
   against real descriptions; the claim above states the real overlap.
 - P0-3: all 10 golden negatives hung off a single query (greedy loop).
   Fixed: max one negative per query, regenerated, diversity asserted.
+- r2 P0 (RT round 2): the committed golden.json was NOT reproducible on
+  the reviewer's host — iter_memories() walks in filesystem order, which
+  differs per machine. Fixed: sort-by-title before selection; two
+  consecutive runs are byte-identical (sha256 verified) and the benchmark
+  numbers on the regenerated file are unchanged (40/40; 7/10→10/10; FP
+  0/0).
+- r2 P1 (declared, backlog — reviewer's own framing, not a veto): the
+  paraphrase negatives are all clearly-unrelated (overlap 0), a good smoke
+  test but a WEAK measure of the false-positive rate near the decision
+  frontier. The 0/0 FP claim is therefore bounded by easy negatives.
+  Follow-up: hard negatives (near-miss memories the lexical channel ranks
+  high but that answer a different question).
 
 ## Known limits (declared, not hidden)
 
@@ -84,5 +99,5 @@ FOLDCRUMBS_DIR=<your store> python benchmarks/quality/bench_semantic.py
 `golden.json` is store-specific; the paraphrase set references its
 titles. Both files are committed as the frozen 2026-09-29 snapshot these
 numbers refer to. `build_golden.py` regenerates `golden.json`
-deterministically from that store (verified: two runs byte-identical,
-store untouched).
+byte-identically from that store on any host (selection is sorted by
+title; verified: two runs sha256-identical, store untouched).
