@@ -5,6 +5,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Opt-in local embeddings discovery** — `FOLDCRUMBS_EMBEDDING_AUTO=1`
+  lets a machine without an explicit endpoint find a local
+  OpenAI-compatible embeddings server on **loopback only** (ollama
+  `:11434`, llama-server `:8080`, MLX/LM Studio `:8081`): probed once per
+  process, the winner cached in the machine-local state dir, an explicit
+  endpoint always winning, and nothing answering meaning recall stays
+  lexical exactly as before. `foldcrumbs doctor` reports the active
+  endpoint and how it was resolved. Still zero dependencies: the client
+  remains stdlib `urllib`. Documented local models (`ollama pull`
+  download sizes): `nomic-embed-text` 274 MB (EN) and `embeddinggemma`
+  622 MB (multilingual).
+- **AGENTS.md loop `understand → work → update`** — the block installed
+  into agent config files now states the retrieval loop explicitly:
+  recall before a task, follow recorded decisions while working (code
+  wins over stale memory — and fix the memory), remember durable outcomes
+  before the session ends. Install idempotency unchanged.
+
 ## [0.11.0] — 2026-09-21
 
 ### Added

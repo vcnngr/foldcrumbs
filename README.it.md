@@ -169,6 +169,8 @@ memoria più una vista federata read-only di ogni store shared sulla macchina. D
 | `FOLDCRUMBS_EMBEDDING_ENDPOINT` | `FOLDCRUMBS_LLM_ENDPOINT` | server OpenAI-compatibile `/v1/embeddings` |
 | `FOLDCRUMBS_EMBEDDING_MODEL` | `FOLDCRUMBS_LLM_MODEL` | nome del modello di embedding |
 | `FOLDCRUMBS_EMBEDDING_TIMEOUT` | `10` | secondi; un server lento ricade sul recall lessicale |
+| `FOLDCRUMBS_EMBEDDING_AUTO` | off | `1` = scopri un server embeddings locale su loopback (ollama :11434, llama-server :8080, MLX/LM Studio :8081) se nessun endpoint esplicito è impostato |
+| `FOLDCRUMBS_EMBEDDING_PROBE_TIMEOUT` | `2` | secondi per probe di scoperta; solo loopback |
 
 Sostituisci l'LLM con un gateway remoto o OpenRouter cambiando `FOLDCRUMBS_LLM_ENDPOINT` — il recall
 non ne risente.
@@ -192,6 +194,28 @@ da installare: la chiamata è `urllib` stdlib, i vettori sono in cache machine-l
 store sincronizzato), e un endpoint mancante o morto è un fallback silenzioso — mai bloccante,
 mai un errore. Due cancelli, entrambi tuoi: nessuno switch → nessuna richiesta; nessuna
 risposta → nessun cambiamento.
+
+#### Recall semantico locale in 5 minuti (senza API key)
+
+L'endpoint embeddings può essere un server sulla tua macchina — niente cloud, niente chiavi,
+nulla esce da localhost. Con [ollama](https://ollama.com):
+
+```bash
+ollama pull nomic-embed-text          # 274 MB di download, inglese; embeddinggemma: 622 MB, multilingue
+export FOLDCRUMBS_SEMANTIC=1
+export FOLDCRUMBS_EMBEDDING_MODEL=nomic-embed-text
+# punta al server in modo esplicito:
+export FOLDCRUMBS_EMBEDDING_ENDPOINT=http://127.0.0.1:11434/v1
+# …oppure lascia che la scoperta loopback lo trovi per te (al posto della riga sopra):
+export FOLDCRUMBS_EMBEDDING_AUTO=1
+```
+
+Con `EMBEDDING_AUTO=1` e nessun endpoint esplicito, foldcrumbs effettua probe **solo su loopback**
+(ollama `:11434`, llama-server `:8080`, MLX/LM Studio `:8081`), una volta per processo, e mette in
+cache il vincitore nella state dir machine-local. Un endpoint esplicito vince sempre — la scoperta
+non scavalca mai ciò che hai configurato, non tocca mai indirizzi non-loopback, e quando nessuno
+risponde il recall resta lessicale esattamente come prima. `foldcrumbs doctor` riporta quale
+endpoint è attivo e come è stato risolto.
 
 ## Dashboard
 

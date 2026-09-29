@@ -108,9 +108,18 @@ LLM_JSON_SCHEMA = _env("LLM_JSON_SCHEMA", "1") not in ("0", "false", "")
 SEMANTIC = _env("SEMANTIC", "") not in ("", "0", "false", "no", "off")
 EMBEDDING_ENDPOINT = (_env("EMBEDDING_ENDPOINT")
                       or _local_override("embedding-endpoint") or LLM_ENDPOINT)
+# Was the endpoint chosen by the user (env/state file) rather than defaulted?
+# Discovery (below) must never surprise a machine that configured one.
+EMBEDDING_ENDPOINT_EXPLICIT = bool(_env("EMBEDDING_ENDPOINT")
+                                   or _local_override("embedding-endpoint"))
 EMBEDDING_MODEL = (_env("EMBEDDING_MODEL")
                    or _local_override("embedding-model") or "")
 EMBEDDING_TIMEOUT = float(_env("EMBEDDING_TIMEOUT", "10"))
+# Opt-in loopback discovery of a local embeddings server (ollama,
+# llama-server, MLX/LM Studio compat). Never on by default; probes only
+# 127.0.0.1/localhost; short timeout; result cached in the state dir.
+EMBEDDING_AUTO = _env("EMBEDDING_AUTO", "") not in ("", "0", "false", "no", "off")
+EMBEDDING_PROBE_TIMEOUT = float(_env("EMBEDDING_PROBE_TIMEOUT") or "2")
 
 # --- Anti-rot monitor -------------------------------------------------------
 CONTEXT_BUDGET = int(_env("CONTEXT_BUDGET", "200000"))

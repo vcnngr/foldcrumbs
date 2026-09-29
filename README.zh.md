@@ -160,6 +160,8 @@ foldcrumbs profile env <name>                     # 选中存储所需的那一�
 | `FOLDCRUMBS_EMBEDDING_ENDPOINT` | `FOLDCRUMBS_LLM_ENDPOINT` | OpenAI 兼容的 `/v1/embeddings` 服务器 |
 | `FOLDCRUMBS_EMBEDDING_MODEL` | `FOLDCRUMBS_LLM_MODEL` | embedding 模型名称 |
 | `FOLDCRUMBS_EMBEDDING_TIMEOUT` | `10` | 秒；服务器缓慢时回退到词法召回 |
+| `FOLDCRUMBS_EMBEDDING_AUTO` | 关 | 设为 `1`：未显式配置端点时，在回环地址上发现本地嵌入服务器（ollama :11434、llama-server :8080、MLX/LM Studio :8081） |
+| `FOLDCRUMBS_EMBEDDING_PROBE_TIMEOUT` | `2` | 每次发现探测的秒数；仅限回环地址 |
 
 通过修改 `FOLDCRUMBS_LLM_ENDPOINT` 把 LLM 换成远程网关或 OpenRouter — 召回
 不受影响。
@@ -179,6 +181,27 @@ foldcrumbs profile env <name>                     # 选中存储所需的那一�
 无需安装任何新东西：调用是标准库 `urllib`，向量缓存在本机（不在同步的存储里），
 端点缺失或宕机时静默回退 — 从不阻塞，从不报错。两道闸门，都由你掌握：
 不开关 → 不发请求；无响应 → 不改变。
+
+#### 5 分钟启用本地语义召回（无需 API 密钥）
+
+嵌入端点可以是你自己机器上的服务器 — 无云端、无密钥，任何数据都不离开 localhost。
+以 [ollama](https://ollama.com) 为例：
+
+```bash
+ollama pull nomic-embed-text          # 下载 274 MB，英文；embeddinggemma：622 MB，多语言
+export FOLDCRUMBS_SEMANTIC=1
+export FOLDCRUMBS_EMBEDDING_MODEL=nomic-embed-text
+# 显式指向该服务器：
+export FOLDCRUMBS_EMBEDDING_ENDPOINT=http://127.0.0.1:11434/v1
+# ……或者让回环发现替你找到它（替代上面一行）：
+export FOLDCRUMBS_EMBEDDING_AUTO=1
+```
+
+设置 `EMBEDDING_AUTO=1` 且没有显式端点时，foldcrumbs **仅在回环地址**上探测
+（ollama `:11434`、llama-server `:8080`、MLX/LM Studio `:8081`），每个进程一次，
+并把胜出者缓存在本机状态目录。显式端点永远优先 — 发现绝不覆盖你的配置，
+绝不触碰非回环地址；当没有服务器响应时，召回与从前完全一致地保持词法模式。
+`foldcrumbs doctor` 会报告当前生效的端点及其解析方式。
 
 ## 仪表盘
 
