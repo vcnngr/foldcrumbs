@@ -11,7 +11,7 @@ import os
 import re
 import sys
 
-STORE = os.path.expanduser(
+STORE = os.environ.get("FOLDCRUMBS_DIR") or os.path.expanduser(
     "~/.claude/projects/-Users-vincenzoingrosso-Documents-claude-foldcrumbs/memory")
 REPO = os.path.expanduser("~/Documents/claude/foldcrumbs")
 os.environ["FOLDCRUMBS_DIR"] = STORE
@@ -29,11 +29,16 @@ def derive_query(title: str) -> str:
 
 
 def build():
-    # READ-ONLY GUARANTEE (RT PR #82 P0-1): store.search() reinforces recall
-    # stats (.recalls.json rewrite). A golden-set builder must not mutate the
-    # store it reads — neutralize reinforcement BEFORE the first search.
+    # READ-ONLY + REPRODUCIBILITY GUARANTEE (RT PR #82 P0-1 e r3 P0-1):
+    # store.search() both WRITES recall stats (recalls.reinforce →
+    # .recalls.json) and READS them (recalls.counts → tiebreak in
+    # store.py). The write would mutate the store being measured; the read
+    # would make selection host-local (sidecar counts differ per machine).
+    # Neutralize BOTH before the first search: the builder then depends
+    # only on the store's markdown content, identical on any host.
     from foldcrumbs import recalls
     recalls.reinforce = lambda *a, **k: None  # noqa: E731
+    recalls.counts = lambda *a, **k: {}       # noqa: E731
 
     recs = list(store.iter_memories())
     recs = [r for r in recs if getattr(r, "status", "active") == "active"]

@@ -23,11 +23,13 @@ from foldcrumbs import config, embeddings_local, recalls, store  # noqa: E402
 
 assert embeddings_local.available(), embeddings_local.status()
 
-# READ-ONLY GUARANTEE (RT PR #82 P0-1): store.search() reinforces recall
-# stats by design (store.py -> recalls.reinforce -> .recalls.json rewrite).
-# A benchmark must not mutate the store it measures: neutralize the
-# reinforcement for the whole run, then prove byte-equality at the end.
+# READ-ONLY + REPRODUCIBILITY GUARANTEE (RT PR #82 P0-1 e r3 P0-1):
+# store.search() reinforces recall stats (write → .recalls.json) AND reads
+# host-local counts into the tiebreak (recalls.counts). A benchmark must
+# neither mutate the store it measures nor depend on host-local state:
+# neutralize both, then prove byte-equality at the end.
 recalls.reinforce = lambda *a, **k: None  # noqa: E731
+recalls.counts = lambda *a, **k: {}  # noqa: E731
 
 QDIR = os.path.join(REPO, "benchmarks/quality")
 STORE = os.environ["FOLDCRUMBS_DIR"]

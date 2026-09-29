@@ -35,8 +35,10 @@ channel stays opt-in and these numbers bound what we say about it.
   `store.search()` actually serves for a query derived from their title;
   negatives = **at most one per positive query** (10 distinct queries),
   never served by it, ≤1 title-term overlap. Labels come from objective
-  signals, not committer judgment. Reinforcement is neutralized before
-  the first search (read-only).
+  signals, not committer judgment. BOTH recall-stats touch-points are
+  neutralized before the first search: `reinforce` (the write → read-only)
+  AND `counts` (the host-local read → reproducible on any machine
+  regardless of its `.recalls.json` sidecar).
 - `paraphrase_golden.json` is hand-written (declared) and was audited
   pair-by-pair against the real memory descriptions: every positive is a
   genuine answer to its query; every negative is genuinely unrelated.
@@ -50,7 +52,7 @@ channel stays opt-in and these numbers bound what we say about it.
   Run ends with a sha256 snapshot comparison of the whole store; any
   mutation exits non-zero.
 
-## Honesty notes (RT PR #82 round 1 findings, all closed)
+## Honesty notes (RT PR #82 findings across rounds 1–3, all closed)
 
 - P0-1: the first version of these scripts called `store.search()` without
   neutralizing recall-statistics reinforcement → `.recalls.json` was
@@ -70,6 +72,15 @@ channel stays opt-in and these numbers bound what we say about it.
   consecutive runs are byte-identical (sha256 verified) and the benchmark
   numbers on the regenerated file are unchanged (40/40; 7/10→10/10; FP
   0/0).
+- r3 P0 (RT round 3): sort-by-title was NOT enough — store.search() also
+  READS the host-local `.recalls.json` counts into its tiebreak, so the
+  reviewer's regeneration still differed (one negative pair flipped: a
+  memory served in their top-10 but not in ours). Fixed: neutralize
+  `recalls.counts` too, in builder AND benchmark. Proof:
+  `verify_reproducible.py` runs the builder 3× on store copies with
+  absent / full / hostile sidecars — all three sha256-identical to the
+  committed blob (cdfe32e7…). The builder now depends only on the
+  store's markdown content.
 - r2 P1 (declared, backlog — reviewer's own framing, not a veto): the
   paraphrase negatives are all clearly-unrelated (overlap 0), a good smoke
   test but a WEAK measure of the false-positive rate near the decision
@@ -99,5 +110,8 @@ FOLDCRUMBS_DIR=<your store> python benchmarks/quality/bench_semantic.py
 `golden.json` is store-specific; the paraphrase set references its
 titles. Both files are committed as the frozen 2026-09-29 snapshot these
 numbers refer to. `build_golden.py` regenerates `golden.json`
-byte-identically from that store on any host (selection is sorted by
-title; verified: two runs sha256-identical, store untouched).
+byte-identically from that store on ANY host: selection is sorted by
+title and both recall-stats touch-points are neutralized, so the output
+depends only on the store's markdown. Run
+`python benchmarks/quality/verify_reproducible.py` to prove it
+(3 sidecar scenarios, all sha256-identical).
