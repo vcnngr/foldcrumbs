@@ -40,33 +40,59 @@ vive in un modulo separato con import guardato.
    WordPiece stdlib (vocab.txt dal bundle). Mean-pooling + L2 norm come da
    model card MiniLM.
 3. `foldcrumbs embeddings setup|status|remove` (nuovo sottocomando CLI):
-   - setup: scarica model_qint8 + vocab.txt da HF (URL pinnati + SHA256
-     attesi nel codice), salva nella STATE dir (machine-local, non nello
-     store sincronizzato), self-test end-to-end, scrive il marker di config.
-   - status: cosa è installato, checksum, dimensione, self-test.
-   - remove: cancella modello e marker.
-4. Catena di risoluzione embed() (estende la PR #80):
-   endpoint esplicito > discovery loopback > **bundled locale (se extra
-   installato E modello presente)** > lessicale. Ogni gradino ha il suo
-   gate e il suo fallback onesto; il bundled non fa MAI rete dopo il setup.
-5. doctor: la riga `semantic` guadagna il caso "bundled (local model)".
+   - setup: runtime check PRIMA di ogni altra cosa; scarica model_quantized
+     + vocab.txt da HF (URL pinnati + SHA256 + size attesi nel codice) in
+     staging .part, verifica ENTRAMBI, poi commit atomico della coppia
+     (transazionale: un file cattivo = rollback completo, nessun residuo).
+     Salva nella STATE dir (machine-local, non nello store sincronizzato).
+     [self-test end-to-end e marker di config: NON implementati — il marker
+     è la presenza verificata dei file stessi; il self-test vive nel CI job
+     semantic-extra. Correzione r2: la prima stesura li prometteva.]
+   - status: cosa è installato, checksum, revisione, disponibilità.
+   - remove: cancella modello e vocab.
+4. Catena di risoluzione embed() — CHANNEL-FIRST (contratto r2, RT P0-1):
+   endpoint esplicito > discovery loopback > **bundled** > lessicale.
+   Una chiamata embed() serve TUTTI i testi in UN SOLO spazio vettoriale:
+   il canale server prova per primo (cache+POST sotto la sua basis); solo
+   se non risponde affatto, il bundled prende l'intera chiamata sotto la
+   propria basis. Mai vettori di spazi diversi nello stesso ranking.
+   Il bundled non fa MAI rete dopo il setup.
+5. doctor: la riga `semantic` mostra il bundled — follow-up dichiarato
+   (non in questa PR).
 
 ## Limiti dichiarati (nel README, onestamente)
-- macOS Intel: onnxruntime non pubblica wheel → `[semantic]` non
-  installabile lì; la via documentata per Intel Mac resta la discovery
-  verso ollama/llama-server (PR #80). Verificato su PyPI il 2026-09-29.
-- Python 3.10: supportato solo con onnxruntime <=1.22 (pin da testare in
-  CI matrix).
+- macOS Intel: SUPPORTATO fino a onnxruntime 1.23.x (wheel x86_64; pip
+  risolve da solo — verificato in vivo su Xeon W-2140B con 1.23.2, E2E
+  verde). Da 1.24+ solo arm64. [correzione r2: la prima stesura diceva
+  "non installabile su Intel" — falso, smentito dai fatti sopra e dalla
+  verifica PyPI 1.16→1.30]
+- Python: extra supportato 3.10–3.13 (marker `python_version < '3.14'` su
+  onnxruntime: nessuna wheel 3.14 pubblicata — verificato dal revisore su
+  3.14.7 macOS x86_64). Core senza tetto.
 - NESSUN claim di qualità prima della misura sul golden set parafrasato
   (disciplina Fase 0): il README dirà "local semantic channel", non
   "better recall", finché i numeri non ci sono.
 
 ## Test
-- Import-guard: suite intera verde SENZA onnxruntime installato (CI core).
-- Con extra installato (job CI dedicato, non bloccante): tokenizer contro
-  vettori noti di riferimento, self-test setup, catena di precedenza
-  completa (mock), checksum rifiutato se corrotto.
+- Import-guard: suite intera verde SENZA onnxruntime installato (CI core,
+  946 test). _runtime_error cattura ImportError E OSError (dlopen rotto).
+- Regressione channel-first: cache server + cache bundle mescolate → una
+  chiamata ritorna un solo spazio (PoC del revisore pinnato come test).
+- setup rifiuta: bundle valido su disco + runtime assente → False, non
+  "already installed" (PoC del revisore pinnato).
+- Transazionalità: sha del secondo file fallisce → zero residui nel bundle dir.
+- Con extra installato (job CI dedicato, continue-on-error): setup reale,
+  inferenza reale (cos parafrasi > 0.5, unrelated < 0.3), tokenizer contro
+  ID veri del vocab.txt.
 - Le regressioni P0 della PR #80 restano verdi in entrambe le configurazioni.
+
+## Numeri E2E (dichiarati onestamente)
+Misurati dal committer su iMac Intel Xeon W-2140B (py3.12, ort 1.23.2):
+cos parafrasi 0.748 / unrelated −0.095; 189ms per 3 testi (cold), warm
+cache 54ms. Il revisore, su host diverso (ubuntu), ha misurato 0.743 /
+−0.020 e 291ms — stesso segno, soglie CI verdi in entrambi i casi. I
+numeri assoluti dipendono dall'host: le SOGLIE (>0.5 / <0.3) sono il
+contratto, non i valori esatti.
 
 ## Sequenza
 PR stacked su feat/local-semantic DOPO il merge di PR #80 (r2 in review

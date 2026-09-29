@@ -92,7 +92,7 @@ class TestDownloadVerification(unittest.TestCase):
             with mock.patch("urllib.request.urlopen", fake_urlopen):
                 # size correct (17 bytes), hash wrong → sha256 mismatch
                 with self.assertRaises(ValueError) as ctx:
-                    embeddings_local._download(
+                    embeddings_local._stage_download(
                         "https://example.invalid/model.onnx", dest,
                         "0" * 64, 17)
             self.assertIn("sha256 mismatch", str(ctx.exception))
@@ -116,10 +116,143 @@ class TestDownloadVerification(unittest.TestCase):
                 return R()
             with mock.patch("urllib.request.urlopen", fake_urlopen):
                 with self.assertRaises(ValueError):
-                    embeddings_local._download(
+                    embeddings_local._stage_download(
                         "https://example.invalid/m.onnx", dest,
                         real_sha, 999)   # right hash, wrong size
             self.assertFalse(dest.exists())
+
+
+class TestRT81P0Regressions(unittest.TestCase):
+    """The three P0s of RT t_79105d4e, each with its own regression."""
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in
+                       ("FOLDCRUMBS_SEMANTIC", "FOLDCRUMBS_EMBEDDING_ENDPOINT",
+                        "FOLDCRUMBS_EMBEDDING_MODEL", "FOLDCRUMBS_EMBEDDING_AUTO")}
+        for k in self._saved:
+            os.environ.pop(k, None)
+        os.environ["FOLDCRUMBS_SEMANTIC"] = "1"
+        os.environ["FOLDCRUMBS_EMBEDDING_MODEL"] = "m"
+        os.environ["FOLDCRUMBS_EMBEDDING_ENDPOINT"] = "http://127.0.0.1:1"
+        importlib.reload(config)
+        importlib.reload(embeddings)
+        embeddings._discovery_reset()
+        embeddings_local._SESSION.clear()
+        embeddings_local._VOCAB = None
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        importlib.reload(config)
+        importlib.reload(embeddings)
+        embeddings._discovery_reset()
+
+    def test_p0_1_never_mixes_vector_spaces_in_one_call(self):
+        # Reviewer's PoC as a regression: a cached SERVER vector for text A
+        # and a cached BUNDLE vector for text B must NOT come back together
+        # in one embed() call — one space per call, or None.
+        server_basis = "http://127.0.0.1:1"
+        bundle_basis = "bundled:minilm@rev"
+        cache = embeddings._load_cache()
+        cache[embeddings._key("text a", server_basis)] = [1.0, 0.0]
+        cache[embeddings._key("text b", bundle_basis)] = [0.0, 1.0]
+        embeddings._save_cache(cache)
+
+        calls = []
+        with (mock.patch.object(embeddings, "_post",
+                                lambda t, u=None: calls.append("server") or None),
+              mock.patch.object(embeddings, "_embed_bundled",
+                                lambda t: calls.append("bundle")
+                                or [[0.0, 1.0] for _ in t]),
+              mock.patch.object(embeddings, "_bundled_basis",
+                                return_value=bundle_basis)):
+            got = embeddings.embed(["text a", "text b"])
+        # The server channel cannot complete (post dead) → the WHOLE call
+        # goes to the bundle space: both vectors from the bundle basis.
+        self.assertIsNotNone(got)
+        self.assertEqual(got[1], [0.0, 1.0])           # b from bundle cache
+        self.assertNotEqual(got[0], [1.0, 0.0],
+                            "server-space vector must NOT leak into a "
+                            "bundle-space call")
+        # a fresh bundle vector for "text a", cached under the bundle basis
+        new_cache = embeddings._load_cache()
+        self.assertIn(embeddings._key("text a", bundle_basis), new_cache)
+
+    def test_p0_2_oserror_from_runtime_degrades_not_raises(self):
+        # A present-but-broken onnxruntime fails at dlopen with OSError.
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *a, **k):
+            if name == "onnxruntime":
+                raise OSError("dlopen failed: broken native lib")
+            return real_import(name, *a, **k)
+
+        with mock.patch("builtins.__import__", fake_import):
+            err = embeddings_local._runtime_error()
+        self.assertIsNotNone(err)
+        self.assertIn("failed to load", err)
+        # and the public surface degrades honestly
+        with mock.patch.object(embeddings_local, "_runtime_error",
+                               return_value=err):
+            self.assertFalse(embeddings_local.available())
+            self.assertIsNone(embeddings_local.embed(["x"]))
+            self.assertFalse(embeddings_local.setup(verbose=False))
+
+    def test_p0_3_setup_refuses_when_bundle_present_but_runtime_missing(self):
+        # Valid bundle on disk + no runtime → setup must FAIL, not print
+        # "already installed" and exit 0 (reviewer's PoC).
+        with mock.patch.object(embeddings_local, "installed",
+                               return_value=True), \
+             mock.patch.object(embeddings_local, "_runtime_error",
+                               return_value="onnxruntime not installed"):
+            self.assertFalse(embeddings_local.setup(verbose=False))
+
+    def test_p1_transactional_second_file_failure_leaves_no_residue(self):
+        # Model stages fine, vocab download fails sha → NO file may land
+        # in the bundle dir at all (all-or-nothing).
+        import hashlib
+        good_model = b"M" * 32
+        model_sha = hashlib.sha256(good_model).hexdigest()
+
+        class Resp:
+            def __init__(self, data):
+                self._d = data
+            def read(self, n):
+                d, self._d = self._d, b""
+                return d
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            if "vocab" in req.full_url:
+                return Resp(b"tampered vocab")     # wrong bytes → sha fail
+            return Resp(good_model)
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            bundle = Path(d) / "bundled"
+            with mock.patch.object(embeddings_local, "_runtime_error",
+                                   return_value=None), \
+                 mock.patch.object(embeddings_local, "installed",
+                                   return_value=False), \
+                 mock.patch.object(embeddings_local, "_bundle_dir",
+                                   return_value=bundle), \
+                 mock.patch.object(embeddings_local, "MODEL_SHA256",
+                                   model_sha), \
+                 mock.patch.object(embeddings_local, "MODEL_BYTES",
+                                   len(good_model)), \
+                 mock.patch("urllib.request.urlopen", fake_urlopen):
+                ok = embeddings_local.setup(verbose=False)
+            self.assertFalse(ok)
+            residue = list(bundle.glob("*")) if bundle.exists() else []
+            self.assertEqual(residue, [],
+                             f"half-bundle residue left behind: {residue}")
 
 
 class TestCacheBasis(unittest.TestCase):
@@ -256,7 +389,11 @@ class TestChainChannel3(unittest.TestCase):
                                return_value=None):
             self.assertIsNone(embeddings.embed(["x"]))
 
-    def test_warm_bundle_cache_skips_both_channels(self):
+    def test_warm_bundle_cache_skips_bundle_inference(self):
+        # Channel-first contract (RT #81 P0-1): the server channel is tried
+        # first (it is the preferred one) and dies here; the bundle channel
+        # then finds the text warm in ITS OWN basis and must run no
+        # inference at all.
         calls = []
         basis = "bundled:test@rev"
         key = embeddings._key("warm text", basis)
@@ -271,7 +408,9 @@ class TestChainChannel3(unittest.TestCase):
                                return_value=basis):
             got = embeddings.embed(["warm text"])
         self.assertEqual(got, [[0.5, 0.5]])
-        self.assertEqual(calls, [], "warm cache must hit no channel at all")
+        self.assertEqual(calls, ["server"],
+                         "only the preferred server channel may be probed; "
+                         "a warm bundle entry must run no bundle inference")
 
 
 if __name__ == "__main__":

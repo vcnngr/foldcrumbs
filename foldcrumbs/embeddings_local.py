@@ -53,12 +53,19 @@ def _vocab_path():
 
 
 def _runtime_error() -> str | None:
-    """Why the runtime is unavailable, or None when it is."""
+    """Why the runtime is unavailable, or None when it is.
+
+    Catches OSError too (RT PR #81 P0-2): a present-but-broken native
+    install fails at dlopen with OSError, not ImportError — that must
+    degrade to "not available", never escape into recall.
+    """
     try:
         import onnxruntime  # noqa: F401
     except ImportError:
         return ("onnxruntime not installed — "
                 "pip install 'foldcrumbs[semantic]'")
+    except OSError as e:
+        return f"onnxruntime present but failed to load ({e})"
     return None
 
 
@@ -100,10 +107,71 @@ def _sha256(path) -> str:
     return h.hexdigest()
 
 
-def _download(url: str, dest, expected_sha: str, expected_bytes: int) -> None:
-    """Download to a temp file, verify hash AND size, then atomic-rename."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=dest.parent, suffix=".part")
+def setup(verbose: bool = True) -> bool:
+    """Download + verify the pinned bundle. Idempotent. True on success.
+
+    Runtime is checked FIRST (RT PR #81 P0-3): a valid bundle on disk with
+    no usable onnxruntime is NOT success — the channel cannot embed, and
+    saying "already installed" with exit 0 while status says "not
+    available" is a lie. The whole install is transactional (P1): both
+    files are staged and verified as .part temps, then committed together,
+    so a mid-install failure never leaves a half bundle behind.
+    """
+    err = _runtime_error()
+    if err:
+        if verbose:
+            print(f"cannot use the bundled model yet: {err}")
+        return False
+    if installed():
+        if verbose:
+            print("bundled model already installed and verified.")
+        return True
+    if verbose:
+        print(f"downloading {MODEL_FILE} (~{MODEL_BYTES // 10**6} MB, "
+              f"rev {MODEL_REV[:8]}) …")
+    bundle = _bundle_dir()
+    staged: list[tuple] = []     # (tmp_path, final_path)
+    try:
+        bundle.mkdir(parents=True, exist_ok=True)
+        for fname, url, sha, size in (
+                (MODEL_FILE, f"{_HF_BASE}/onnx/{MODEL_FILE}",
+                 MODEL_SHA256, MODEL_BYTES),
+                (VOCAB_FILE, f"{_HF_BASE}/{VOCAB_FILE}",
+                 VOCAB_SHA256, VOCAB_BYTES)):
+            tmp = _stage_download(url, bundle / (fname + ".part"), sha, size)
+            staged.append((tmp, bundle / fname))
+        for tmp, dest in staged:         # both verified — commit together
+            os.replace(tmp, dest)
+        staged.clear()
+    except Exception as e:  # noqa: BLE001 — user-facing, never a traceback
+        if verbose:
+            print(f"setup failed: {e}")
+        for tmp, _ in staged:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        return False
+    if verbose:
+        print("verifying …")
+    ok = installed()
+    if verbose:
+        print("ok — bundled local embeddings ready." if ok
+              else "verification failed after download.")
+    if not ok:
+        # never leave a failed bundle claimable as installed
+        remove(verbose=False)
+    return ok
+
+
+def _stage_download(url: str, tmp, expected_sha: str,
+                    expected_bytes: int) -> str:
+    """Download to ``tmp``, verify size AND sha256, return the tmp path.
+
+    The caller commits (renames) only after EVERY file passed — one bad
+    file rolls the whole install back.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=tmp.parent, suffix=".part")
     try:
         total = 0
         with os.fdopen(fd, "wb") as fh:
@@ -115,51 +183,19 @@ def _download(url: str, dest, expected_sha: str, expected_bytes: int) -> None:
                     fh.write(chunk)
         if total != expected_bytes:
             raise ValueError(
-                f"{dest.name}: expected {expected_bytes} bytes, got {total}")
-        got = _sha256(tmp)
+                f"{tmp.name}: expected {expected_bytes} bytes, got {total}")
+        got = _sha256(tmp_name)
         if got != expected_sha:
             raise ValueError(
-                f"{dest.name}: sha256 mismatch — expected {expected_sha}, "
+                f"{tmp.name}: sha256 mismatch — expected {expected_sha}, "
                 f"got {got} (refusing to install)")
-        os.replace(tmp, dest)
     except BaseException:
         try:
-            os.unlink(tmp)
+            os.unlink(tmp_name)
         except OSError:
             pass
         raise
-
-
-def setup(verbose: bool = True) -> bool:
-    """Download + verify the pinned bundle. Idempotent. True on success."""
-    if installed():
-        if verbose:
-            print("bundled model already installed and verified.")
-        return True
-    err = _runtime_error()
-    if err:
-        if verbose:
-            print(f"cannot use the bundled model yet: {err}")
-        return False
-    if verbose:
-        print(f"downloading {MODEL_FILE} (~{MODEL_BYTES // 10**6} MB, "
-              f"rev {MODEL_REV[:8]}) …")
-    try:
-        _download(f"{_HF_BASE}/onnx/{MODEL_FILE}", _model_path(),
-                  MODEL_SHA256, MODEL_BYTES)
-        _download(f"{_HF_BASE}/{VOCAB_FILE}", _vocab_path(),
-                  VOCAB_SHA256, VOCAB_BYTES)
-    except Exception as e:  # noqa: BLE001 — user-facing, never a traceback
-        if verbose:
-            print(f"setup failed: {e}")
-        return False
-    if verbose:
-        print("verifying …")
-    ok = installed()
-    if verbose:
-        print("ok — bundled local embeddings ready." if ok
-              else "verification failed after download.")
-    return ok
+    return tmp_name
 
 
 def remove(verbose: bool = True) -> bool:

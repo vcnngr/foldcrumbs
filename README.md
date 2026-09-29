@@ -240,7 +240,7 @@ the bundle's own revision key, never mixed with a server's vector space.
 
 Platform note (verified against PyPI): onnxruntime ships macOS x86_64 wheels
 through 1.23.x and arm64 from 1.24+; `pip` resolves the right one. Linux
-x86_64/arm64 and Windows are covered. Python ≥3.10.
+x86_64/arm64 and Windows are covered. The extra supports Python 3.10–3.13 (onnxruntime ships no 3.14 wheels yet); the core stays on ≥3.10 with no ceiling.
 
 ## Dashboard
 

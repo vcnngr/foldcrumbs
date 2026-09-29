@@ -245,7 +245,7 @@ spazio vettoriale di un server.
 
 Nota piattaforme (verificata su PyPI): onnxruntime pubblica wheel macOS
 x86_64 fino alla 1.23.x e arm64 dalla 1.24+; `pip` risolve quella giusta.
-Linux x86_64/arm64 e Windows coperti. Python ≥3.10.
+Linux x86_64/arm64 e Windows coperti. L'extra supporta Python 3.10–3.13 (onnxruntime non pubblica ancora wheel per 3.14); il core resta ≥3.10 senza tetto.
 
 ## Dashboard
 

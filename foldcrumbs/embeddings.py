@@ -303,36 +303,44 @@ def embed(texts: list[str], candidates=None) -> list[list[float]] | None:
 
 
 def _embed_inner(texts: list[str]) -> list[list[float]] | None:
-    cache = _load_cache()
-    # A vector's space depends on the channel that made it, so the cache key
-    # folds in a basis: the server endpoint for served vectors, the bundle
-    # revision for bundled ones. A machine normally uses ONE channel, but if
-    # it switches (server dies, bundle installed) the old entries simply stop
-    # matching — never mixed into one ranking (that would compare two scales).
-    bundle_basis = _bundled_basis()          # None when the extra is absent
+    # ONE vector space per call — never mix (RT PR #81 P0-1). A cached
+    # server vector and a cached bundled vector are points in DIFFERENT
+    # spaces; ranking them together compares incomparable scales. So the
+    # call is resolved channel-first: the server channel tries to serve
+    # ALL texts (cache + one batched POST under the server basis); only if
+    # it cannot answer at all does the bundled channel take over the whole
+    # call under its own basis. Within a channel, cache hits and fresh
+    # vectors share one space by construction.
     server_basis = _resolve()[1]
+    got = _embed_channel(texts, server_basis, _post)
+    if got is not None:
+        return got
+    bundle_basis = _bundled_basis()
+    if bundle_basis is None:
+        return None                        # gate 2: nothing answered — lexical
+    return _embed_channel(texts, bundle_basis, _embed_bundled)
 
+
+def _embed_channel(texts: list[str], basis: str,
+                   fetch) -> list[list[float]] | None:
+    """Serve ALL texts within ONE cache basis, or None if the channel can't.
+
+    Cache hits never touch the network; on a miss exactly one batched
+    ``fetch`` covers everything missing. Vectors are cached under this
+    channel's own basis only.
+    """
+    cache = _load_cache()
     out: list[list[float] | None] = [None] * len(texts)
     missing: list[tuple[int, str]] = []      # (index, text)
     for i, text in enumerate(texts):
-        # lookup: server space first, then bundle space
-        hit = cache.get(_key(text, server_basis))
-        if hit is None and bundle_basis is not None:
-            hit = cache.get(_key(text, bundle_basis))
+        hit = cache.get(_key(text, basis))
         if hit is not None:
             out[i] = hit
         else:
             missing.append((i, text))
-
     if missing:
-        miss_texts = [t for _, t in missing]
-        basis = server_basis
-        got = _post(miss_texts)
-        if got is None and bundle_basis is not None:
-            got = _embed_bundled(miss_texts)   # channel 3
-            if got is not None:
-                basis = bundle_basis           # bundle space, not server's
-        if got is None:                        # gate 2: nothing — lexical
+        got = fetch([t for _, t in missing])
+        if got is None:
             return None
         for (i, text), vec in zip(missing, got):
             out[i] = vec

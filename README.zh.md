@@ -227,7 +227,7 @@ False，该通道被跳过，recall 保持词法模式。回退链为：显式�
 
 平台说明（已对照 PyPI 验证）：onnxruntime 的 macOS x86_64 wheel 提供至
 1.23.x，1.24 起仅 arm64；`pip` 会自动解析正确版本。Linux x86_64/arm64 与
-Windows 均覆盖。Python ≥3.10。
+Windows 均覆盖。该 extra 支持 Python 3.10–3.13（onnxruntime 尚无 3.14 wheel）；核心保持 ≥3.10 无上限。
 
 ## 仪表盘
 
