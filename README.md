@@ -213,6 +213,35 @@ overrides what you configured, never touches non-loopback addresses, and when no
 recall stays lexical exactly as before. `foldcrumbs doctor` reports which endpoint is active
 and how it was resolved.
 
+#### Bundled local model — all-inclusive, still optional
+
+No server to run at all? Install the optional extra and download the pinned
+model once:
+
+```bash
+pip install 'foldcrumbs[semantic]'   # onnxruntime + numpy — NOT in the core
+foldcrumbs embeddings setup          # ~23 MB, sha256-verified, machine-local
+foldcrumbs embeddings status         # what is installed, which revision
+foldcrumbs embeddings remove         # delete it again
+```
+
+That's it — recall now has a local semantic channel with **no API keys, no
+server, no network** after setup. The bundle is
+[Xenova/all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2)
+(ONNX, quantized, revision-pinned; setup refuses any download whose sha256
+does not match). The WordPiece tokenizer is our own stdlib code, validated
+ID-for-ID against the official HF tokenizer.
+
+The **core stays stdlib-only, forever**: without the extra, nothing changes
+— `available()` is False, the channel is skipped, recall is lexical. The
+fallback chain is explicit endpoint → loopback discovery → bundled model →
+lexical, each step an honest degradation. Bundled vectors are cached under
+the bundle's own revision key, never mixed with a server's vector space.
+
+Platform note (verified against PyPI): onnxruntime ships macOS x86_64 wheels
+through 1.23.x and arm64 from 1.24+; `pip` resolves the right one. Linux
+x86_64/arm64 and Windows are covered. The extra supports Python 3.10–3.13 (onnxruntime ships no 3.14 wheels yet); the core stays on ≥3.10 with no ceiling.
+
 ## Dashboard
 
 `foldcrumbs dashboard` renders the whole store as **one self-contained HTML page** — inline CSS,

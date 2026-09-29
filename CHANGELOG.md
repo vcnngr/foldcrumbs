@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains stdlib `urllib`. Documented local models (`ollama pull`
   download sizes): `nomic-embed-text` 274 MB (EN) and `embeddinggemma`
   622 MB (multilingual).
+- **Bundled local embedding model (optional extra)** —
+  `pip install 'foldcrumbs[semantic]'` + `foldcrumbs embeddings setup`
+  gives recall a fully local semantic channel: no API keys, no server, no
+  network after setup. The bundle is Xenova/all-MiniLM-L6-v2 (ONNX
+  quantized, revision-pinned, sha256-verified on download; a mismatched
+  file is refused). The WordPiece tokenizer is our own stdlib code,
+  validated ID-for-ID against the official HF tokenizer. Manage it with
+  `foldcrumbs embeddings setup|status|remove`. The core stays stdlib-only:
+  without the extra the channel is skipped and nothing changes. Fallback
+  chain: explicit endpoint → loopback discovery → bundled model → lexical.
+  Bundled vectors cache under the bundle revision, never mixed with server
+  vector spaces.
 - **AGENTS.md loop `understand → work → update`** — the block installed
   into agent config files now states the retrieval loop explicitly:
   recall before a task, follow recorded decisions while working (code

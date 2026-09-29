@@ -203,6 +203,32 @@ export FOLDCRUMBS_EMBEDDING_AUTO=1
 绝不触碰非回环地址；当没有服务器响应时，召回与从前完全一致地保持词法模式。
 `foldcrumbs doctor` 会报告当前生效的端点及其解析方式。
 
+#### 内置本地模型 — 开箱即用，但始终可选
+
+连服务器都不想跑？安装可选 extra 并一次性下载固定版本的模型：
+
+```bash
+pip install 'foldcrumbs[semantic]'   # onnxruntime + numpy — 不在核心依赖里
+foldcrumbs embeddings setup          # 约 23 MB，sha256 校验，保存在本机
+foldcrumbs embeddings status         # 查看已安装内容与模型版本
+foldcrumbs embeddings remove         # 随时删除
+```
+
+就这样 — recall 从此拥有本地语义通道：**无 API 密钥、无服务器、setup 之后
+无网络**。内置模型为
+[Xenova/all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2)
+（ONNX 量化版，版本已固定；sha256 不匹配的下载一律拒绝）。WordPiece
+分词器是我们自己的标准库代码，已与 HF 官方分词器逐 ID 验证一致。
+
+**核心永远保持纯标准库**：不装 extra 就没有任何变化 — `available()` 为
+False，该通道被跳过，recall 保持词法模式。回退链为：显式端点 → 回环发现 →
+内置模型 → 词法，每一步都是诚实降级。内置向量以其模型版本为缓存键，
+绝不与服务器向量空间混用。
+
+平台说明（已对照 PyPI 验证）：onnxruntime 的 macOS x86_64 wheel 提供至
+1.23.x，1.24 起仅 arm64；`pip` 会自动解析正确版本。Linux x86_64/arm64 与
+Windows 均覆盖。该 extra 支持 Python 3.10–3.13（onnxruntime 尚无 3.14 wheel）；核心保持 ≥3.10 无上限。
+
 ## 仪表盘
 
 `foldcrumbs dashboard` 把整个存储渲染为**一个自包含的 HTML 页面** — 内联 CSS、

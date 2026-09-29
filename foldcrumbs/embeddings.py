@@ -303,25 +303,81 @@ def embed(texts: list[str], candidates=None) -> list[list[float]] | None:
 
 
 def _embed_inner(texts: list[str]) -> list[list[float]] | None:
+    # ONE vector space per call — never mix (RT PR #81 P0-1). A cached
+    # server vector and a cached bundled vector are points in DIFFERENT
+    # spaces; ranking them together compares incomparable scales. So the
+    # call is resolved channel-first: the server channel tries to serve
+    # ALL texts (cache + one batched POST under the server basis); only if
+    # it cannot answer at all does the bundled channel take over the whole
+    # call under its own basis. Within a channel, cache hits and fresh
+    # vectors share one space by construction.
+    server_basis = _resolve()[1]
+    got = _embed_channel(texts, server_basis, _post)
+    if got is not None:
+        return got
+    bundle_basis = _bundled_basis()
+    if bundle_basis is None:
+        return None                        # gate 2: nothing answered — lexical
+    return _embed_channel(texts, bundle_basis, _embed_bundled)
+
+
+def _embed_channel(texts: list[str], basis: str,
+                   fetch) -> list[list[float]] | None:
+    """Serve ALL texts within ONE cache basis, or None if the channel can't.
+
+    Cache hits never touch the network; on a miss exactly one batched
+    ``fetch`` covers everything missing. Vectors are cached under this
+    channel's own basis only.
+    """
     cache = _load_cache()
     out: list[list[float] | None] = [None] * len(texts)
-    missing: list[tuple[int, str, str]] = []
+    missing: list[tuple[int, str]] = []      # (index, text)
     for i, text in enumerate(texts):
-        key = _key(text)
-        hit = cache.get(key)
+        hit = cache.get(_key(text, basis))
         if hit is not None:
             out[i] = hit
         else:
-            missing.append((i, key, text))
+            missing.append((i, text))
     if missing:
-        got = _post([text for _, _, text in missing])
-        if got is None:      # gate 2: the endpoint did not answer — lexical
+        got = fetch([t for _, t in missing])
+        if got is None:
             return None
-        for (i, key, _), vec in zip(missing, got):
+        for (i, text), vec in zip(missing, got):
             out[i] = vec
-            cache[key] = vec
+            cache[_key(text, basis)] = vec
         _save_cache(cache)
     return out               # type: ignore[return-value]
+
+
+def _bundled_basis() -> str | None:
+    """The bundle's cache basis, or None when it cannot serve right now.
+
+    Cheap and side-effect-free: an availability check, never a model load.
+    Import is guarded so a machine without the extra pays nothing; ANY
+    error (import-time OSError from a broken native lib included) degrades
+    to None → lexical. An optional channel must never break recall.
+    """
+    try:
+        from . import embeddings_local
+        if not embeddings_local.available():
+            return None
+        return embeddings_local.cache_basis()
+    except Exception:  # noqa: BLE001 — fail-soft by contract
+        return None
+
+
+def _embed_bundled(texts: list[str]) -> list[list[float]] | None:
+    """The optional bundled model (foldcrumbs[semantic]) as channel 3.
+
+    Import is local and guarded: a machine without the extra never loads
+    the module's heavy parts. ANY failure (import, availability, inference,
+    I/O) is an honest None → lexical. An optional channel never raises.
+    """
+    try:
+        from . import embeddings_local
+        return embeddings_local.embed(texts)
+    except Exception:  # noqa: BLE001 — fail-soft by contract
+        return None
 
 
 def cosine(a: list[float], b: list[float]) -> float:
