@@ -1,0 +1,252 @@
+[
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Automatic memory distillation trigger",
+  "label": "relevant"
+ },
+ {
+  "query": "claude config dir honored per instance",
+  "memory": "CLAUDE CONFIG DIR honored for per-instance memory namespacing",
+  "label": "relevant"
+ },
+ {
+  "query": "data extraction logic",
+  "memory": "Data Extraction Logic",
+  "label": "relevant"
+ },
+ {
+  "query": "not reinstall hooks macbook after rename",
+  "memory": "Do not reinstall hooks on MacBook after rename",
+  "label": "relevant"
+ },
+ {
+  "query": "dual layer memory architecture",
+  "memory": "Dual-layer memory architecture",
+  "label": "relevant"
+ },
+ {
+  "query": "engram claude cli llm backend this",
+  "memory": "engram-claude-cli-llm-backend-this-imac",
+  "label": "relevant"
+ },
+ {
+  "query": "decision engram claude config dir aware",
+  "memory": "decision-engram-claude-config-dir-aware",
+  "label": "relevant"
+ },
+ {
+  "query": "engram context budget configuration",
+  "memory": "Engram Context Budget Configuration",
+  "label": "relevant"
+ },
+ {
+  "query": "engram handoff implementation",
+  "memory": "Engram Handoff Implementation",
+  "label": "relevant"
+ },
+ {
+  "query": "engram honors claude config dir per",
+  "memory": "engram honors CLAUDE CONFIG DIR for per-instance memory",
+  "label": "relevant"
+ },
+ {
+  "query": "engram llm model configuration",
+  "memory": "engram-llm-model-configuration",
+  "label": "relevant"
+ },
+ {
+  "query": "engram multi machine setup decentralized ssh",
+  "memory": "Engram multi-machine setup is decentralized, no SSH",
+  "label": "relevant"
+ },
+ {
+  "query": "environment configuration settings",
+  "memory": "environment-configuration-settings",
+  "label": "relevant"
+ },
+ {
+  "query": "extraction prompt guardrail",
+  "memory": "Extraction Prompt Guardrail",
+  "label": "relevant"
+ },
+ {
+  "query": "handoff injection mechanism",
+  "memory": "Handoff injection mechanism",
+  "label": "relevant"
+ },
+ {
+  "query": "heuristic fallback hardening",
+  "memory": "Heuristic Fallback Hardening",
+  "label": "relevant"
+ },
+ {
+  "query": "hooks pin interpreter usr local bin",
+  "memory": "Hooks pin interpreter /usr/local/bin/python3 for cross-machine",
+  "label": "relevant"
+ },
+ {
+  "query": "local folder stays engram despite foldcrumbs",
+  "memory": "Local folder stays 'engram' despite foldcrumbs rename",
+  "label": "relevant"
+ },
+ {
+  "query": "memory sanitization strategy",
+  "memory": "Memory Sanitization Strategy",
+  "label": "relevant"
+ },
+ {
+  "query": "model naming convention",
+  "memory": "Model ID Naming Convention",
+  "label": "relevant"
+ },
+ {
+  "query": "project renamed engram foldcrumbs 2026 pypi",
+  "memory": "Project renamed engram - foldcrumbs (v0.3.0, 2026-07-06). PyPI/GitHub/CLI/impor",
+  "label": "relevant"
+ },
+ {
+  "query": "syncthing syncs claude engram per machine",
+  "memory": "Syncthing syncs ~/.claude; ~/.engram is per-machine",
+  "label": "relevant"
+ },
+ {
+  "query": "llm model mismatch",
+  "memory": "llm-model-id-mismatch",
+  "label": "relevant"
+ },
+ {
+  "query": "all imac claude instances migrated foldcrumbs",
+  "memory": "All 4 iMac Claude instances migrated to foldcrumbs hooks",
+  "label": "relevant"
+ },
+ {
+  "query": "now gates ruff lint",
+  "memory": "CI now gates on ruff lint",
+  "label": "relevant"
+ },
+ {
+  "query": "engram backend state engram shared across",
+  "memory": "engram backend state in ~/.engram is shared across instances",
+  "label": "relevant"
+ },
+ {
+  "query": "engram cli commands",
+  "memory": "Engram CLI commands",
+  "label": "relevant"
+ },
+ {
+  "query": "engram derives trust decay hooks memanto",
+  "memory": "Engram derives trust/decay + hooks from memanto (MIT)",
+  "label": "relevant"
+ },
+ {
+  "query": "engram hook interpreter usr local bin",
+  "memory": "Engram hook interpreter is /usr/local/bin/python3",
+  "label": "relevant"
+ },
+ {
+  "query": "engram hooks load session start",
+  "memory": "engram hooks load at session start",
+  "label": "relevant"
+ },
+ {
+  "query": "engram memory persistence",
+  "memory": "Engram Memory Persistence",
+  "label": "relevant"
+ },
+ {
+  "query": "engram memory store per project keyed",
+  "memory": "Engram memory store is per-project (keyed by cwd)",
+  "label": "relevant"
+ },
+ {
+  "query": "engram project status",
+  "memory": "Engram project status",
+  "label": "relevant"
+ },
+ {
+  "query": "engram repo github com vcnngr engram",
+  "memory": "Engram repo is github.com/vcnngr/engram",
+  "label": "relevant"
+ },
+ {
+  "query": "foldcrumbs published pypi installable",
+  "memory": "foldcrumbs published to PyPI, installable",
+  "label": "relevant"
+ },
+ {
+  "query": "github repo renamed vcnngr foldcrumbs",
+  "memory": "GitHub repo renamed to vcnngr/foldcrumbs",
+  "label": "relevant"
+ },
+ {
+  "query": "imac27 live address macbook imac ssh",
+  "memory": "iMac27 live address; macbook/imac SSH aliases stale",
+  "label": "relevant"
+ },
+ {
+  "query": "llm server model ids",
+  "memory": "LLM Server Model IDs",
+  "label": "relevant"
+ },
+ {
+  "query": "local llm server port 8081",
+  "memory": "Local LLM server on port 8081",
+  "label": "relevant"
+ },
+ {
+  "query": "macbook also runs claude instances",
+  "memory": "MacBook also runs 4 Claude instances",
+  "label": "relevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Old vcnngr/engram GitHub URL 301-redirects to foldcrumbs",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "One editable engram install serves all instances",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Only ~/.claude is Syncthing-synced",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Only ~/.claude is Syncthing-synced, not work/peo/3sez",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Per-instance memory, shared ~/.engram backend",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Reddit handle vcnngr matches GitHub",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Reddit launch drafts file",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "Reinstalling hooks affects all synced machines",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "State dir migrated to ~/.foldcrumbs",
+  "label": "irrelevant"
+ },
+ {
+  "query": "automatic memory distillation trigger",
+  "memory": "ALL API KEYS.env plaintext live keys is a liability",
+  "label": "irrelevant"
+ }
+]
