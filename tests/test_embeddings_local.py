@@ -255,6 +255,129 @@ class TestRT81P0Regressions(unittest.TestCase):
                              f"half-bundle residue left behind: {residue}")
 
 
+class TestRT81R2Regressions(unittest.TestCase):
+    """RT t_21382202 r2: the state-dir OSError P0 (end-to-end through
+    embeddings.embed, not just _runtime_error) and the second-rename
+    rollback P1."""
+
+    def test_p0_state_oserror_degrades_through_embed(self):
+        # Reviewer's PoC as a regression: files present, _sha256 raising
+        # OSError('state I/O failed') — embed() must return None (lexical
+        # fallback), NEVER propagate the OSError.
+        from foldcrumbs import config as cfg, embeddings as emb
+
+        saved = {k: os.environ.get(k) for k in
+                 ("FOLDCRUMBS_SEMANTIC", "FOLDCRUMBS_EMBEDDING_MODEL",
+                  "FOLDCRUMBS_EMBEDDING_ENDPOINT")}
+        try:
+            os.environ["FOLDCRUMBS_SEMANTIC"] = "1"
+            os.environ["FOLDCRUMBS_EMBEDDING_MODEL"] = "m"
+            os.environ["FOLDCRUMBS_EMBEDDING_ENDPOINT"] = "http://127.0.0.1:1"
+            importlib.reload(cfg)
+            importlib.reload(emb)
+            emb._discovery_reset()
+
+            def boom(path):
+                raise OSError("state I/O failed")
+
+            # Faithful to the reviewer's PoC: files PRESENT (exists() True),
+            # the I/O failure happens inside _sha256 — the exact path an
+            # unguarded installed() would propagate.
+            import tempfile
+            with tempfile.TemporaryDirectory() as d:
+                present = Path(d) / "present.bin"
+                present.write_bytes(b"x")
+                with mock.patch.object(embeddings_local, "_model_path",
+                                       return_value=present), \
+                     mock.patch.object(embeddings_local, "_vocab_path",
+                                       return_value=present), \
+                     mock.patch.object(embeddings_local, "_sha256", boom), \
+                     mock.patch.object(embeddings_local, "_runtime_error",
+                                       return_value=None), \
+                     mock.patch.object(emb, "_post", lambda t, u=None: None):
+                    self.assertFalse(embeddings_local.installed())
+                    self.assertFalse(embeddings_local.available())
+                    got = emb.embed(["x"])      # must NOT raise
+            self.assertIsNone(got)              # honest lexical fallback
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            importlib.reload(cfg)
+            importlib.reload(emb)
+            emb._discovery_reset()
+
+    def test_p0_status_total_on_broken_state(self):
+        def boom(path):
+            raise OSError("state I/O failed")
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            present = Path(d) / "present.bin"
+            present.write_bytes(b"x")
+            with mock.patch.object(embeddings_local, "_model_path",
+                                   return_value=present), \
+                 mock.patch.object(embeddings_local, "_vocab_path",
+                                   return_value=present), \
+                 mock.patch.object(embeddings_local, "_sha256", boom):
+                st = embeddings_local.status()  # must NOT raise
+        self.assertFalse(st["available"])
+        self.assertFalse(st["installed"])
+
+    def test_p1_second_rename_failure_rolls_back_committed(self):
+        # Both downloads verify, first os.replace commits, second raises:
+        # the committed model file must be rolled back (no half bundle).
+        import hashlib
+        import tempfile
+        good = b"M" * 32
+        sha = hashlib.sha256(good).hexdigest()
+
+        class Resp:
+            def __init__(self, data):
+                self._d = data
+            def read(self, n):
+                d, self._d = self._d, b""
+                return d
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        calls = {"n": 0}
+        real_replace = os.replace
+
+        def flaky_replace(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk died mid-commit")
+            return real_replace(src, dst)
+
+        with tempfile.TemporaryDirectory() as d:
+            bundle = Path(d) / "bundled"
+            with mock.patch.object(embeddings_local, "_runtime_error",
+                                   return_value=None), \
+                 mock.patch.object(embeddings_local, "installed",
+                                   return_value=False), \
+                 mock.patch.object(embeddings_local, "_bundle_dir",
+                                   return_value=bundle), \
+                 mock.patch.object(embeddings_local, "MODEL_SHA256", sha), \
+                 mock.patch.object(embeddings_local, "MODEL_BYTES", len(good)), \
+                 mock.patch.object(embeddings_local, "VOCAB_SHA256", sha), \
+                 mock.patch.object(embeddings_local, "VOCAB_BYTES", len(good)), \
+                 mock.patch("urllib.request.urlopen",
+                            lambda req, timeout=None: Resp(good)), \
+                 mock.patch.object(embeddings_local.os, "replace",
+                                   flaky_replace):
+                ok = embeddings_local.setup(verbose=False)
+            self.assertFalse(ok)
+            residue = [f.name for f in bundle.iterdir()] if bundle.exists() else []
+            self.assertEqual(
+                residue, [],
+                f"committed model must be rolled back after 2nd rename "
+                f"fails; residue={residue}")
+
+
 class TestCacheBasis(unittest.TestCase):
     def test_basis_is_pinned_to_revision(self):
         basis = embeddings_local.cache_basis()

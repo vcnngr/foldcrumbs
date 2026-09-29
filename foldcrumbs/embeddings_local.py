@@ -70,31 +70,64 @@ def _runtime_error() -> str | None:
 
 
 def installed() -> bool:
-    """True when the pinned model + vocab are present with correct hashes."""
-    if not _model_path().exists() or not _vocab_path().exists():
+    """True when the pinned model + vocab are present with correct hashes.
+
+    TOTAL on I/O errors (RT PR #81 r2 P0): a state dir that became
+    unreadable mid-flight (dying disk, permissions, torn file) must
+    degrade to "not installed" — never propagate an OSError into recall.
+    """
+    try:
+        if not _model_path().exists() or not _vocab_path().exists():
+            return False
+        return (_sha256(_model_path()) == MODEL_SHA256
+                and _sha256(_vocab_path()) == VOCAB_SHA256)
+    except OSError:
         return False
-    return (_sha256(_model_path()) == MODEL_SHA256
-            and _sha256(_vocab_path()) == VOCAB_SHA256)
 
 
 def available() -> bool:
-    """True when the bundled channel can actually embed right now."""
-    return _runtime_error() is None and installed()
+    """True when the bundled channel can actually embed right now.
+
+    Total as well: any unexpected error here means "not available",
+    because the caller (recall) must never see an exception from an
+    OPTIONAL channel.
+    """
+    try:
+        return _runtime_error() is None and installed()
+    except Exception:  # noqa: BLE001 — fail-soft by contract (module doc)
+        return False
 
 
 def status() -> dict:
-    """Machine-readable state for `foldcrumbs embeddings status`."""
+    """Machine-readable state for `foldcrumbs embeddings status`.
+
+    Total on I/O errors like installed(): a status command on a broken
+    state dir reports the damage, it does not traceback.
+    """
+    def _ok(path, expected) -> bool:
+        try:
+            return path.exists() and _sha256(path) == expected
+        except OSError:
+            return False
+
+    def _present(path) -> bool:
+        try:
+            return path.exists()
+        except OSError:
+            return False
+
+    model_ok = _ok(_model_path(), MODEL_SHA256)
+    vocab_ok = _ok(_vocab_path(), VOCAB_SHA256)
+    runtime = _runtime_error()
     return {
-        "runtime": _runtime_error() or "onnxruntime ok",
+        "runtime": runtime or "onnxruntime ok",
         "model": str(_model_path()),
-        "model_present": _model_path().exists(),
-        "model_sha256_ok": (_model_path().exists()
-                            and _sha256(_model_path()) == MODEL_SHA256),
-        "vocab_present": _vocab_path().exists(),
-        "vocab_sha256_ok": (_vocab_path().exists()
-                            and _sha256(_vocab_path()) == VOCAB_SHA256),
-        "installed": installed(),
-        "available": available(),
+        "model_present": _present(_model_path()),
+        "model_sha256_ok": model_ok,
+        "vocab_present": _present(_vocab_path()),
+        "vocab_sha256_ok": vocab_ok,
+        "installed": model_ok and vocab_ok,
+        "available": runtime is None and model_ok and vocab_ok,
         "revision": MODEL_REV,
     }
 
@@ -131,6 +164,7 @@ def setup(verbose: bool = True) -> bool:
               f"rev {MODEL_REV[:8]}) …")
     bundle = _bundle_dir()
     staged: list[tuple] = []     # (tmp_path, final_path)
+    committed: list = []         # finals already renamed — rollback set
     try:
         bundle.mkdir(parents=True, exist_ok=True)
         for fname, url, sha, size in (
@@ -142,6 +176,7 @@ def setup(verbose: bool = True) -> bool:
             staged.append((tmp, bundle / fname))
         for tmp, dest in staged:         # both verified — commit together
             os.replace(tmp, dest)
+            committed.append(dest)       # track for rollback (RT r2 P1)
         staged.clear()
     except Exception as e:  # noqa: BLE001 — user-facing, never a traceback
         if verbose:
@@ -149,6 +184,11 @@ def setup(verbose: bool = True) -> bool:
         for tmp, _ in staged:
             try:
                 os.unlink(tmp)
+            except OSError:
+                pass
+        for dest in committed:           # a half-committed pair is no pair
+            try:
+                dest.unlink()
             except OSError:
                 pass
         return False

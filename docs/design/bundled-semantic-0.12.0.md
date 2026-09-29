@@ -42,8 +42,9 @@ vive in un modulo separato con import guardato.
 3. `foldcrumbs embeddings setup|status|remove` (nuovo sottocomando CLI):
    - setup: runtime check PRIMA di ogni altra cosa; scarica model_quantized
      + vocab.txt da HF (URL pinnati + SHA256 + size attesi nel codice) in
-     staging .part, verifica ENTRAMBI, poi commit atomico della coppia
-     (transazionale: un file cattivo = rollback completo, nessun residuo).
+     staging .part, verifica ENTRAMBI, poi commit della coppia con rename
+     sequenziali E rollback dei file già committati se una rename fallisce
+     (transazionale di fatto: nessun mezzo bundle resta su disco).
      Salva nella STATE dir (machine-local, non nello store sincronizzato).
      [self-test end-to-end e marker di config: NON implementati — il marker
      è la presenza verificata dei file stessi; il self-test vive nel CI job

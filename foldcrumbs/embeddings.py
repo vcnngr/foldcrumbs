@@ -353,26 +353,31 @@ def _bundled_basis() -> str | None:
     """The bundle's cache basis, or None when it cannot serve right now.
 
     Cheap and side-effect-free: an availability check, never a model load.
-    Import is guarded so a machine without the extra pays nothing.
+    Import is guarded so a machine without the extra pays nothing; ANY
+    error (import-time OSError from a broken native lib included) degrades
+    to None → lexical. An optional channel must never break recall.
     """
     try:
         from . import embeddings_local
-    except ImportError:
+        if not embeddings_local.available():
+            return None
+        return embeddings_local.cache_basis()
+    except Exception:  # noqa: BLE001 — fail-soft by contract
         return None
-    return embeddings_local.cache_basis() if embeddings_local.available() else None
 
 
 def _embed_bundled(texts: list[str]) -> list[list[float]] | None:
     """The optional bundled model (foldcrumbs[semantic]) as channel 3.
 
     Import is local and guarded: a machine without the extra never loads
-    the module's heavy parts. Any failure is an honest None → lexical.
+    the module's heavy parts. ANY failure (import, availability, inference,
+    I/O) is an honest None → lexical. An optional channel never raises.
     """
     try:
         from . import embeddings_local
-    except ImportError:
+        return embeddings_local.embed(texts)
+    except Exception:  # noqa: BLE001 — fail-soft by contract
         return None
-    return embeddings_local.embed(texts)
 
 
 def cosine(a: list[float], b: list[float]) -> float:
