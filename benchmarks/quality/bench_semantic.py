@@ -23,7 +23,7 @@ os.environ.setdefault("FOLDCRUMBS_STATE_DIR", "/tmp/fc_sem_state")
 # can mask the test by importing/writing a different one.
 REPO = str(Path(__file__).resolve().parents[2])
 sys.path.insert(0, REPO)
-from foldcrumbs import config, embeddings_local, recalls, store  # noqa: E402
+from foldcrumbs import config, embeddings, embeddings_local, recalls, store  # noqa: E402
 
 assert embeddings_local.available(), embeddings_local.status()
 
@@ -34,6 +34,24 @@ assert embeddings_local.available(), embeddings_local.status()
 # neutralize both, then prove byte-equality at the end.
 recalls.reinforce = lambda *a, **k: None  # noqa: E731
 recalls.counts = lambda *a, **k: {}  # noqa: E731
+
+# HERMETIC ENV (RT t_316f39c7 P0): with a real FOLDCRUMBS_STATE_DIR the
+# search ALSO scans federation roots (~/.foldcrumbs/roots/*.json) on
+# time-bounded threads it stops waiting for → foreign duplicates enter the
+# top-5 NONDETERMINISTICALLY (host/cache dependent: same command, same
+# minute, gave 6/6 then 7/6 on 2026-10-02). This benchmark measures the
+# two channels over ONE store: federation is host state, out of scope.
+# Third neutralization alongside reinforce+counts.
+store.iter_federated = lambda *a, **k: iter(())  # noqa: E731
+# Fourth neutralization (RT t_2ce01083 P0-1): the semantic embedding CACHE
+# lives in the state dir (embeddings._cache_path) and stale vectors from an
+# older basis changed one frontier rank (host S-rank 2 vs clean-cache 3).
+# Neutralizing load/save forces fresh computation on every run — the ranks
+# then depend only on the store's markdown + the pinned model, on ANY host.
+embeddings._load_cache = lambda: {}  # noqa: E731
+embeddings._save_cache = lambda *a, **k: None  # noqa: E731
+
+
 
 QDIR = os.path.join(REPO, "benchmarks/quality")
 STORE = os.environ["FOLDCRUMBS_DIR"]
@@ -76,14 +94,19 @@ def main():
     before = _snapshot()
     print(f"{'set':28} {'lessicale':>16} {'bundled-sem':>16}  FP(lex/sem)")
     print("-" * 78)
-    for name in ("golden.json", "paraphrase_golden.json"):
+    for name in ("golden.json", "paraphrase_golden.json", "hard_negatives_golden.json"):
         path = os.path.join(QDIR, name)
         if not os.path.exists(path):
             print(f"{name}: ASSENTE")
             continue
         npos, nneg, lh, sh, lfp, sfp = run(path)
-        print(f"{name:28} {lh:>3}/{npos:<3} ({100*lh//npos:>3}%)   "
-              f"{sh:>3}/{npos:<3} ({100*sh//npos:>3}%)   {lfp}/{sfp} su {nneg} neg")
+        if npos == 0:
+            # negatives-only set (hard negatives): the ONLY signal is the FP
+            # rate near the decision frontier — no positives to report.
+            print(f"{name:28} {'—':>16} {'—':>16}   {lfp}/{sfp} su {nneg} neg")
+        else:
+            print(f"{name:28} {lh:>3}/{npos:<3} ({100*lh//npos:>3}%)   "
+                  f"{sh:>3}/{npos:<3} ({100*sh//npos:>3}%)   {lfp}/{sfp} su {nneg} neg")
     after = _snapshot()
     if after != before:
         changed = sorted(k for k in set(before) | set(after)

@@ -11,6 +11,64 @@ every run), on an Intel Xeon W-2140B (macOS, Python 3.12, onnxruntime
 |---|---|---|---|
 | `golden.json` (title-derived queries — **favours lexical**, declared) | 40/40 (100%) | 40/40 (100%) | 0 / 0 on 10 negatives (10 distinct queries) |
 | `paraphrase_golden.json` (low-overlap paraphrases, verified pair-by-pair) | 7/10 (70%) | **10/10 (100%)** | 0 / 0 on 10 negatives |
+| `hard_negatives_golden.json` (near-miss memories, empirically selected — see below) | — | — | **7 / 6 on 7 negatives** |
+
+## Hard negatives (added 2026-10-02 — closes the r2-P1 backlog item)
+
+The 0/0 FP rows above are bounded by EASY negatives (clearly-unrelated
+memories). `hard_negatives_golden.json` measures the false-positive rate
+NEAR the decision frontier: each negative is a memory that shares the
+topic/vocabulary of the query but answers a DIFFERENT question, selected
+**empirically** — `probe_hard_negatives.py` ran both channels over 12
+queries against the real store and only memories actually ranked high
+(lexical rank 1-7 in top-10) were admitted as candidates; labels were then
+audited pair-by-pair against the full memory content (same discipline as
+the paraphrase set).
+
+**Result (hermetic run, `verify_hard_negatives.py`-checked — see
+Reproducibility note below): lexical serves 7/7 hard negatives in top-5,
+semantic 6/7.** Per-pair ranks (`detail_hard_negatives.py`):
+lexical 1,1,2,2,3,3,4; semantic 1,1,1,2,3,3,− (the last pair —
+"Reinstalling hooks affects all synced machines" — is a lexical FP at
+rank 4 that the semantic channel does NOT serve).
+
+**Honest reading — this is the benchmark doing its job:**
+- The semantic channel's value is RECALL on paraphrases (70%→100%). At
+  the frontier it is only MARGINALLY better on this set (misses 1 of 7
+  near-misses the lexical channel serves) — n=7, directional, not a
+  precision claim. Both channels overwhelmingly confuse
+  topically-adjacent memories ("context budget" vs "context MONITORING";
+  store shared "between projects" vs "between INSTANCES").
+- No claim of "zero false positives" may be made outside the easy-negative
+  sets. Near the frontier the measured FP rate is 100% (7/7) lexical,
+  ~86% (6/7) semantic.
+- Mitigations are structural, not ranking: served memories carry their
+  title+type so the agent can see WHAT answered, and the AGENTS.md loop
+  tells it to verify against source. A relevance-threshold or a
+  cross-encoder reranker would be the ranking-level fix — both out of
+  scope for the stdlib core / opt-in bundle and left as declared backlog.
+
+**Reproducibility note (RT t_316f39c7 P0, closed):** the first version of
+these numbers was measured WITHOUT neutralizing federation — with a real
+`FOLDCRUMBS_STATE_DIR`, `store.search` also scans the host's registered
+federation roots on time-bounded threads it stops waiting for, so foreign
+duplicate records entered the top-5 nondeterministically (same command,
+same minute: 6/6 then 7/6 on 2026-10-02). All three scripts now
+neutralize `store.iter_federated` alongside `reinforce`/`counts` — the
+benchmark measures the two channels over ONE store; federation is
+host-local state, out of scope by construction. RT r2 found a SECOND host
+dependency: the semantic embedding CACHE in the state dir — stale vectors
+from an older basis shifted one frontier rank (host 2 vs clean-cache 3).
+All four scripts now also neutralize `embeddings._load_cache`/`_save_cache`
+(fresh computation every run), so the frozen ranks depend only on the
+store's markdown + the pinned model revision, on ANY host/state-dir. `verify_hard_negatives.py`
+recomputes the ranks/FP counts and fails if RESULTS.md or the JSON drift
+from live output — the divergence that made r1 RED is now machine-checked.
+- Borderline labels declared: "Per-instance memory, shared ~/.engram
+  backend" gives an agent PARTIAL information for "is the store shared
+  between projects" (it answers the instance axis, not the project axis).
+  Labelled irrelevant because the specific question (cwd keying) is
+  answered by a different memory that both channels also serve.
 
 The 3 semantic rescues were inspected one by one (counter-proof script):
 "remember across sessions"→*Memory Persistence*, "organized into
@@ -39,6 +97,21 @@ channel stays opt-in and these numbers bound what we say about it.
   neutralized before the first search: `reinforce` (the write → read-only)
   AND `counts` (the host-local read → reproducible on any machine
   regardless of its `.recalls.json` sidecar).
+- `hard_negatives_golden.json` is empirically selected: `probe_hard_negatives.py`
+  dumps both channels' top-10 for 12 targeted queries (read-only, same
+  neutralization); candidates were admitted only if a channel ranked them
+  high, then each label was audited against the full memory content (RT
+  audit: all 7 labels defensible, borderline included). The file records
+  BOTH channels' live ranks and the `why` per pair.
+  `detail_hard_negatives.py` re-runs the per-pair ranks (regression tool);
+  `verify_hard_negatives.py` is the divergence guard: it recomputes ranks +
+  FP counts from the store and fails (exit 1) if the JSON or RESULTS.md
+  drift from live output (mutation-checked: tampering a rank trips it).
+- ALL THREE hard-negative scripts are hermetic: besides `reinforce` and
+  `counts`, they neutralize `store.iter_federated`. Without that, a real
+  state dir lets federation roots contribute foreign duplicates
+  nondeterministically (time-bounded scan threads) — the exact failure
+  that made RT r1 RED (6/6 vs 7/6 on the same minute).
 - `paraphrase_golden.json` is hand-written (declared) and was audited
   pair-by-pair against the real memory descriptions: every positive is a
   genuine answer to its query; every negative is genuinely unrelated.
@@ -86,7 +159,11 @@ channel stays opt-in and these numbers bound what we say about it.
   test but a WEAK measure of the false-positive rate near the decision
   frontier. The 0/0 FP claim is therefore bounded by easy negatives.
   Follow-up: hard negatives (near-miss memories the lexical channel ranks
-  high but that answer a different question).
+  high but that answer a different question). — **CLOSED 2026-10-02**
+  (r2: after RT found the first measurement was federation-polluted and
+  the docs diverged from live output; scripts hermetic + guard added):
+  `hard_negatives_golden.json`; frontier FP measured **7/7 lexical, 6/7
+  semantic**; see the Hard negatives section above.
 
 ## Known limits (declared, not hidden)
 
@@ -105,7 +182,14 @@ channel stays opt-in and these numbers bound what we say about it.
 ```bash
 pip install 'foldcrumbs[semantic]' && foldcrumbs embeddings setup
 FOLDCRUMBS_DIR=<your store> python benchmarks/quality/bench_semantic.py
+# hard-negatives artefacts must match live output on THIS store:
+FOLDCRUMBS_DIR=<your store> python benchmarks/quality/verify_hard_negatives.py
 ```
+
+NOTE: `hard_negatives_golden.json` and its RESULTS numbers are
+store-specific (the owner's real store, 2026-10-02 snapshot). On a
+different store the verify guard will (correctly) report divergence —
+regenerate the set with `probe_hard_negatives.py` + label audit there.
 
 `golden.json` is store-specific; the paraphrase set references its
 titles. Both files are committed as the frozen 2026-09-29 snapshot these
