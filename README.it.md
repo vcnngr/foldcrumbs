@@ -26,6 +26,8 @@ STORE     file markdown + indice MEMORY.md in
           ~/.claude/projects/<project>/memory/
 RECALL    Grep/Read dello stesso Claude Code (no LLM, no vector DB)
           + SessionStart inietta l'indice
+          + canale semantico opzionale (modello locale o endpoint
+          /v1/embeddings, off di default) fuso negli stessi risultati
 DISTILL   asincrono, solo LLM locale (MLX/Ollama/OpenRouter via env)
           a ~45% del contesto e a fine sessione → filtrato, deduplicato
 ANTI-ROT  monitor PostToolUse → checkpoint + promemoria (no compaction forzata)
@@ -36,9 +38,12 @@ FEDERATE  ogni istanza registrata pubblica uno shard di indice; ogni sessione ve
           anche la memoria delle altre, read-only, con i path annunciati per il grep
 ```
 
-Il motore di retrieval è l'agent stesso: fa grep sulla cartella quando è rilevante. L'LLM è usato
-**solo** per la distillazione asincrona — quindi il recall è istantaneo e non dipende mai da un
-modello attivo.
+Il motore di retrieval è l'agent stesso: fa grep sulla cartella quando è rilevante. Di base il
+recall è puramente lessicale — istantaneo, offline, nessun modello coinvolto; l'LLM è usato
+**solo** per la distillazione asincrona. Dalla 0.12.0 un canale semantico **opzionale** (modello
+ONNX locale incluso, server locale o qualsiasi endpoint OpenAI-compatibile `/v1/embeddings`) può
+essere fuso nel recall per le query parafrasate — sempre senza cloud di default, e il core resta
+solo-stdlib ([Recall semantico opzionale](#recall-semantico-opzionale-off-di-default)).
 
 La distillazione esegue anche un **passaggio di contraddizione**: quando una nuova memoria copre
 lo stesso argomento di una vecchia (una decisione ribaltata, una cosa "rinviata" che nel frattempo
