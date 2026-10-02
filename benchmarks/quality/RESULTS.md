@@ -28,7 +28,7 @@ the paraphrase set).
 **Result (hermetic run, `verify_hard_negatives.py`-checked — see
 Reproducibility note below): lexical serves 7/7 hard negatives in top-5,
 semantic 6/7.** Per-pair ranks (`detail_hard_negatives.py`):
-lexical 1,1,2,2,3,3,4; semantic 1,1,1,2,2,3,− (the last pair —
+lexical 1,1,2,2,3,3,4; semantic 1,1,1,2,3,3,− (the last pair —
 "Reinstalling hooks affects all synced machines" — is a lexical FP at
 rank 4 that the semantic channel does NOT serve).
 
@@ -56,7 +56,12 @@ duplicate records entered the top-5 nondeterministically (same command,
 same minute: 6/6 then 7/6 on 2026-10-02). All three scripts now
 neutralize `store.iter_federated` alongside `reinforce`/`counts` — the
 benchmark measures the two channels over ONE store; federation is
-host-local state, out of scope by construction. `verify_hard_negatives.py`
+host-local state, out of scope by construction. RT r2 found a SECOND host
+dependency: the semantic embedding CACHE in the state dir — stale vectors
+from an older basis shifted one frontier rank (host 2 vs clean-cache 3).
+All four scripts now also neutralize `embeddings._load_cache`/`_save_cache`
+(fresh computation every run), so the frozen ranks depend only on the
+store's markdown + the pinned model revision, on ANY host/state-dir. `verify_hard_negatives.py`
 recomputes the ranks/FP counts and fails if RESULTS.md or the JSON drift
 from live output — the divergence that made r1 RED is now machine-checked.
 - Borderline labels declared: "Per-instance memory, shared ~/.engram

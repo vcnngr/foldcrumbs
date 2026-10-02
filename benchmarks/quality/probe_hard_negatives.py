@@ -19,7 +19,7 @@ os.environ.setdefault("FOLDCRUMBS_STATE_DIR", "/tmp/fc_hn_state")
 
 REPO = str(Path(__file__).resolve().parents[2])
 sys.path.insert(0, REPO)
-from foldcrumbs import config, embeddings_local, recalls, store  # noqa: E402
+from foldcrumbs import config, embeddings, embeddings_local, recalls, store  # noqa: E402
 
 assert embeddings_local.available(), embeddings_local.status()
 recalls.reinforce = lambda *a, **k: None  # noqa: E731
@@ -33,6 +33,14 @@ recalls.counts = lambda *a, **k: {}  # noqa: E731
 # two channels over ONE store: federation is host state, out of scope.
 # Third neutralization alongside reinforce+counts.
 store.iter_federated = lambda *a, **k: iter(())  # noqa: E731
+# Fourth neutralization (RT t_2ce01083 P0-1): the semantic embedding CACHE
+# lives in the state dir (embeddings._cache_path) and stale vectors from an
+# older basis changed one frontier rank (host S-rank 2 vs clean-cache 3).
+# Neutralizing load/save forces fresh computation on every run — the ranks
+# then depend only on the store's markdown + the pinned model, on ANY host.
+embeddings._load_cache = lambda: {}  # noqa: E731
+embeddings._save_cache = lambda *a, **k: None  # noqa: E731
+
 
 
 STORE = os.environ["FOLDCRUMBS_DIR"]
