@@ -76,14 +76,19 @@ def main():
     before = _snapshot()
     print(f"{'set':28} {'lessicale':>16} {'bundled-sem':>16}  FP(lex/sem)")
     print("-" * 78)
-    for name in ("golden.json", "paraphrase_golden.json"):
+    for name in ("golden.json", "paraphrase_golden.json", "hard_negatives_golden.json"):
         path = os.path.join(QDIR, name)
         if not os.path.exists(path):
             print(f"{name}: ASSENTE")
             continue
         npos, nneg, lh, sh, lfp, sfp = run(path)
-        print(f"{name:28} {lh:>3}/{npos:<3} ({100*lh//npos:>3}%)   "
-              f"{sh:>3}/{npos:<3} ({100*sh//npos:>3}%)   {lfp}/{sfp} su {nneg} neg")
+        if npos == 0:
+            # negatives-only set (hard negatives): the ONLY signal is the FP
+            # rate near the decision frontier — no positives to report.
+            print(f"{name:28} {'—':>16} {'—':>16}   {lfp}/{sfp} su {nneg} neg")
+        else:
+            print(f"{name:28} {lh:>3}/{npos:<3} ({100*lh//npos:>3}%)   "
+                  f"{sh:>3}/{npos:<3} ({100*sh//npos:>3}%)   {lfp}/{sfp} su {nneg} neg")
     after = _snapshot()
     if after != before:
         changed = sorted(k for k in set(before) | set(after)

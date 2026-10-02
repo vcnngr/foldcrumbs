@@ -11,6 +11,42 @@ every run), on an Intel Xeon W-2140B (macOS, Python 3.12, onnxruntime
 |---|---|---|---|
 | `golden.json` (title-derived queries — **favours lexical**, declared) | 40/40 (100%) | 40/40 (100%) | 0 / 0 on 10 negatives (10 distinct queries) |
 | `paraphrase_golden.json` (low-overlap paraphrases, verified pair-by-pair) | 7/10 (70%) | **10/10 (100%)** | 0 / 0 on 10 negatives |
+| `hard_negatives_golden.json` (near-miss memories, empirically selected — see below) | — | — | **6 / 6 on 7 negatives** |
+
+## Hard negatives (added 2026-10-02 — closes the r2-P1 backlog item)
+
+The 0/0 FP rows above are bounded by EASY negatives (clearly-unrelated
+memories). `hard_negatives_golden.json` measures the false-positive rate
+NEAR the decision frontier: each negative is a memory that shares the
+topic/vocabulary of the query but answers a DIFFERENT question, selected
+**empirically** — `probe_hard_negatives.py` ran both channels over 12
+queries against the real store and only memories actually ranked high
+(lexical rank 1-7 in top-10) were admitted as candidates; labels were then
+audited pair-by-pair against the full memory content (same discipline as
+the paraphrase set).
+
+**Result: 6/7 hard negatives are served in top-5 by BOTH channels**
+(per-pair ranks in `detail_hard_negatives.py` output: lexical
+1,1,3,3,5,5; semantic 1,1,1,3,3,5). The 7th falls out of top-5 for both.
+
+**Honest reading — this is the benchmark doing its job:**
+- The semantic channel's value is RECALL on paraphrases (70%→100%), not
+  precision at the frontier: on near-misses it is no better than lexical
+  (and promoted one wrong memory from rank 3 to rank 1). Both channels
+  confuse topically-adjacent memories ("context budget" vs "context
+  MONITORING"; store shared "between projects" vs "between INSTANCES").
+- No claim of "zero false positives" may be made outside the easy-negative
+  sets. Near the frontier the measured FP rate is ~86% (6/7) for both.
+- Mitigations are structural, not ranking: served memories carry their
+  title+type so the agent can see WHAT answered, and the AGENTS.md loop
+  tells it to verify against source. A relevance-threshold or a
+  cross-encoder reranker would be the ranking-level fix — both out of
+  scope for the stdlib core / opt-in bundle and left as declared backlog.
+- Borderline labels declared: "Per-instance memory, shared ~/.engram
+  backend" gives an agent PARTIAL information for "is the store shared
+  between projects" (it answers the instance axis, not the project axis).
+  Labelled irrelevant because the specific question (cwd keying) is
+  answered by a different memory that both channels also serve.
 
 The 3 semantic rescues were inspected one by one (counter-proof script):
 "remember across sessions"→*Memory Persistence*, "organized into
@@ -39,6 +75,12 @@ channel stays opt-in and these numbers bound what we say about it.
   neutralized before the first search: `reinforce` (the write → read-only)
   AND `counts` (the host-local read → reproducible on any machine
   regardless of its `.recalls.json` sidecar).
+- `hard_negatives_golden.json` is empirically selected: `probe_hard_negatives.py`
+  dumps both channels' top-10 for 12 targeted queries (read-only, same
+  neutralization); candidates were admitted only if a channel ranked them
+  high, then each label was audited against the full memory content. The
+  file records the lexical rank at selection time and the `why` per pair.
+  `detail_hard_negatives.py` re-runs the per-pair ranks (regression tool).
 - `paraphrase_golden.json` is hand-written (declared) and was audited
   pair-by-pair against the real memory descriptions: every positive is a
   genuine answer to its query; every negative is genuinely unrelated.
@@ -86,7 +128,9 @@ channel stays opt-in and these numbers bound what we say about it.
   test but a WEAK measure of the false-positive rate near the decision
   frontier. The 0/0 FP claim is therefore bounded by easy negatives.
   Follow-up: hard negatives (near-miss memories the lexical channel ranks
-  high but that answer a different question).
+  high but that answer a different question). — **CLOSED 2026-10-02**:
+  `hard_negatives_golden.json` added; frontier FP measured 6/7 for both
+  channels; see the Hard negatives section above.
 
 ## Known limits (declared, not hidden)
 
