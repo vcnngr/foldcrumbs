@@ -26,6 +26,8 @@ STORE     markdown files + MEMORY.md index in
           ~/.claude/projects/<project>/memory/
 RECALL    Claude Code's own Grep/Read (no LLM, no vector DB)
           + SessionStart injects the index
+          + optional semantic channel (local model or /v1/embeddings
+          endpoint, off by default) fused into the same ranked results
 DISTILL   async, local LLM only (MLX/Ollama/OpenRouter via env)
           at ~45% context and at session end → gated, dedup'd
 ANTI-ROT  PostToolUse monitor → checkpoint + reminder (no forced compaction)
@@ -36,8 +38,12 @@ FEDERATE  every registered instance publishes an index shard; each session also
           sees the others' memory, read-only, paths announced for grep
 ```
 
-The retrieval engine is the agent itself: it greps the folder when relevant. The LLM is used
-**only** for async distillation — so recall is instant and never depends on a model being up.
+The retrieval engine is the agent itself: it greps the folder when relevant. Out of the box
+recall is purely lexical — instant, offline, no model involved; the LLM is used **only** for
+async distillation. Since 0.12.0 an **optional** semantic channel (bundled local ONNX model,
+a local server, or any OpenAI-compatible `/v1/embeddings` endpoint) can be fused into recall
+for paraphrase queries — still no cloud by default, and the core stays stdlib-only
+([Optional semantic recall](#optional-semantic-recall-off-by-default)).
 
 Distillation also runs a **contradiction pass**: when a new memory covers the same subject as
 an old one (a reversed decision, a "deferred" thing that has since happened), the LLM is asked
