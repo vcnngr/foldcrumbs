@@ -25,6 +25,16 @@ assert embeddings_local.available(), embeddings_local.status()
 recalls.reinforce = lambda *a, **k: None  # noqa: E731
 recalls.counts = lambda *a, **k: {}  # noqa: E731
 
+# HERMETIC ENV (RT t_316f39c7 P0): with a real FOLDCRUMBS_STATE_DIR the
+# search ALSO scans federation roots (~/.foldcrumbs/roots/*.json) on
+# time-bounded threads it stops waiting for → foreign duplicates enter the
+# top-5 NONDETERMINISTICALLY (host/cache dependent: same command, same
+# minute, gave 6/6 then 7/6 on 2026-10-02). This benchmark measures the
+# two channels over ONE store: federation is host state, out of scope.
+# Third neutralization alongside reinforce+counts.
+store.iter_federated = lambda *a, **k: iter(())  # noqa: E731
+
+
 STORE = os.environ["FOLDCRUMBS_DIR"]
 
 
