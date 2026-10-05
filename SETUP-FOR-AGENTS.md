@@ -44,8 +44,10 @@ user's disk. Do not ask the user for credentials — there are none.
      `foldcrumbs profile import --agent hermes --apply`, then
      `foldcrumbs profile env <name>` prints the single env line the user
      must set for that agent.
-   - Other MCP clients: foldcrumbs ships a stdio MCP server (see README
-     §MCP server) with recall/remember/fetch/timeline/adopt tools.
+   - Other MCP clients: register the stdio command `foldcrumbs-mcp`
+     (equivalently `python3 -m foldcrumbs.mcp_server`) — stdlib-only, no MCP
+     SDK dependency. It exposes 11 tools (remember, recall, fetch, timeline,
+     answer, forget, graph_path, relate, ingest, adopt, outcome).
 5. On a TTY the installer asks how to run *distillation* (recall never uses
    an LLM). If you are non-interactive, pass `--backend claude-cli` (Claude
    subscription), `--backend codex`, `--backend openai`, or
