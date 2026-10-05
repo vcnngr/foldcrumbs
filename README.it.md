@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue.svg)](https://pypi.org/project/foldcrumbs/)
 [![Downloads](https://img.shields.io/pypi/dm/foldcrumbs.svg)](https://pypistats.org/packages/foldcrumbs)
 
-[English](README.md) · **Italiano** · [中文](README.zh.md)
+[English](README.md) · **Italiano** · [中文](README.zh.md) · [llms.txt](llms.txt) (indice per agenti)
 
 Memoria persistente cross-sessione per agent di coding — **basta rispiegare il progetto a ogni sessione: niente Docker, niente vector DB, nessun servizio esterno**.
 

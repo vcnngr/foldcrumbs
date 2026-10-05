@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue.svg)](https://pypi.org/project/foldcrumbs/)
 [![Downloads](https://img.shields.io/pypi/dm/foldcrumbs.svg)](https://pypistats.org/packages/foldcrumbs)
 
-**English** · [Italiano](README.it.md) · [中文](README.zh.md)
+**English** · [Italiano](README.it.md) · [中文](README.zh.md) · [llms.txt](llms.txt) (agent-facing index)
 
 Persistent cross-session memory for coding agents — **no more re-explaining your project every session, no Docker, no vector DB, no external service**.
 

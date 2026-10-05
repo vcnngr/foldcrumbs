@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue.svg)](https://pypi.org/project/foldcrumbs/)
 [![Downloads](https://img.shields.io/pypi/dm/foldcrumbs.svg)](https://pypistats.org/packages/foldcrumbs)
 
-[English](README.md) · [Italiano](README.it.md) · **中文**
+[English](README.md) · [Italiano](README.it.md) · **中文** · [llms.txt](llms.txt)（面向 agent 的索引）
 
 面向编码 agent 的跨会话持久记忆 — **不必每个会话重新解释你的项目：无需 Docker、无需向量数据库、无需外部服务**。
 
