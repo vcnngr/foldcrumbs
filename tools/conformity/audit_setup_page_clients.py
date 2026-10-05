@@ -61,26 +61,45 @@ mcp_bin = str(Path(FC).parent / "foldcrumbs-mcp")
 rc, out = run(f"ls {mcp_bin}")
 check("foldcrumbs-mcp entrypoint installed next to the CLI", rc == 0, out.strip()[:120])
 
-print("== pipx variant (page claim: foldcrumbs-mcp works; python3 -m does NOT) ==")
+print("== pipx variant (page claims: entrypoint runs BY NAME once PIPX_BIN_DIR is on PATH; python3 -m does NOT) ==")
 if shutil.which("pipx"):
     import tempfile
     px_home = Path(tempfile.mkdtemp(prefix="fc_pipx_audit_"))
-    penv = dict(env, PIPX_HOME=str(px_home / "pipx"), PIPX_BIN_DIR=str(px_home / "bin"))
+    bin_dir = px_home / "bin"
+    # PATH must keep the real one (pipx itself lives there) with the temp
+    # bin dir prepended; RT t_41b2c982: a stripped PATH made pipx unfindable.
+    penv = dict(env, PIPX_HOME=str(px_home / "pipx"), PIPX_BIN_DIR=str(bin_dir),
+                PATH=f"{bin_dir}{os.pathsep}{env.get('PATH', os.defpath)}")
     src = os.environ.get("FC_SRC", ".")
     r = subprocess.run(f"pipx install --backend pip {src}", shell=True, capture_output=True,
                        text=True, env=penv, timeout=300)
+    # RT t_41b2c982 P0-1: with pipx present, a failed install is a FAIL, never a skip.
+    check("pipx install succeeds", r.returncode == 0, (r.stdout + r.stderr)[:200])
     if r.returncode == 0:
-        fc_pipx = px_home / "bin/foldcrumbs-mcp"
-        r2 = subprocess.run(f"{fc_pipx} </dev/null", shell=True, capture_output=True,
+        # RT t_41b2c982 P0-2: resolve BY NAME in a controlled PATH (not absolute
+        # path, which would dodge the on-PATH claim under test).
+        r2 = subprocess.run("foldcrumbs-mcp </dev/null", shell=True, capture_output=True,
                             text=True, env=penv, timeout=60)
-        check("pipx: foldcrumbs-mcp entrypoint runs", r2.returncode == 0, r2.stderr[:120])
-        r3 = subprocess.run("/usr/bin/env python3 -m foldcrumbs.mcp_server </dev/null",
+        check("pipx: `foldcrumbs-mcp` resolves BY NAME with PIPX_BIN_DIR on PATH",
+              r2.returncode == 0, (r2.stderr or "")[:140])
+        # And the negative control: with NO directory on PATH containing a
+        # foldcrumbs-mcp binary, the by-name lookup must fail (this is why the
+        # page must mention pipx ensurepath). Strip every PATH dir that holds
+        # the binary — a system-wide pip install would otherwise mask the
+        # lookup (caught on the maintainer's iMac: /Library/.../bin has one).
+        kept = [d for d in env.get("PATH", "").split(os.pathsep)
+                if d and not (Path(d) / "foldcrumbs-mcp").exists()
+                and d != str(bin_dir)]
+        penv_nopath = dict(penv, PATH=os.pathsep.join(kept))
+        r2b = subprocess.run("foldcrumbs-mcp </dev/null", shell=True, capture_output=True,
+                             text=True, env=penv_nopath, timeout=60)
+        check("pipx: by-name lookup FAILS without PIPX_BIN_DIR on PATH (page must say ensurepath)",
+              r2b.returncode != 0, f"rc={r2b.returncode}")
+        r3 = subprocess.run("python3 -m foldcrumbs.mcp_server </dev/null",
                             shell=True, capture_output=True, text=True,
                             cwd="/tmp", env=penv, timeout=60)
         check("pipx: system `python3 -m foldcrumbs.mcp_server` FAILS (page says do not register it)",
               r3.returncode != 0, (r3.stderr or r3.stdout)[:120])
-    else:
-        check("pipx variant (skipped: pipx install failed)", True, r.stderr[:140])
     shutil.rmtree(px_home, ignore_errors=True)
 else:
     check("pipx variant (skipped: pipx not on PATH)", True)

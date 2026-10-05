@@ -749,7 +749,7 @@ MCP 客户端提供十一个工具 — `remember`、`recall`（完整或紧凑�
 `timeline`、`answer`、`forget`、`graph_path`、`relate`、`ingest`、`adopt` 和 `outcome`：
 
 ```bash
-foldcrumbs-mcp            # 控制台入口点 —— 安装后始终在 PATH 中
+foldcrumbs-mcp            # 随包安装的控制台入口点
 ```
 
 （`python3 -m foldcrumbs.mcp_server` 仅在安装 foldcrumbs 的那个解释器中有效 ——

@@ -32,6 +32,10 @@ none.
 2. Check Python: `python3 --version` must be ≥ 3.10. If a PEP 668
    externally-managed environment blocks `pip install`, use
    `pipx install foldcrumbs` or a venv — do not use `--break-system-packages`.
+   After a pipx install, `foldcrumbs`/`foldcrumbs-mcp` resolve by name only
+   if pipx's bin dir is on PATH: run `pipx ensurepath` (and open a NEW
+   shell) when the command is not found; until then use the absolute path
+   pipx printed (typically `~/.local/bin/foldcrumbs`).
 3. Install: `pip install foldcrumbs` (or `pipx`). The core is stdlib-only;
    the optional `[semantic]` extra (local ONNX embedding model support) is
    NOT needed for setup and must not be installed unless the user asks for

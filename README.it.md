@@ -835,7 +835,7 @@ che espone undici tool — `remember`, `recall` (modalità completa o indice com
 a qualsiasi client MCP:
 
 ```bash
-foldcrumbs-mcp            # entrypoint console — sempre nel PATH dopo l'install
+foldcrumbs-mcp            # entrypoint console installato col pacchetto
 ```
 
 (`python3 -m foldcrumbs.mcp_server` funziona solo con l'interprete in cui

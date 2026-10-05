@@ -819,7 +819,7 @@ eleven tools — `remember`, `recall` (full or compact index mode), `fetch`, `ti
 to any MCP client:
 
 ```bash
-foldcrumbs-mcp            # console entrypoint — always on PATH after install
+foldcrumbs-mcp            # console entrypoint installed with the package
 ```
 
 (`python3 -m foldcrumbs.mcp_server` works only with the interpreter
