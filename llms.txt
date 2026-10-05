@@ -1,0 +1,61 @@
+# foldcrumbs
+
+> Persistent cross-session memory for coding agents: a folder of typed markdown files,
+> no server, no database, no external service, no account. Lexical recall works fully
+> offline; optional semantic channel (bundled local ONNX model or any OpenAI-compatible
+> `/v1/embeddings` endpoint) is opt-in and never required. The files are the product —
+> grep, edit, and version them with your own tools. Python stdlib core (pip install
+> foldcrumbs), MIT.
+
+This index is for LLM agents and AI-assisted search. Human docs start at the README
+(English; Italiano: README.it.md, 中文: README.zh.md). Links are raw files in this
+repository (branch `main`).
+
+## Start here (agent-oriented)
+
+- [AGENTS.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/AGENTS.md):
+  What an agent must get right — store location, the recall/fetch/timeline retrieval
+  loop, visibility rules (archived/superseded/expired/contested/authorizations),
+  memory-writing conventions, federation etiquette. The single most important file.
+- [README.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/README.md):
+  Full documentation: install (incl. Claude Code hooks), env configuration, optional
+  semantic recall, bundled local model, dashboard, graph layer, CLI reference,
+  federation, adopt/outcome fleet learning, MCP server.
+- [Quick start (README §Quick start)](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/README.md):
+  `pip install foldcrumbs`, `foldcrumbs install`, then remember/recall/status.
+
+## Integrations
+
+- [docs/paperclip.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/docs/paperclip.md):
+  Paperclip memory-provider bridge — JSON ops (capabilities/ingest/query/get/browse/
+  forget/usage), scope mapping (company/agent/project), exit-code contract.
+- [paperclip-plugin-foldcrumbs](https://github.com/vcnngr/paperclip-plugin-foldcrumbs):
+  Installable Paperclip plugin (separate repo): recall/remember agent tools,
+  run-outcome auto-ingest, managed skill, multi-company safe.
+- [MCP server (README §MCP server)](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/README.md):
+  stdio MCP with recall/remember/fetch/timeline/adopt tools.
+
+## Quality evidence
+
+- [benchmarks/quality/RESULTS.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/benchmarks/quality/RESULTS.md):
+  Measured numbers with declared limits: golden set 40/40 both channels; paraphrase
+  lexical 7/10 → bundled-semantic 10/10 (FP 0/0); hard-negative frontier lexical 7/7,
+  semantic 6/7 (n=7, directional). Reproduction scripts included.
+- [CHANGELOG.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/CHANGELOG.md):
+  Version history with what shipped and why.
+
+## Design notes (deep dives)
+
+- [docs/design/local-semantic-0.12.0.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/docs/design/local-semantic-0.12.0.md):
+  Local semantic channel design — loopback-only discovery, channel-first fallback chain,
+  explicit endpoint always wins.
+- [docs/design/graph-layer.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/docs/design/graph-layer.md):
+  Relation graph: explicit predicates vs model-proposed edges, traversal ≠ authority.
+- [docs/design/fleet-learning.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/docs/design/fleet-learning.md):
+  adopt/outcome: learning across instances without a central service.
+
+## Non-goals (honest boundaries)
+
+No cloud sync service, no vector DB dependency, no daemon. Semantic recall is optional
+and degrades to lexical. Deletion is soft by default; auto-prune never deletes on text
+matches. Provenance records claims, not verified identities.
