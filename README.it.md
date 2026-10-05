@@ -94,6 +94,11 @@ e le memorie iniziano ad accumularsi mentre lavori. Verifica con `foldcrumbs sta
 
 ## Installazione
 
+> Lo stai configurando **dall'interno di un client AI**? Passagli
+> [SETUP-FOR-AGENTS.md](SETUP-FOR-AGENTS.md) — istruzioni di installazione e
+> collegamento scritte perché un agente le esegua, con verifica e regole
+> stop-al-primo-blocco. Nessuna chiave/account: non esistono.
+
 ```bash
 pip install foldcrumbs                  # da PyPI (oppure: pip install -e . da un checkout)
 ```

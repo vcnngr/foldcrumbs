@@ -87,6 +87,10 @@ foldcrumbs install          # 接入 Claude Code 的 hook + slash 命令
 
 ## 安装
 
+> 正在**某个 AI 客户端内部**进行安装？把
+> [SETUP-FOR-AGENTS.md](SETUP-FOR-AGENTS.md) 交给它 —— 这是一份写给 agent 去执行的
+> 安装与接入说明，含验证步骤和"遇到第一个阻塞点即停止"的规则。无需密钥/账号：本就不存在。
+
 ```bash
 pip install foldcrumbs                  # 从 PyPI（或：在 checkout 中 pip install -e .）
 ```

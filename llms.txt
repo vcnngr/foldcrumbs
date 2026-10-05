@@ -13,6 +13,11 @@ repository (branch `main`).
 
 ## Start here (agent-oriented)
 
+- [SETUP-FOR-AGENTS.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/SETUP-FOR-AGENTS.md):
+  Install-and-wire instructions written to be EXECUTED by an AI client —
+  client detection, per-client install commands, non-interactive backend
+  flags, verification steps, stop-at-first-blocker rules. No account/keys
+  exist; the page says so explicitly.
 - [AGENTS.md](https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/AGENTS.md):
   What an agent must get right — store location, the recall/fetch/timeline retrieval
   loop, visibility rules (archived/superseded/expired/contested/authorizations),

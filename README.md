@@ -93,6 +93,11 @@ and memories begin accumulating as you work. Verify with `foldcrumbs status`.
 
 ## Install
 
+> Setting this up **from inside an AI client**? Hand it
+> [SETUP-FOR-AGENTS.md](SETUP-FOR-AGENTS.md) — install-and-wire instructions
+> written for agents to execute, with verification and stop-at-first-blocker
+> rules. Or: `curl -sL https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/SETUP-FOR-AGENTS.md`
+
 ```bash
 pip install foldcrumbs                  # from PyPI (or: pip install -e . from a checkout)
 ```
