@@ -94,6 +94,12 @@ e le memorie iniziano ad accumularsi mentre lavori. Verifica con `foldcrumbs sta
 
 ## Installazione
 
+> Lo stai configurando **dall'interno di un client AI**? Passagli
+> [SETUP-FOR-AGENTS.md](SETUP-FOR-AGENTS.md) — istruzioni di installazione e
+> collegamento scritte perché un agente le esegua, con verifica e regole
+> stop-al-primo-blocco. Nessuna chiave/account: non esistono. Oppure:
+> `curl -sL https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/SETUP-FOR-AGENTS.md`
+
 ```bash
 pip install foldcrumbs                  # da PyPI (oppure: pip install -e . da un checkout)
 ```
@@ -103,7 +109,7 @@ Poi collegalo al tuo agent:
 ```bash
 foldcrumbs install                      # Claude Code, globale (~/.claude/settings.json)
 foldcrumbs install --local              # Claude Code, progetto (.claude/settings.json)
-foldcrumbs install --agent codex        # Codex: hooks.json + stampa lo snippet MCP per config.toml
+foldcrumbs install --agent codex        # Codex: hooks.json + merge automatico della stanza MCP in ~/.codex/config.toml (backup prima)
 foldcrumbs install --agent opencode     # OpenCode: MCP opencode.json + plugin + blocco AGENTS.md
 foldcrumbs install --agent pi           # Pi (pi.dev): estensione TS auto-scoperta + blocco AGENTS.md
 ```
@@ -829,8 +835,12 @@ che espone undici tool — `remember`, `recall` (modalità completa o indice com
 a qualsiasi client MCP:
 
 ```bash
-foldcrumbs-mcp            # oppure: python3 -m foldcrumbs.mcp_server
+foldcrumbs-mcp            # entrypoint console installato col pacchetto
 ```
+
+(`python3 -m foldcrumbs.mcp_server` funziona solo con l'interprete in cui
+foldcrumbs è installato — ad es. non dopo un'installazione pipx — quindi
+registra il comando `foldcrumbs-mcp`.)
 Codex e OpenCode sono collegati ad esso da `foldcrumbs install --agent …`. Usalo direttamente da
 qualsiasi tool che parla MCP registrando il comando qui sopra.
 

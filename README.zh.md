@@ -87,6 +87,11 @@ foldcrumbs install          # 接入 Claude Code 的 hook + slash 命令
 
 ## 安装
 
+> 正在**某个 AI 客户端内部**进行安装？把
+> [SETUP-FOR-AGENTS.md](SETUP-FOR-AGENTS.md) 交给它 —— 这是一份写给 agent 去执行的
+> 安装与接入说明，含验证步骤和"遇到第一个阻塞点即停止"的规则。无需密钥/账号：本就不存在。
+> 或者：`curl -sL https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/SETUP-FOR-AGENTS.md`
+
 ```bash
 pip install foldcrumbs                  # 从 PyPI（或：在 checkout 中 pip install -e .）
 ```
@@ -96,7 +101,7 @@ pip install foldcrumbs                  # 从 PyPI（或：在 checkout 中 pip 
 ```bash
 foldcrumbs install                      # Claude Code，全局（~/.claude/settings.json）
 foldcrumbs install --local              # Claude Code，项目级（.claude/settings.json）
-foldcrumbs install --agent codex        # Codex：hooks.json + 打印 config.toml 的 MCP 片段
+foldcrumbs install --agent codex        # Codex：hooks.json + 自动将 MCP 段合并进 ~/.codex/config.toml（先做备份）
 foldcrumbs install --agent opencode     # OpenCode：opencode.json MCP + 插件 + AGENTS.md 块
 foldcrumbs install --agent pi           # Pi（pi.dev）：自动发现的 TS 扩展 + AGENTS.md 块
 ```
@@ -744,8 +749,11 @@ MCP 客户端提供十一个工具 — `remember`、`recall`（完整或紧凑�
 `timeline`、`answer`、`forget`、`graph_path`、`relate`、`ingest`、`adopt` 和 `outcome`：
 
 ```bash
-foldcrumbs-mcp            # 或：python3 -m foldcrumbs.mcp_server
+foldcrumbs-mcp            # 随包安装的控制台入口点
 ```
+
+（`python3 -m foldcrumbs.mcp_server` 仅在安装 foldcrumbs 的那个解释器中有效 ——
+例如 pipx 安装后即失效 —— 因此请注册 `foldcrumbs-mcp` 命令。）
 Codex 和 OpenCode 由 `foldcrumbs install --agent …` 接入它。注册上面的命令，即可
 从任何支持 MCP 的工具直接使用。
 
