@@ -97,7 +97,8 @@ e le memorie iniziano ad accumularsi mentre lavori. Verifica con `foldcrumbs sta
 > Lo stai configurando **dall'interno di un client AI**? Passagli
 > [SETUP-FOR-AGENTS.md](SETUP-FOR-AGENTS.md) — istruzioni di installazione e
 > collegamento scritte perché un agente le esegua, con verifica e regole
-> stop-al-primo-blocco. Nessuna chiave/account: non esistono.
+> stop-al-primo-blocco. Nessuna chiave/account: non esistono. Oppure:
+> `curl -sL https://raw.githubusercontent.com/vcnngr/foldcrumbs/main/SETUP-FOR-AGENTS.md`
 
 ```bash
 pip install foldcrumbs                  # da PyPI (oppure: pip install -e . da un checkout)
@@ -108,7 +109,7 @@ Poi collegalo al tuo agent:
 ```bash
 foldcrumbs install                      # Claude Code, globale (~/.claude/settings.json)
 foldcrumbs install --local              # Claude Code, progetto (.claude/settings.json)
-foldcrumbs install --agent codex        # Codex: hooks.json + stampa lo snippet MCP per config.toml
+foldcrumbs install --agent codex        # Codex: hooks.json + merge automatico della stanza MCP in ~/.codex/config.toml (backup prima)
 foldcrumbs install --agent opencode     # OpenCode: MCP opencode.json + plugin + blocco AGENTS.md
 foldcrumbs install --agent pi           # Pi (pi.dev): estensione TS auto-scoperta + blocco AGENTS.md
 ```

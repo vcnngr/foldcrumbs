@@ -16,9 +16,13 @@ Install foldcrumbs, wire it into the user's AI client, and verify that
 remember/recall work. Stop at the first real blocker and report the exact
 failure. Keep the final status short.
 
-There is no account, no API key, no signup, and nothing to send anywhere:
-foldcrumbs is a Python package and the memories are markdown files on the
-user's disk. Do not ask the user for credentials — there are none.
+There is no account, no API key, no signup: foldcrumbs is a Python package
+and the memories are markdown files on the user's disk. The core and the
+default setup send nothing anywhere (recall is local and offline). The only
+optional exception is if the user explicitly picks the `openai` distillation
+backend pointed at a remote endpoint — that is their choice, configured
+later, not part of setup. Do not ask the user for credentials — there are
+none.
 
 ## Setup rules
 
@@ -35,9 +39,12 @@ user's disk. Do not ask the user for credentials — there are none.
    backup first):
    - Claude Code, global: `foldcrumbs install`
    - Claude Code, project only: `foldcrumbs install --local`
-   - Codex: `foldcrumbs install --agent codex` (also prints the MCP snippet
-     for `config.toml` — show it to the user, do not edit their config
-     silently)
+   - Codex: `foldcrumbs install --agent codex` — heads-up before you run it:
+     besides `~/.codex/hooks.json`, the installer AUTOMATICALLY merges an
+     `[mcp_servers.foldcrumbs]` stanza into `~/.codex/config.toml`
+     (merge-safe; existing keys preserved; a `.foldcrumbs-bak` backup is
+     written when the file already exists). Tell the user this will happen
+     before running it; never hand-edit `config.toml` yourself afterwards.
    - OpenCode: `foldcrumbs install --agent opencode`
    - Pi: `foldcrumbs install --agent pi`
    - Hermes: no hooks exist; use the profile mechanism instead:
@@ -54,10 +61,13 @@ user's disk. Do not ask the user for credentials — there are none.
    `--backend none`, or `--no-backend-prompt`. Ask the user which backend
    they prefer — do not guess silently; the choice is saved per-machine and
    changeable later with `foldcrumbs backend <name>`.
-6. Verify (all read-only, safe to run):
+6. Verify the round-trip. `status` and `recall` are read-only; the
+   `remember` step WRITES one small test memory (that is the point of the
+   test — say so if the user is watching):
    - `foldcrumbs status` — shows where the store lives and its counts
    - `foldcrumbs remember "setup verified by <client> on <date>" --type event`
    - `foldcrumbs recall "setup verified"` — must return the memory just written
+   - optional cleanup of the test memory: `foldcrumbs forget <file>`
 7. Tell the user to restart open agent sessions so hooks/commands load.
 8. Never print or exfiltrate store contents during setup; the memories may
    contain project secrets the user recorded.

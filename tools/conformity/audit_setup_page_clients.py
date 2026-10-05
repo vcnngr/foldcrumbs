@@ -32,7 +32,13 @@ rc, out = run(f"{FC} install --agent codex --backend none --no-backend-prompt")
 check("install --agent codex exits 0", rc == 0, out.strip())
 hx = HOME / ".codex/hooks.json"
 check("codex hooks.json written", hx.exists(), out.strip()[:160])
-check("codex prints config.toml MCP snippet (page claim)", "config.toml" in out or "mcp" in out.lower(), out[:300])
+toml = HOME / ".codex/config.toml"
+if toml.exists():
+    body = toml.read_text()
+    check("codex config.toml auto-merged with [mcp_servers.foldcrumbs] (page claim: installer merges it)",
+          "mcp_servers.foldcrumbs" in body, body[:160])
+else:
+    check("codex config.toml written by installer", False, "config.toml missing after install")
 
 print("== client: opencode ==")
 rc, out = run(f"{FC} install --agent opencode --backend none --no-backend-prompt")
