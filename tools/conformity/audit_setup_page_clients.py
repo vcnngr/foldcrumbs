@@ -61,6 +61,30 @@ mcp_bin = str(Path(FC).parent / "foldcrumbs-mcp")
 rc, out = run(f"ls {mcp_bin}")
 check("foldcrumbs-mcp entrypoint installed next to the CLI", rc == 0, out.strip()[:120])
 
+print("== pipx variant (page claim: foldcrumbs-mcp works; python3 -m does NOT) ==")
+if shutil.which("pipx"):
+    import tempfile
+    px_home = Path(tempfile.mkdtemp(prefix="fc_pipx_audit_"))
+    penv = dict(env, PIPX_HOME=str(px_home / "pipx"), PIPX_BIN_DIR=str(px_home / "bin"))
+    src = os.environ.get("FC_SRC", ".")
+    r = subprocess.run(f"pipx install --backend pip {src}", shell=True, capture_output=True,
+                       text=True, env=penv, timeout=300)
+    if r.returncode == 0:
+        fc_pipx = px_home / "bin/foldcrumbs-mcp"
+        r2 = subprocess.run(f"{fc_pipx} </dev/null", shell=True, capture_output=True,
+                            text=True, env=penv, timeout=60)
+        check("pipx: foldcrumbs-mcp entrypoint runs", r2.returncode == 0, r2.stderr[:120])
+        r3 = subprocess.run("/usr/bin/env python3 -m foldcrumbs.mcp_server </dev/null",
+                            shell=True, capture_output=True, text=True,
+                            cwd="/tmp", env=penv, timeout=60)
+        check("pipx: system `python3 -m foldcrumbs.mcp_server` FAILS (page says do not register it)",
+              r3.returncode != 0, (r3.stderr or r3.stdout)[:120])
+    else:
+        check("pipx variant (skipped: pipx install failed)", True, r.stderr[:140])
+    shutil.rmtree(px_home, ignore_errors=True)
+else:
+    check("pipx variant (skipped: pipx not on PATH)", True)
+
 print("== isolation: test wrote only under the fake HOME ==")
 check("fake HOME exists and was used", HOME.exists() and str(HOME).startswith("/tmp/fc_conform"), str(HOME))
 

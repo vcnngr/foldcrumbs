@@ -835,8 +835,12 @@ che espone undici tool — `remember`, `recall` (modalità completa o indice com
 a qualsiasi client MCP:
 
 ```bash
-foldcrumbs-mcp            # oppure: python3 -m foldcrumbs.mcp_server
+foldcrumbs-mcp            # entrypoint console — sempre nel PATH dopo l'install
 ```
+
+(`python3 -m foldcrumbs.mcp_server` funziona solo con l'interprete in cui
+foldcrumbs è installato — ad es. non dopo un'installazione pipx — quindi
+registra il comando `foldcrumbs-mcp`.)
 Codex e OpenCode sono collegati ad esso da `foldcrumbs install --agent …`. Usalo direttamente da
 qualsiasi tool che parla MCP registrando il comando qui sopra.
 

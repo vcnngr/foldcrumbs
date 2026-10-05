@@ -19,9 +19,10 @@ failure. Keep the final status short.
 There is no account, no API key, no signup: foldcrumbs is a Python package
 and the memories are markdown files on the user's disk. The core and the
 default setup send nothing anywhere (recall is local and offline). The only
-optional exception is if the user explicitly picks the `openai` distillation
-backend pointed at a remote endpoint — that is their choice, configured
-later, not part of setup. Do not ask the user for credentials — there are
+optional exceptions are features the user explicitly configures later, not
+part of setup: the `openai` distillation backend pointed at a remote
+endpoint, and an explicit remote `FOLDCRUMBS_EMBEDDING_ENDPOINT` for
+semantic recall — both send text off-machine by the user's own choice. Do not ask the user for credentials — there are
 none.
 
 ## Setup rules
@@ -51,10 +52,13 @@ none.
      `foldcrumbs profile import --agent hermes --apply`, then
      `foldcrumbs profile env <name>` prints the single env line the user
      must set for that agent.
-   - Other MCP clients: register the stdio command `foldcrumbs-mcp`
-     (equivalently `python3 -m foldcrumbs.mcp_server`) — stdlib-only, no MCP
-     SDK dependency. It exposes 11 tools (remember, recall, fetch, timeline,
-     answer, forget, graph_path, relate, ingest, adopt, outcome).
+   - Other MCP clients: register the stdio command `foldcrumbs-mcp` —
+     stdlib-only, no MCP SDK dependency. It exposes 11 tools (remember,
+     recall, fetch, timeline, answer, forget, graph_path, relate, ingest,
+     adopt, outcome). Do NOT register `python3 -m foldcrumbs.mcp_server`:
+     that form only works with the exact interpreter foldcrumbs was
+     installed into, and fails outright after a pipx install (the module is
+     not visible to system python).
 5. On a TTY the installer asks how to run *distillation* (recall never uses
    an LLM). If you are non-interactive, pass `--backend claude-cli` (Claude
    subscription), `--backend codex`, `--backend openai`, or

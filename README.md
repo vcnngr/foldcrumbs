@@ -819,8 +819,12 @@ eleven tools — `remember`, `recall` (full or compact index mode), `fetch`, `ti
 to any MCP client:
 
 ```bash
-foldcrumbs-mcp            # or: python3 -m foldcrumbs.mcp_server
+foldcrumbs-mcp            # console entrypoint — always on PATH after install
 ```
+
+(`python3 -m foldcrumbs.mcp_server` works only with the interpreter
+foldcrumbs was installed into — e.g. not after a pipx install — so register
+the `foldcrumbs-mcp` command.)
 Codex and OpenCode are wired to it by `foldcrumbs install --agent …`. Use it directly from any
 MCP-speaking tool by registering the command above.
 

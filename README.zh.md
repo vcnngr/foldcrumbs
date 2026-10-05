@@ -749,8 +749,11 @@ MCP 客户端提供十一个工具 — `remember`、`recall`（完整或紧凑�
 `timeline`、`answer`、`forget`、`graph_path`、`relate`、`ingest`、`adopt` 和 `outcome`：
 
 ```bash
-foldcrumbs-mcp            # 或：python3 -m foldcrumbs.mcp_server
+foldcrumbs-mcp            # 控制台入口点 —— 安装后始终在 PATH 中
 ```
+
+（`python3 -m foldcrumbs.mcp_server` 仅在安装 foldcrumbs 的那个解释器中有效 ——
+例如 pipx 安装后即失效 —— 因此请注册 `foldcrumbs-mcp` 命令。）
 Codex 和 OpenCode 由 `foldcrumbs install --agent …` 接入它。注册上面的命令，即可
 从任何支持 MCP 的工具直接使用。
 
