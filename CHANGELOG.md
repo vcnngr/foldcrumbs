@@ -35,7 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacement look more trusted (inverted signal). Now a user-voiced record
   (`explicit_statement`/`corrected`) whose content **drops words** supersedes
   the match instead of validating it: new action `corrected`, visible chain,
-  `restore` brings the original back. Same-word repeats still validate; pure
+  and `restore` on the superseded original undoes the automatic correction
+  (dedicated `restore_correction`: the original goes back to active, the
+  correction is archived — never deleted; deliberate manual supersessions
+  still refuse, undoing those stays `supersede`/`forget` territory). Word
+  changes of ANY length count — a one-character swap ("plan A" → "plan B")
+  is a correction, not a confirmation. Same-word repeats still validate; pure
   additions still validate. Derived records (distill's `inferred`, ingest's
   `imported`) never correct — their contradictions stay with the
   contradiction pass. Filename collisions (same title, the common case) move

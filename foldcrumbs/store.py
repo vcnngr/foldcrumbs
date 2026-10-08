@@ -702,12 +702,17 @@ def _content_body_words(rec: MemoryRecord) -> frozenset[str]:
     is narrow. Punctuation and case carry no meaning at this granularity.
     Titles are excluded on purpose — facts live in content, and a retitle is
     relabeling, not a fact change (see ``_is_correction``).
+
+    Single-character tokens COUNT (RT r2 P0-2): "Use plan A" -> "Use plan B"
+    changes exactly one one-letter word, and dropping len<=1 tokens made the
+    detector blind to it (the pair validated, and Plan A kept collecting
+    trust). The cost of counting them is the rare article swap ("a" -> "the")
+    classifying as a correction — visible chain, restore undoes it, nothing
+    lost; blindness to A->B is the worse failure.
     """
     import re
 
-    return frozenset(
-        w for w in re.findall(r"\w+", rec.content.lower()) if len(w) > 1
-    )
+    return frozenset(w for w in re.findall(r"\w+", rec.content.lower()))
 
 
 def _is_correction(new: MemoryRecord, old: MemoryRecord) -> bool:
@@ -719,7 +724,7 @@ def _is_correction(new: MemoryRecord, old: MemoryRecord) -> bool:
     now") removes nothing: the old content still stands, elaborated — that
     remains a validation. Removal-without-replacement (a detail dropped)
     counts as a correction too — conservative, since the superseded original
-    stays on disk and `restore` brings it back.
+    stays on disk and ``restore`` (via ``restore_correction``) brings it back.
 
     Titles are deliberately EXCLUDED: retitling near-identical content is
     relabeling, not a fact change ("Tagged" vs "Untagged" over the same body
@@ -1078,6 +1083,84 @@ def supersede(
         if old is None or old.status == "superseded":
             return old is not None    # already retired: nothing to do
         _supersede_locked(old, new, old_name, cwd)
+    return True
+
+
+def restore_correction(
+    name: str, cwd: str | os.PathLike[str] | None = None
+) -> bool:
+    """Undo an AUTOMATIC correction chain: bring the superseded original back.
+
+    RT r2 P0-1 (PR #89): the correction path promises "restore brings the
+    original back", but ``set_status`` deliberately refuses to revive a
+    superseded record (``test_restore_does_not_revive_what_was_superseded_or_
+    deleted``) — and that refusal is CORRECT for human/derived supersessions:
+    retiring a memory is a decision, and a blind revival undoes decisions the
+    caller knows nothing about. The automatic correction chain is the one
+    narrow exception: it was not a decision, it was dedup classification, and
+    undoing it means undoing OUR OWN move, not someone else's.
+
+    Scope is therefore tight — all four must hold, checked under the
+    per-memory lock with a re-read:
+      1. ``name`` resolves to a record with status ``superseded``;
+      2. its ``superseded_by`` target exists on disk and is ``active``;
+      3. that target carries ``provenance == "corrected"`` — the fingerprint
+         upsert's correction path stamps (a manual CLI/MCP ``supersede``
+         leaves the new record's provenance alone);
+      4. the target is the record's direct replacement (chain link intact).
+
+    The undo is symmetric with what the correction did: the original goes
+    back to ``active`` (superseded_by cleared), the correction is archived —
+    NOT deleted: it was a real utterance, the user is entitled to its text,
+    and ``restore`` on it still works (archived↔active is set_status's own
+    territory). Returns False (never raises) when any condition fails.
+    """
+    rec = get(name, cwd)
+    if rec is None or rec.status != "superseded" or not rec.superseded_by:
+        return False
+    target = _resolve_in_store(name, cwd)
+    if target is None:
+        return False
+    with _memory_lock(rec.id) as held:
+        if not held:
+            config.log_event(
+                f"restore_correction: memory {rec.id} locked by another "
+                "writer; refusing to race it (retry in a moment)")
+            return False
+        rec = get(name, cwd)          # re-read under the lock
+        if rec is None or rec.status != "superseded" or not rec.superseded_by:
+            return False
+        # Find the correcting record by ID — its filename may be anything
+        # (the collision case moved the ORIGINAL to a history name, so the
+        # corrector sits on the canonical one; retitles change it too).
+        corrector = None
+        corrector_path = None
+        for other in iter_memories_including_retired(cwd):
+            if other.id == rec.superseded_by:
+                corrector = other
+                # source_path is a bare FILENAME (get() stores p.name), so
+                # resolve it inside the store — writing to it raw would land
+                # in the process cwd, not the memory dir.
+                corrector_path = config.memory_dir(cwd) / (
+                    Path(other.source_path).name if other.source_path
+                    else corrector.filename())
+                break
+        if (corrector is None or corrector.status != "active"
+                or corrector.provenance != "corrected"):
+            # Not an automatic-correction chain (manual supersede, derived
+            # retirement, or the corrector already moved on): set_status's
+            # refusal stands — undoing those is supersede/forget territory.
+            return False
+        rec.status = "active"
+        rec.superseded_by = None
+        rec.updated_at = datetime.now(timezone.utc)
+        _write_text(target, rec.to_markdown())
+        corrector.status = "archived"
+        corrector.updated_at = datetime.now(timezone.utc)
+        if corrector_path is None:
+            corrector_path = config.memory_dir(cwd) / corrector.filename()
+        _write_text(corrector_path, corrector.to_markdown())
+        rebuild_index(cwd)
     return True
 
 

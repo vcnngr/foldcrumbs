@@ -273,6 +273,94 @@ class TestStore(TmpStore):
         self.assertEqual(store.upsert(b)[0], "validated")
         self.assertEqual(store.get(a.filename()).status, "active")
 
+    def test_a_single_character_change_is_a_correction(self):
+        # RT r2 P0-2: "plan A" -> "plan B" changes exactly one one-letter
+        # word. The detector used to drop len<=1 tokens, so the pair
+        # validated and Plan A kept collecting trust.
+        a = MemoryRecord(title="Release plan",
+                         content="Use plan A for release.", type="decision")
+        self.assertEqual(store.upsert(a)[0], "created")
+        b = MemoryRecord(title="Release plan",
+                         content="Use plan B for release.", type="decision")
+        action, _ = store.upsert(b)
+        self.assertEqual(action, "corrected")
+        retired = [m for m in store.iter_memories_including_retired()
+                   if m.status == "superseded"]
+        self.assertEqual(len(retired), 1)
+        self.assertIn("plan A", retired[0].content)
+        hits = store.search("release plan")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("plan B", hits[0].content)
+
+    def test_restore_undoes_an_automatic_correction(self):
+        # RT r2 P0-1: the correction path promises "restore brings the
+        # original back". set_status refuses superseded records (rightly —
+        # a supersede is a decision); restore_correction is the narrow undo
+        # of OUR OWN dedup classification.
+        a = MemoryRecord(title="Deploy window",
+                         content="We deploy on Tuesdays 10-12 UTC.",
+                         type="decision")
+        store.upsert(a)
+        b = MemoryRecord(title="Deploy window",
+                         content="We deploy on Wednesdays 10-12 UTC.",
+                         type="decision")
+        action, _ = store.upsert(b)
+        self.assertEqual(action, "corrected")
+        # the superseded original lives under its HISTORY filename (the
+        # collision case moved it), not the canonical one — use source_path
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded")
+        # set_status alone still refuses (the existing invariant stands)
+        self.assertFalse(store.set_status(old_name, "active"))
+        # the dedicated undo works
+        self.assertTrue(store.restore_correction(old_name))
+        old = store.get(old_name)
+        self.assertEqual(old.status, "active")
+        self.assertIsNone(old.superseded_by)
+        # the correction was ARCHIVED, not deleted: its text is still there
+        corr = store.get(b.filename())
+        self.assertEqual(corr.status, "archived")
+        self.assertEqual(corr.provenance, "corrected")
+        # recall serves the original again, and only it
+        hits = store.search("deploy window")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("Tuesdays", hits[0].content)
+
+    def test_restore_correction_refuses_a_deliberate_supersede(self):
+        # The undo is scoped to automatic corrections only: a manual
+        # supersede (new record keeps its own provenance) must NOT be
+        # reversible through restore_correction — that would undo a
+        # decision, which is supersede/forget territory.
+        old = MemoryRecord(title="Deadline", content="Ship on Friday.",
+                           type="fact")
+        new = MemoryRecord(title="Deadline moved", content="Ship on Monday.",
+                           type="fact")
+        store.write_memory(old)
+        store.write_memory(new)
+        self.assertTrue(store.supersede(old.filename(), new.filename()))
+        self.assertFalse(store.restore_correction(old.filename()))
+        self.assertEqual(store.get(old.filename()).status, "superseded")
+
+    def test_restore_correction_refuses_when_the_corrector_moved_on(self):
+        # If the correcting record is no longer active (archived/forgotten),
+        # the chain link is broken and the undo refuses rather than
+        # resurrecting into an inconsistent state.
+        a = MemoryRecord(title="Standup", content="Standup is at nine.",
+                         type="fact")
+        store.upsert(a)
+        b = MemoryRecord(title="Standup", content="Standup is at ten.",
+                         type="fact")
+        store.upsert(b)
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded")
+        store.set_status(b.filename(), "archived")
+        self.assertFalse(store.restore_correction(old_name))
+        self.assertEqual(store.get(old_name).status, "superseded")
+        # the archived correction stayed archived (nothing was resurrected)
+        self.assertEqual(store.get(b.filename()).status, "archived")
+
     def test_index_grouped(self):
         store.upsert(MemoryRecord(title="R", content="rule", type="instruction"))
         store.upsert(MemoryRecord(title="F", content="fact", type="fact"))
