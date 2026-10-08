@@ -177,6 +177,30 @@ TOOLS = [
         },
     },
     {
+        "name": "supersede",
+        "description": (
+            "Replace one memory with another: the old file is marked "
+            "superseded (kept on disk, out of index/recall, confidence 0) and "
+            "chained to the replacement via superseded_by. Use when a fact "
+            "changed and the new memory ALREADY EXISTS (write it with "
+            "`remember` first) — prefer this over forget+remember so the "
+            "history stays navigable. Both arguments are exact memory "
+            "filenames as shown in MEMORY.md or a recall result. "
+            "Authorizations cannot be superseded here (grants retire through "
+            "the human CLI path only)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "old": {"type": "string",
+                        "description": "Exact filename of the memory being replaced."},
+                "by": {"type": "string",
+                       "description": "Exact filename of the replacement memory."},
+            },
+            "required": ["old", "by"],
+        },
+    },
+    {
         "name": "answer",
         "description": (
             "Answer a question grounded in the project's memory (retrieves "
@@ -768,6 +792,35 @@ def tool_forget(args: dict[str, Any]) -> str:
     return f"{action}: {name} (file kept on disk; index rebuilt)"
 
 
+def tool_supersede(args: dict[str, Any]) -> str:
+    # Study finding P3 (2026-10-06): replacing a memory was CLI-only, so an
+    # MCP agent that learned a fact had changed could forget+remember (losing
+    # the chain) but not supersede. Same trust boundary as remember: grants
+    # stay human/CLI verbs — retiring an authorization is refused here.
+    old_name = str(args["old"])
+    new_name = str(args["by"])
+    old = store.get(old_name)
+    if old is None:
+        hits = store.search(old_name, limit=5, federated=False)
+        if hits:
+            options = "\n".join(f"  {m.source_path or m.filename()} — {m.title}"
+                                for m in hits)
+            return (f"'{old_name}' is not a memory filename. Closest matches:\n"
+                    f"{options}\nCall supersede again with the exact filename.")
+        return f"no memory named or matching '{old_name}'"
+    new = store.get(new_name)
+    if new is None:
+        return (f"no memory named '{new_name}' — write the replacement with "
+                "`remember` first, then supersede old -> new")
+    if old.type == "authorization" or new.type == "authorization":
+        return ("refused: authorizations retire through the human CLI path "
+                "only (`foldcrumbs supersede`), never via MCP")
+    if not store.supersede(old_name, new_name):
+        return f"failed to supersede {old_name} -> {new_name}"
+    return (f"superseded: {old_name} -> {new_name}; old file kept on disk "
+            "(status: superseded, superseded_by chained); index rebuilt")
+
+
 def _resolve_local_ref(ref: str):
     """Resolve a memory reference (id, exact title, or filename stem) to the
     single local memory it names. Mirrors the CLI's resolution rules. Returns
@@ -1019,7 +1072,7 @@ _DISPATCH = {"remember": tool_remember, "recall": tool_recall,
              "graph_path": tool_graph_path, "relate": tool_relate,
              "ingest": tool_ingest, "adopt": tool_adopt,
              "outcome": tool_outcome, "fetch": tool_fetch,
-             "timeline": tool_timeline}
+             "timeline": tool_timeline, "supersede": tool_supersede}
 
 
 # --- JSON-RPC / MCP plumbing ----------------------------------------------- #

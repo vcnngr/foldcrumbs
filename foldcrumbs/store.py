@@ -686,13 +686,64 @@ def find_conflict_candidates(
     return [m for _, m in out[:limit]]
 
 
+# Provenances that carry the user's own voice: what the owner (or the agent
+# quoting them verbatim) STATED. Only these may correct an existing memory
+# through the dedup path — derived records (inferred/imported/observed) have
+# no such authority and keep validating, leaving contradictions to the
+# contradiction pass. Mirrors schema._USER_STATED_PROVENANCES (P5).
+_USER_STATED_PROVENANCES = frozenset({"explicit_statement", "corrected"})
+
+
+def _content_body_words(rec: MemoryRecord) -> frozenset[str]:
+    """The word set of a record's CONTENT (no title), for correction detection.
+
+    Deliberately crude and order-insensitive: dedup already decided the two
+    records are near-identical (SequenceMatcher >= 0.85), so the question here
+    is narrow. Punctuation and case carry no meaning at this granularity.
+    Titles are excluded on purpose — facts live in content, and a retitle is
+    relabeling, not a fact change (see ``_is_correction``).
+
+    Single-character tokens COUNT (RT r2 P0-2): "Use plan A" -> "Use plan B"
+    changes exactly one one-letter word, and dropping len<=1 tokens made the
+    detector blind to it (the pair validated, and Plan A kept collecting
+    trust). The cost of counting them is the rare article swap ("a" -> "the")
+    classifying as a correction — visible chain, restore undoes it, nothing
+    lost; blindness to A->B is the worse failure.
+    """
+    import re
+
+    return frozenset(w for w in re.findall(r"\w+", rec.content.lower()))
+
+
+def _is_correction(new: MemoryRecord, old: MemoryRecord) -> bool:
+    """Whether ``new`` REPLACES a fact of ``old`` rather than elaborating it.
+
+    The signal is a non-empty REMOVED content word set: "Tuesdays" ->
+    "Wednesdays" removes a word, so the old statement no longer holds and
+    must not collect trust. A pure addition ("stdlib here" -> "stdlib here
+    now") removes nothing: the old content still stands, elaborated — that
+    remains a validation. Removal-without-replacement (a detail dropped)
+    counts as a correction too — conservative, since the superseded original
+    stays on disk and ``restore`` (via ``restore_correction``) brings it back.
+
+    Titles are deliberately EXCLUDED: retitling near-identical content is
+    relabeling, not a fact change ("Tagged" vs "Untagged" over the same body
+    stays a validation). Facts live in the content.
+    """
+    return bool(_content_body_words(old) - _content_body_words(new))
+
+
 def upsert(
-    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None
+    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None,
+    allow_correction: bool = True,
 ) -> tuple[str, Path]:
     """Write with dedup. Returns (action, path).
 
-    action ∈ {"created", "validated"}. If a near-duplicate exists, we bump its
-    validation count (trust) instead of adding a second copy.
+    action ∈ {"created", "validated", "corrected"}. If a near-duplicate
+    exists, we bump its validation count (trust) instead of adding a second
+    copy — UNLESS the near-duplicate actually says something different and
+    carries the user's own provenance: then it is a correction, the new
+    record supersedes the old one (visible chain, recoverable via restore).
 
     AUTH design rev2 §D2.5: authorizations are EXCLUDED from the fuzzy
     dedup — two grants that read alike but differ in granted_to/grants/
@@ -716,9 +767,64 @@ def upsert(
                 "invalidation contract — retire it explicitly "
                 "(supersede/forget) or fix the contract first; no silent "
                 "re-validation")
-        dup.validate()
-        path = write_memory(dup, cwd)
-        return "validated", path
+        # Study findings P1+P2 (2026-10-06): a near-duplicate is only a
+        # CONFIRMATION when it actually says the same thing. "We deploy on
+        # Wednesdays" written over "We deploy on Tuesdays" is a correction,
+        # and treating it as a validation bumped the trust of the sentence
+        # the user was replacing — and, worse, repeating a superseded fact
+        # validated its REPLACEMENT (signal inversion). Rule: when the
+        # words changed and the new record carries the user's own voice
+        # (explicit_statement/corrected — the CLI and MCP remember paths),
+        # this is a correction: the new record is written and the old one
+        # is superseded by it, a visible, recoverable chain (superseded_by
+        # + restore). Derived records (distill's inferred, ingest's
+        # imported) keep the old behavior: they have no authority to
+        # correct, and their contradictions are the contradiction pass's
+        # call.
+        # Study finding P4 (2026-10-06): both dedup outcomes are
+        # read-modify-write on the SAME file — take the per-memory lock and
+        # re-read under it, or two concurrent remembers lose one increment.
+        # flock contends between open file descriptions even in one process,
+        # so the write halves (_supersede_locked) run INSIDE this lock
+        # rather than re-acquiring it via supersede().
+        with _memory_lock(dup.id) as held:
+            if not held:
+                raise ContractProtectedError(
+                    f"{dup.filename()}: memory locked by another writer; "
+                    "refusing to race it (retry in a moment)")
+            dup = get(dup.filename(), cwd) or dup   # re-read under the lock
+            if (allow_correction
+                    and rec.provenance in _USER_STATED_PROVENANCES
+                    and _is_correction(rec, dup)):
+                rec.provenance = "corrected"
+                d = _ensure_dir(cwd)
+                old_name = dup.filename()
+                if old_name == rec.filename():
+                    # Same title => same filename => writing the correction
+                    # would clobber the original and leave supersede() with
+                    # nothing to retire. Move the original to a history name
+                    # first (id suffix), so the chain old->new survives on
+                    # disk exactly like the different-title case.
+                    old_path = d / old_name
+                    history_name = f"{old_path.stem}-{dup.id[:8]}.md"
+                    if old_path.exists():
+                        os.replace(old_path, d / history_name)
+                    old_name = history_name
+                path = write_memory(rec, cwd)
+                retired = get(old_name, cwd)
+                if retired is not None:
+                    # RT r3 P0-1: a durable marker that THIS supersession was
+                    # the automatic correction path — restore_correction
+                    # requires it and clears it. Inferred-from-provenance
+                    # scoping was insufficient: "corrected" is public data
+                    # and a legitimately-corrected memory can later be the
+                    # target of a deliberate supersede.
+                    retired.extra_meta["superseded_via"] = "auto_correction"
+                    _supersede_locked(retired, rec, old_name, cwd)
+                return "corrected", path
+            dup.validate()
+            path = write_memory(dup, cwd)
+            return "validated", path
     return "created", write_memory(rec, cwd)
 
 
@@ -781,7 +887,10 @@ def import_store(
         rec.outcome_note = None
         rec.contradiction_detected = False
         if apply:
-            action, _ = upsert(rec, cwd)
+            # allow_correction=False: the record carries the SOURCE store's
+            # provenance, and a foreign explicit_statement has no authority
+            # to correct a local memory — imports validate or create only.
+            action, _ = upsert(rec, cwd, allow_correction=False)
         else:
             action = "validated" if find_duplicate(rec, cwd) else "created"
         plan[action].append(path.name)
@@ -821,19 +930,32 @@ def forget(
     target = _resolve_in_store(name, cwd)
     if target is None:
         return None
-    if hard:
-        try:
-            target.unlink()
-        except OSError:
+    # Study finding P4 (2026-10-06): forgetting is read-modify-write too —
+    # the same per-memory lock, so a concurrent validate/supersede is
+    # serialized against deletion instead of racing it.
+    with _memory_lock(rec.id) as held:
+        if not held:
+            config.log_event(
+                f"forget: memory {rec.id} locked by another writer; "
+                "refusing to race it (retry in a moment)")
             return None
-        action = "removed"
-    else:
-        rec.status = "deleted"
-        rec.updated_at = datetime.now(timezone.utc)
-        # Write back to the file it was read from, not a name re-derived from
-        # the title (imported files can live under non-canonical names).
-        _write_text(target, rec.to_markdown())
-        action = "deleted"
+        rec = get(name, cwd)
+        if rec is None:
+            return None
+        if hard:
+            try:
+                target.unlink()
+            except OSError:
+                return None
+            action = "removed"
+        else:
+            rec.status = "deleted"
+            rec.updated_at = datetime.now(timezone.utc)
+            # Write back to the file it was read from, not a name re-derived
+            # from the title (imported files can live under non-canonical
+            # names).
+            _write_text(target, rec.to_markdown())
+            action = "deleted"
     # The count goes with the memory, whether the file stayed or not. A
     # soft-deleted memory can be recalled again only by being restored, and
     # until then its count is just weight on a name nothing serves.
@@ -864,18 +986,30 @@ def set_status(
     if target is None:
         return False
     _refuse_if_foreign(rec, "archive")
-    # Only between these two, and only in the direction asked for. Restoring
-    # is the inverse of archiving, not a general revival: a memory that was
-    # superseded or deleted did not decay out of relevance — something
-    # replaced it, or someone removed it — and bringing those back here would
-    # undo a decision this call knows nothing about. Undoing *those* is what
-    # supersede and forget are for.
-    allowed = "archived" if status == "active" else "active"
-    if rec.status != allowed:
-        return False
-    rec.status = status
-    rec.updated_at = datetime.now(timezone.utc)
-    _write_text(target, rec.to_markdown())
+    # Study finding P4 (2026-10-06): status flips are read-modify-write —
+    # take the per-memory lock and re-read under it so a concurrent
+    # validate/supersede cannot be clobbered by a stale write.
+    with _memory_lock(rec.id) as held:
+        if not held:
+            config.log_event(
+                f"set_status: memory {rec.id} locked by another writer; "
+                "refusing to race it (retry in a moment)")
+            return False
+        rec = get(name, cwd)
+        if rec is None:
+            return False
+        # Only between these two, and only in the direction asked for.
+        # Restoring is the inverse of archiving, not a general revival: a
+        # memory that was superseded or deleted did not decay out of
+        # relevance — something replaced it, or someone removed it — and
+        # bringing those back here would undo a decision this call knows
+        # nothing about. Undoing *those* is what supersede and forget are for.
+        allowed = "archived" if status == "active" else "active"
+        if rec.status != allowed:
+            return False
+        rec.status = status
+        rec.updated_at = datetime.now(timezone.utc)
+        _write_text(target, rec.to_markdown())
     if status != "active":
         # Its recall history goes with it: while archived it answers nothing,
         # and the count would otherwise sit there weighting a memory that is
@@ -886,6 +1020,37 @@ def set_status(
     # otherwise rewrite it as many times as it archived.
     if rebuild:
         rebuild_index(cwd)
+    return True
+
+
+def _memory_lock(rec_id: str, wait: float = 5.0):
+    """Per-memory exclusive lock (locks/memory-<id>), the pattern authz.mint
+    and relations writers already use. Study finding P4 (2026-10-06): the
+    ordinary read-modify-write paths (validate, supersede, set_status,
+    forget) were lock-free — two concurrent writes to the same memory could
+    lose one of them (last-writer-wins on a stale read). Bounded wait; when
+    it cannot be taken, callers must refuse rather than race."""
+    from . import federation
+
+    lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{rec_id}"
+    return federation.file_lock(lock_dir, wait=wait)
+
+
+def _supersede_locked(
+    old: MemoryRecord, new: MemoryRecord, old_name: str,
+    cwd: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Retire ``old`` in favour of ``new`` — the WRITE half of supersede.
+
+    Assumes the caller holds (or does not need) the per-memory lock on
+    ``old.id``. Kept separate so upsert's correction path can chain
+    write+retire under ONE lock acquisition: flock locks are per open file
+    description, so re-locking the same id from the same process would
+    contend with itself and time out."""
+    old.mark_superseded(new.id)
+    _write_text(config.memory_dir(cwd) / old_name, old.to_markdown())
+    recalls.forget(old.id, cwd)
+    rebuild_index(cwd)
     return True
 
 
@@ -909,30 +1074,135 @@ def supersede(
     old, new = get(old_name, cwd), get(new_name, cwd)
     if old is None or new is None or old_name == new_name:
         return False
-    if old.type == "authorization":
-        from . import federation
-        lock_dir = Path(config.STATE_DIR) / "locks" / f"memory-{old.id}"
-        lock_dir.parent.mkdir(parents=True, exist_ok=True)
-        with federation.file_lock(lock_dir, wait=5.0) as held:
+    # Study finding P4 (2026-10-06): EVERY memory now retires under the
+    # per-memory lock with a re-read — not just grants. The lock-free
+    # ordinary path could lose a concurrent validate/set_status write
+    # (last-writer-wins over a stale read). Refuse rather than race.
+    with _memory_lock(old.id) as held:
+        if not held:
+            config.log_event(
+                f"supersede: memory {old.id} locked by another writer; "
+                "retirement deferred (refusing to race)")
+            return False
+        # re-read under the lock: another writer may have landed since the
+        # caller resolved the record
+        old = get(old_name, cwd)
+        if old is None or old.status == "superseded":
+            return old is not None    # already retired: nothing to do
+        _supersede_locked(old, new, old_name, cwd)
+    return True
+
+
+def restore_correction(
+    name: str, cwd: str | os.PathLike[str] | None = None
+) -> bool:
+    """Undo an AUTOMATIC correction chain: bring the superseded original back.
+
+    RT r2 P0-1 (PR #89): the correction path promises "restore brings the
+    original back", but ``set_status`` deliberately refuses to revive a
+    superseded record (``test_restore_does_not_revive_what_was_superseded_or_
+    deleted``) — and that refusal is CORRECT for human/derived supersessions:
+    retiring a memory is a decision, and a blind revival undoes decisions the
+    caller knows nothing about. The automatic correction chain is the one
+    narrow exception: it was not a decision, it was dedup classification, and
+    undoing it means undoing OUR OWN move, not someone else's.
+
+    Scope is therefore tight — all must hold, checked under BOTH per-memory
+    locks (original + corrector, deterministic sorted order) with re-reads:
+      1. ``name`` resolves to a record with status ``superseded``;
+      2. the record carries the durable ``superseded_via: auto_correction``
+         marker that ONLY upsert's correction path stamps (RT r3 P0-1:
+         inferring this from the corrector's provenance was insufficient —
+         "corrected" is public data and a corrected memory can later be the
+         target of a deliberate supersede);
+      3. its ``superseded_by`` target exists on disk, is ``active``, and
+         carries ``provenance == "corrected"`` (belt and braces on top of
+         the marker — a hand-edited marker alone is not enough);
+      4. the undo clears the marker, so it is single-shot.
+
+    The undo is symmetric with what the correction did: the original goes
+    back to ``active`` (superseded_by cleared), the correction is archived —
+    NOT deleted: it was a real utterance, the user is entitled to its text,
+    and ``restore`` on it still works (archived↔active is set_status's own
+    territory). Returns False (never raises) when any condition fails.
+    """
+    rec = get(name, cwd)
+    if rec is None or rec.status != "superseded" or not rec.superseded_by:
+        return False
+    target = _resolve_in_store(name, cwd)
+    if target is None:
+        return False
+    # RT r3 P0-1: the ONLY proof that this supersession was automatic is the
+    # durable marker upsert's correction path stamps on the retired record
+    # (extra_meta round-trips through to_markdown/from_markdown). Checking
+    # the corrector's provenance instead was insufficient: "corrected" is
+    # public data, and a legitimately-corrected memory can later be the
+    # target of a deliberate supersede — undoing THAT would cancel a
+    # decision and leave the earlier chain incoherent.
+    if rec.extra_meta.get("superseded_via") != "auto_correction":
+        return False
+    # RT r3 P0-2: the undo touches TWO records, so both ids get the lock —
+    # in a deterministic (sorted) order to make deadlock impossible — and
+    # both are re-read and re-validated UNDER the locks before any write.
+    # Locking only the original let a concurrent forget(corrector) be
+    # overwritten by a stale archived-write.
+    corrector_probe = None
+    for other in iter_memories_including_retired(cwd):
+        if other.id == rec.superseded_by:
+            corrector_probe = other
+            break
+    if corrector_probe is None:
+        return False
+    lock_ids = sorted({rec.id, corrector_probe.id})
+    locks = []
+    try:
+        for lid in lock_ids:
+            cm = _memory_lock(lid)
+            held = cm.__enter__()
+            locks.append((cm, held))
             if not held:
                 config.log_event(
-                    f"supersede: memory {old.id} locked by another writer; "
-                    "retirement deferred (refusing to race)")
+                    f"restore_correction: memory {lid} locked by another "
+                    "writer; refusing to race it (retry in a moment)")
                 return False
-            # re-read under the lock: a relations write may have landed
-            # since the caller resolved the record
-            old = get(old_name, cwd)
-            if old is None or old.status == "superseded":
-                return old is not None    # already retired: nothing to do
-            old.mark_superseded(new.id)
-            _write_text(config.memory_dir(cwd) / old_name, old.to_markdown())
-        recalls.forget(old.id, cwd)
+        rec = get(name, cwd)          # re-read under BOTH locks
+        if (rec is None or rec.status != "superseded"
+                or not rec.superseded_by
+                or rec.extra_meta.get("superseded_via") != "auto_correction"):
+            return False
+        # Re-find the corrector by id under the locks (its path may be any
+        # name: the collision case moved the ORIGINAL to a history name).
+        corrector = None
+        corrector_path = None
+        for other in iter_memories_including_retired(cwd):
+            if other.id == rec.superseded_by:
+                corrector = other
+                # source_path is a bare FILENAME (get() stores p.name), so
+                # resolve it inside the store — writing to it raw would land
+                # in the process cwd, not the memory dir.
+                corrector_path = config.memory_dir(cwd) / (
+                    Path(other.source_path).name if other.source_path
+                    else other.filename())
+                break
+        if (corrector is None or corrector_path is None
+                or corrector.status != "active"
+                or corrector.provenance != "corrected"):
+            # The corrector moved on (archived/deleted) or the link is not
+            # what the marker claimed: refuse rather than resurrect into an
+            # inconsistent state.
+            return False
+        rec.status = "active"
+        rec.superseded_by = None
+        rec.extra_meta.pop("superseded_via", None)
+        rec.updated_at = datetime.now(timezone.utc)
+        _write_text(target, rec.to_markdown())
+        corrector.status = "archived"
+        corrector.updated_at = datetime.now(timezone.utc)
+        _write_text(corrector_path, corrector.to_markdown())
         rebuild_index(cwd)
-        return True
-    old.mark_superseded(new.id)
-    _write_text(config.memory_dir(cwd) / old_name, old.to_markdown())
-    recalls.forget(old.id, cwd)
-    rebuild_index(cwd)
+    finally:
+        for cm, _held in reversed(locks):
+            cm.__exit__(None, None, None)
     return True
 
 

@@ -567,8 +567,19 @@ def _cmd_restore(args: argparse.Namespace) -> int:
     if store.set_status(args.name, "active"):
         print(f"restored {args.name}.")
         return 0
+    # set_status only moves archived↔active; it refuses a superseded record
+    # because retiring a memory is a decision this call knows nothing about.
+    # The one exception is an AUTOMATIC correction chain (dedup classified a
+    # near-duplicate as a correction) — undoing that is undoing our own move,
+    # so restore_correction brings the original back and archives the
+    # correction. Manual/derived supersessions still refuse here.
+    if store.restore_correction(args.name):
+        print(f"restored {args.name} (undid an automatic correction; "
+              "the correction was archived, not deleted).")
+        return 0
     print(f"nothing to restore for {args.name} "
-          "(unknown file, or it is already active).")
+          "(unknown file, already active, or superseded by a deliberate "
+          "supersede/forget rather than an automatic correction).")
     return 1
 
 

@@ -62,7 +62,8 @@ class TestHandler(unittest.TestCase):
         self.assertEqual(names,
                          {"remember", "recall", "answer", "forget",
                           "graph_path", "relate", "ingest",
-                          "adopt", "outcome", "fetch", "timeline"})
+                          "adopt", "outcome", "fetch", "timeline",
+                          "supersede"})
 
     def test_forget_by_filename(self):
         rem = mcp_server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -92,6 +93,65 @@ class TestHandler(unittest.TestCase):
         text = fg["result"]["content"][0]["text"]
         self.assertIn("exact filename", text)
         self.assertIn("fact_deploy_day.md", text)
+
+    # --- study finding P3 (2026-10-06): supersede was CLI-only, so an MCP
+    # agent that learned a fact had changed could not chain old -> new.
+
+    def _remember(self, idn, title, content, mtype="fact"):
+        r = mcp_server.handle({"jsonrpc": "2.0", "id": idn, "method": "tools/call",
+                               "params": {"name": "remember", "arguments": {
+                                   "content": content, "type": mtype,
+                                   "title": title}}})
+        self.assertFalse(r["result"]["isError"])
+        return r["result"]["content"][0]["text"].rsplit(" at ", 1)[1]
+
+    def test_supersede_chains_old_to_new(self):
+        old_f = self._remember(20, "Deploy day", "We deploy on Fridays.")
+        new_f = self._remember(21, "Deploy day moved", "We deploy on Mondays now.")
+        sp = mcp_server.handle({"jsonrpc": "2.0", "id": 22, "method": "tools/call",
+                                "params": {"name": "supersede",
+                                           "arguments": {"old": old_f, "by": new_f}}})
+        self.assertFalse(sp["result"]["isError"])
+        self.assertIn("superseded", sp["result"]["content"][0]["text"])
+        # recall serves only the replacement; the old file stays on disk
+        rec = mcp_server.handle({"jsonrpc": "2.0", "id": 23, "method": "tools/call",
+                                 "params": {"name": "recall",
+                                            "arguments": {"query": "deploy day"}}})
+        text = rec["result"]["content"][0]["text"]
+        self.assertIn("Mondays", text)
+        self.assertNotIn("Fridays.", text)
+
+    def test_supersede_refuses_authorizations(self):
+        # The trust boundary stays: grants retire through the human CLI only.
+        from foldcrumbs import store
+        from foldcrumbs.schema import MemoryRecord
+        ev = MemoryRecord(title="Approval", content="Owner approved the deploy.",
+                          type="event")
+        store.write_memory(ev)
+        grant = MemoryRecord(title="Deploy grant", content="May deploy to prod.",
+                             type="authorization", granted_to="agent",
+                             grants="deploy:prod", backed_by=ev.id)
+        store.write_memory(grant, _skip_auth_gate=True)
+        sp = mcp_server.handle({"jsonrpc": "2.0", "id": 24, "method": "tools/call",
+                                "params": {"name": "supersede", "arguments": {
+                                    "old": grant.filename(),
+                                    "by": ev.filename()}}})
+        self.assertIn("refused", sp["result"]["content"][0]["text"])
+        self.assertEqual(store.get(grant.filename()).status, "active")
+
+    def test_supersede_unknown_name_suggests_candidates(self):
+        self._remember(25, "Deploy day", "We deploy on Fridays.")
+        sp = mcp_server.handle({"jsonrpc": "2.0", "id": 26, "method": "tools/call",
+                                "params": {"name": "supersede", "arguments": {
+                                    "old": "deploy day", "by": "fact_deploy_day.md"}}})
+        self.assertIn("exact filename", sp["result"]["content"][0]["text"])
+
+    def test_supersede_missing_replacement_points_to_remember(self):
+        old_f = self._remember(27, "Deploy day", "We deploy on Fridays.")
+        sp = mcp_server.handle({"jsonrpc": "2.0", "id": 28, "method": "tools/call",
+                                "params": {"name": "supersede", "arguments": {
+                                    "old": old_f, "by": "fact_ghost.md"}}})
+        self.assertIn("remember", sp["result"]["content"][0]["text"])
 
     def test_remember_then_recall(self):
         rem = mcp_server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -271,7 +331,8 @@ class TestSubprocessRoundTrip(unittest.TestCase):
         self.assertEqual({t["name"] for t in by_id[2]["result"]["tools"]},
                          {"remember", "recall", "answer", "forget",
                           "graph_path", "relate", "ingest",
-                          "adopt", "outcome", "fetch", "timeline"})
+                          "adopt", "outcome", "fetch", "timeline",
+                          "supersede"})
         self.assertFalse(by_id[3]["result"]["isError"])
         self.assertEqual(len(responses), 3)  # no response for the notification
 

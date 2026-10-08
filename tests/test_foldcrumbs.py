@@ -166,6 +166,315 @@ class TestStore(TmpStore):
         self.assertEqual(store.upsert(b)[0], "validated")
         self.assertEqual(len([m for m in store.load_all()]), 1)
 
+    # --- study findings P1+P2 (2026-10-06): a near-duplicate that CHANGES a
+    # word is a correction, not a confirmation. Validating it bumped the trust
+    # of the sentence being replaced; repeating a superseded fact validated
+    # its replacement (signal inversion). A correction supersedes visibly.
+
+    def test_a_word_change_is_a_correction_not_a_validation(self):
+        a = MemoryRecord(title="Deploy window",
+                         content="We deploy on Tuesdays 10-12 UTC.",
+                         type="decision")
+        self.assertEqual(store.upsert(a)[0], "created")
+        b = MemoryRecord(title="Deploy window",
+                         content="We deploy on Wednesdays 10-12 UTC.",
+                         type="decision")
+        action, _ = store.upsert(b)
+        self.assertEqual(action, "corrected")
+        # the old statement is retired but still on disk, chained to the new
+        retired = [m for m in store.iter_memories_including_retired()
+                   if m.status == "superseded"]
+        self.assertEqual(len(retired), 1)
+        self.assertEqual(retired[0].content, "We deploy on Tuesdays 10-12 UTC.")
+        self.assertEqual(retired[0].superseded_by, store.get(b.filename()).id)
+        # recall serves ONLY the correction
+        hits = store.search("deploy window")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("Wednesdays", hits[0].content)
+        # the correction carries the corrected provenance
+        self.assertEqual(store.get(b.filename()).provenance, "corrected")
+
+    def test_a_pure_addition_stays_a_validation(self):
+        # A near-duplicate that ADDS a word removes none, so it is an
+        # elaboration of the same fact, not a replacement of it.
+        a = MemoryRecord(title="Use stdlib",
+                         content="Hooks use only stdlib here.", type="decision")
+        store.upsert(a)
+        b = MemoryRecord(title="Use stdlib only",
+                         content="Hooks use only stdlib here now.",
+                         type="decision")
+        self.assertEqual(store.upsert(b)[0], "validated")
+        self.assertEqual(store.get(a.filename()).validation_count, 1)
+
+    def test_repeating_a_superseded_fact_does_not_bump_its_replacement(self):
+        v1 = MemoryRecord(title="API version v1",
+                          content="The API version is 1.0.", type="fact")
+        store.write_memory(v1)
+        v2 = MemoryRecord(title="API version v2",
+                          content="The API version is 2.0 now.", type="fact")
+        store.write_memory(v2)
+        store.supersede(v1.filename(), v2.filename())
+        before = store.get(v2.filename()).validation_count
+        repeat = MemoryRecord(title="API version v1",
+                              content="The API version is 1.0.", type="fact")
+        action, _ = store.upsert(repeat)
+        self.assertEqual(action, "corrected")
+        # the replacement did NOT collect trust from the old fact being repeated
+        self.assertEqual(store.get(v2.filename()).validation_count, before)
+
+    def test_an_identical_repeat_stays_a_validation(self):
+        x = MemoryRecord(title="Team size", content="The team has five people.",
+                         type="fact")
+        store.write_memory(x)
+        again = MemoryRecord(title="Team size",
+                             content="The team has five people.", type="fact")
+        self.assertEqual(store.upsert(again)[0], "validated")
+
+    def test_concurrent_validations_lose_no_increment(self):
+        # Study finding P4 (2026-10-06): upsert's dedup path is a
+        # read-modify-write on ONE file. Lock-free, 24 threads racing on the
+        # same memory kept ~2 increments instead of 24 (reproduced before the
+        # fix). With the per-memory lock every validation lands.
+        import threading
+        base = MemoryRecord(title="Team size",
+                            content="The team has five people now.", type="fact")
+        store.write_memory(base)
+        n = 24
+        barrier = threading.Barrier(n)
+        errors = []
+
+        def worker():
+            try:
+                barrier.wait()          # start together
+                rep = MemoryRecord(title="Team size",
+                                   content="The team has five people now.",
+                                   type="fact")
+                store.upsert(rep)
+            except Exception as exc:    # noqa: BLE001 — report, don't die
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=worker) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        self.assertEqual(errors, [], "concurrent upserts raised")
+        self.assertEqual(store.get(base.filename()).validation_count, n,
+                         "concurrent validations lost updates")
+
+    def test_a_derived_record_cannot_correct(self):
+        # distill's inferred records have no authority to correct — their
+        # contradictions are the contradiction pass's call, not dedup's.
+        a = MemoryRecord(title="Deploy", content="We deploy on Tuesdays.",
+                         type="decision")
+        store.write_memory(a)
+        b = MemoryRecord(title="Deploy", content="We deploy on Wednesdays.",
+                         type="decision", provenance="inferred")
+        self.assertEqual(store.upsert(b)[0], "validated")
+        self.assertEqual(store.get(a.filename()).status, "active")
+
+    def test_a_single_character_change_is_a_correction(self):
+        # RT r2 P0-2: "plan A" -> "plan B" changes exactly one one-letter
+        # word. The detector used to drop len<=1 tokens, so the pair
+        # validated and Plan A kept collecting trust.
+        a = MemoryRecord(title="Release plan",
+                         content="Use plan A for release.", type="decision")
+        self.assertEqual(store.upsert(a)[0], "created")
+        b = MemoryRecord(title="Release plan",
+                         content="Use plan B for release.", type="decision")
+        action, _ = store.upsert(b)
+        self.assertEqual(action, "corrected")
+        retired = [m for m in store.iter_memories_including_retired()
+                   if m.status == "superseded"]
+        self.assertEqual(len(retired), 1)
+        self.assertIn("plan A", retired[0].content)
+        hits = store.search("release plan")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("plan B", hits[0].content)
+
+    def test_restore_undoes_an_automatic_correction(self):
+        # RT r2 P0-1: the correction path promises "restore brings the
+        # original back". set_status refuses superseded records (rightly —
+        # a supersede is a decision); restore_correction is the narrow undo
+        # of OUR OWN dedup classification.
+        a = MemoryRecord(title="Deploy window",
+                         content="We deploy on Tuesdays 10-12 UTC.",
+                         type="decision")
+        store.upsert(a)
+        b = MemoryRecord(title="Deploy window",
+                         content="We deploy on Wednesdays 10-12 UTC.",
+                         type="decision")
+        action, _ = store.upsert(b)
+        self.assertEqual(action, "corrected")
+        # the superseded original lives under its HISTORY filename (the
+        # collision case moved it), not the canonical one — use source_path
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded")
+        # set_status alone still refuses (the existing invariant stands)
+        self.assertFalse(store.set_status(old_name, "active"))
+        # the dedicated undo works
+        self.assertTrue(store.restore_correction(old_name))
+        old = store.get(old_name)
+        self.assertEqual(old.status, "active")
+        self.assertIsNone(old.superseded_by)
+        # the correction was ARCHIVED, not deleted: its text is still there
+        corr = store.get(b.filename())
+        self.assertEqual(corr.status, "archived")
+        self.assertEqual(corr.provenance, "corrected")
+        # recall serves the original again, and only it
+        hits = store.search("deploy window")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("Tuesdays", hits[0].content)
+
+    def test_restore_correction_refuses_a_deliberate_supersede(self):
+        # The undo is scoped to automatic corrections only: a manual
+        # supersede (new record keeps its own provenance) must NOT be
+        # reversible through restore_correction — that would undo a
+        # decision, which is supersede/forget territory.
+        old = MemoryRecord(title="Deadline", content="Ship on Friday.",
+                           type="fact")
+        new = MemoryRecord(title="Deadline moved", content="Ship on Monday.",
+                           type="fact")
+        store.write_memory(old)
+        store.write_memory(new)
+        self.assertTrue(store.supersede(old.filename(), new.filename()))
+        self.assertFalse(store.restore_correction(old.filename()))
+        self.assertEqual(store.get(old.filename()).status, "superseded")
+
+    def test_restore_correction_refuses_when_the_corrector_moved_on(self):
+        # If the correcting record is no longer active (archived/forgotten),
+        # the chain link is broken and the undo refuses rather than
+        # resurrecting into an inconsistent state.
+        a = MemoryRecord(title="Standup", content="Standup is at nine.",
+                         type="fact")
+        store.upsert(a)
+        b = MemoryRecord(title="Standup", content="Standup is at ten.",
+                         type="fact")
+        store.upsert(b)
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded")
+        store.set_status(b.filename(), "archived")
+        self.assertFalse(store.restore_correction(old_name))
+        self.assertEqual(store.get(old_name).status, "superseded")
+        # the archived correction stayed archived (nothing was resurrected)
+        self.assertEqual(store.get(b.filename()).status, "archived")
+
+    def test_restore_correction_refuses_when_the_corrector_was_forgotten(self):
+        # RT r3 P0-2's sequential half: a forgotten (deleted) corrector means
+        # the chain link is gone — the undo must refuse, not overwrite the
+        # deletion with a stale archived-write.
+        a = MemoryRecord(title="Standup time", content="Standup is at nine.",
+                         type="fact")
+        store.upsert(a)
+        b = MemoryRecord(title="Standup time", content="Standup is at ten.",
+                         type="fact")
+        store.upsert(b)
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded")
+        store.forget(b.filename())
+        self.assertFalse(store.restore_correction(old_name))
+        self.assertEqual(store.get(old_name).status, "superseded")
+
+    def test_a_corrected_memory_reused_by_supersede_is_not_undoable(self):
+        # RT r3 P0-1's counterexample: "corrected" is public data. B was
+        # legitimately produced by the automatic path, then REUSED as the
+        # target of a deliberate supersede(X, B). Undoing that link would
+        # cancel a decision and leave B's own earlier chain incoherent —
+        # the durable auto_correction marker (stamped only by upsert) is
+        # what separates the two, and X does not carry it.
+        a = MemoryRecord(title="Deploy window",
+                         content="We deploy on Tuesdays 10-12 UTC.",
+                         type="decision")
+        store.upsert(a)
+        b = MemoryRecord(title="Deploy window",
+                         content="We deploy on Wednesdays 10-12 UTC.",
+                         type="decision")
+        store.upsert(b)                       # B is provenance=corrected
+        self.assertEqual(store.get(b.filename()).provenance, "corrected")
+        x = MemoryRecord(title="Old note", content="An older unrelated note.",
+                         type="fact")
+        store.write_memory(x)
+        self.assertTrue(store.supersede(x.filename(), b.filename()))
+        # the deliberate supersede must NOT be undoable through the
+        # correction path
+        self.assertFalse(store.restore_correction(x.filename()))
+        self.assertEqual(store.get(x.filename()).status, "superseded")
+        self.assertEqual(store.get(b.filename()).status, "active")
+        # while the ORIGINAL automatic chain still undoes fine
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded"
+                        and m.extra_meta.get("superseded_via")
+                        == "auto_correction")
+        self.assertTrue(store.restore_correction(old_name))
+
+    def test_restore_correction_is_single_shot(self):
+        # The undo clears the marker: a second call has nothing to undo.
+        a = MemoryRecord(title="Team size note",
+                         content="The team has five people.", type="fact")
+        store.upsert(a)
+        b = MemoryRecord(title="Team size note",
+                         content="The team has seven people.", type="fact")
+        store.upsert(b)
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded")
+        self.assertTrue(store.restore_correction(old_name))
+        self.assertFalse(store.restore_correction(old_name))
+        self.assertEqual(store.get(old_name).status, "active")
+
+    def test_concurrent_restore_and_forget_never_mix_states(self):
+        # RT r3 P0-2: the undo touches TWO records, so it must hold BOTH
+        # locks — a concurrent forget(corrector) racing the restore used to
+        # be overwritten by a stale archived-write. With the sorted dual
+        # lock the two operations serialize: either restore wins (corrector
+        # archived, original active) or forget wins (restore refuses,
+        # corrector deleted) — never a mix.
+        import threading
+        for i in range(5):
+            a = MemoryRecord(title=f"Race note {i}",
+                             content=f"Value is alpha number {i}.",
+                             type="fact")
+            store.upsert(a)
+            b = MemoryRecord(title=f"Race note {i}",
+                             content=f"Value is beta number {i}.",
+                             type="fact")
+            store.upsert(b)
+            old = next(m for m in store.iter_memories_including_retired()
+                       if m.status == "superseded"
+                       and m.title == f"Race note {i}")
+            barrier = threading.Barrier(2)
+            results: dict = {}
+
+            def do_restore(old=old, results=results):
+                barrier.wait()
+                results["restore"] = store.restore_correction(old.source_path)
+
+            def do_forget(b=b, results=results):
+                barrier.wait()
+                results["forget"] = store.forget(b.filename())
+
+            t1 = threading.Thread(target=do_restore)
+            t2 = threading.Thread(target=do_forget)
+            t1.start()
+            t2.start()
+            t1.join(15)
+            t2.join(15)
+            corr = next(m for m in store.iter_memories_including_retired()
+                        if m.id == b.id)
+            orig = store.get(old.source_path)
+            consistent = (
+                (results["restore"] is True
+                 and corr.status == "archived" and orig.status == "active")
+                or (results["restore"] is False and corr.status == "deleted"))
+            self.assertTrue(
+                consistent,
+                f"iter {i}: mixed state restore={results['restore']} "
+                f"corr={corr.status} orig={orig.status}")
+
     def test_index_grouped(self):
         store.upsert(MemoryRecord(title="R", content="rule", type="instruction"))
         store.upsert(MemoryRecord(title="F", content="fact", type="fact"))
@@ -816,6 +1125,49 @@ class TestDecay(TmpStore):
         store.write_memory(rec)
         self.assertNotIn(stale.filename(), audit.decay()["candidates"],
                          "a re-validated memory was archived anyway")
+
+    def _stated(self, title, body, confidence, provenance):
+        """An old preference the USER stated outright (study finding P5)."""
+        from datetime import datetime, timedelta, timezone
+        rec = MemoryRecord(title=title, content=body, type="preference",
+                           confidence=confidence, provenance=provenance)
+        old = datetime.now(timezone.utc) - timedelta(days=120)
+        rec.created_at = rec.updated_at = old
+        store.write_memory(rec)
+        return rec
+
+    def test_an_explicit_preference_does_not_age_out(self):
+        # Study finding P5 (2026-10-06): "prefers dark mode" stated by the
+        # owner is not stale because it is old. An explicit_statement at 0.4
+        # confidence, 120 days old, used to take the 0.2 age penalty -> 0.2 <
+        # STALE_CONF 0.3 and decay archived it. What the user said ages out
+        # only through contradiction / supersession / expiry, never by time.
+        from foldcrumbs import audit
+        stated = self._stated("Editor prefs", "Prefers dark mode and vim keys.",
+                              confidence=0.4, provenance="explicit_statement")
+        self.assertEqual(store.get(stated.filename()).compute_confidence(), 0.4)
+        self.assertNotIn(stated.filename(), audit.decay()["candidates"],
+                         "an explicitly stated preference was archived for being old")
+
+    def test_a_corrected_preference_does_not_age_out_either(self):
+        # `corrected` records what the user SAID too (a correction of a prior
+        # record), so it shares the no-age-penalty treatment.
+        from foldcrumbs import audit
+        stated = self._stated("Editor prefs", "Prefers light mode now.",
+                              confidence=0.35, provenance="corrected")
+        self.assertNotIn(stated.filename(), audit.decay()["candidates"],
+                         "a corrected preference was archived for being old")
+
+    def test_a_derived_preference_still_ages_out(self):
+        # The complement: a model-INFERRED preference is a reading of the
+        # world, and those do drift — it keeps the age penalty and decays.
+        from foldcrumbs import audit
+        inferred = self._stated("Guessed pref", "Seems to like tabs.",
+                                confidence=0.3, provenance="inferred")
+        self.assertLess(store.get(inferred.filename()).compute_confidence(),
+                        audit.STALE_CONF)
+        self.assertIn(inferred.filename(), audit.decay()["candidates"],
+                      "a derived preference no longer ages out")
 
     def _undated(self, name, front):
         path = Path(self.dir) / name
