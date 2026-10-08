@@ -37,8 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the match instead of validating it: new action `corrected`, visible chain,
   and `restore` on the superseded original undoes the automatic correction
   (dedicated `restore_correction`: the original goes back to active, the
-  correction is archived — never deleted; deliberate manual supersessions
-  still refuse, undoing those stays `supersede`/`forget` territory). Word
+  correction is archived — never deleted; the undo is single-shot, scoped to
+  a durable `superseded_via: auto_correction` marker stamped only by the
+  correction path, and holds BOTH per-memory locks so it cannot race a
+  concurrent `forget`; deliberate manual supersessions still refuse —
+  undoing those stays `supersede`/`forget` territory). Word
   changes of ANY length count — a one-character swap ("plan A" → "plan B")
   is a correction, not a confirmation. Same-word repeats still validate; pure
   additions still validate. Derived records (distill's `inferred`, ingest's

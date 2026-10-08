@@ -361,6 +361,120 @@ class TestStore(TmpStore):
         # the archived correction stayed archived (nothing was resurrected)
         self.assertEqual(store.get(b.filename()).status, "archived")
 
+    def test_restore_correction_refuses_when_the_corrector_was_forgotten(self):
+        # RT r3 P0-2's sequential half: a forgotten (deleted) corrector means
+        # the chain link is gone — the undo must refuse, not overwrite the
+        # deletion with a stale archived-write.
+        a = MemoryRecord(title="Standup time", content="Standup is at nine.",
+                         type="fact")
+        store.upsert(a)
+        b = MemoryRecord(title="Standup time", content="Standup is at ten.",
+                         type="fact")
+        store.upsert(b)
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded")
+        store.forget(b.filename())
+        self.assertFalse(store.restore_correction(old_name))
+        self.assertEqual(store.get(old_name).status, "superseded")
+
+    def test_a_corrected_memory_reused_by_supersede_is_not_undoable(self):
+        # RT r3 P0-1's counterexample: "corrected" is public data. B was
+        # legitimately produced by the automatic path, then REUSED as the
+        # target of a deliberate supersede(X, B). Undoing that link would
+        # cancel a decision and leave B's own earlier chain incoherent —
+        # the durable auto_correction marker (stamped only by upsert) is
+        # what separates the two, and X does not carry it.
+        a = MemoryRecord(title="Deploy window",
+                         content="We deploy on Tuesdays 10-12 UTC.",
+                         type="decision")
+        store.upsert(a)
+        b = MemoryRecord(title="Deploy window",
+                         content="We deploy on Wednesdays 10-12 UTC.",
+                         type="decision")
+        store.upsert(b)                       # B is provenance=corrected
+        self.assertEqual(store.get(b.filename()).provenance, "corrected")
+        x = MemoryRecord(title="Old note", content="An older unrelated note.",
+                         type="fact")
+        store.write_memory(x)
+        self.assertTrue(store.supersede(x.filename(), b.filename()))
+        # the deliberate supersede must NOT be undoable through the
+        # correction path
+        self.assertFalse(store.restore_correction(x.filename()))
+        self.assertEqual(store.get(x.filename()).status, "superseded")
+        self.assertEqual(store.get(b.filename()).status, "active")
+        # while the ORIGINAL automatic chain still undoes fine
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded"
+                        and m.extra_meta.get("superseded_via")
+                        == "auto_correction")
+        self.assertTrue(store.restore_correction(old_name))
+
+    def test_restore_correction_is_single_shot(self):
+        # The undo clears the marker: a second call has nothing to undo.
+        a = MemoryRecord(title="Team size note",
+                         content="The team has five people.", type="fact")
+        store.upsert(a)
+        b = MemoryRecord(title="Team size note",
+                         content="The team has seven people.", type="fact")
+        store.upsert(b)
+        old_name = next(m.source_path
+                        for m in store.iter_memories_including_retired()
+                        if m.status == "superseded")
+        self.assertTrue(store.restore_correction(old_name))
+        self.assertFalse(store.restore_correction(old_name))
+        self.assertEqual(store.get(old_name).status, "active")
+
+    def test_concurrent_restore_and_forget_never_mix_states(self):
+        # RT r3 P0-2: the undo touches TWO records, so it must hold BOTH
+        # locks — a concurrent forget(corrector) racing the restore used to
+        # be overwritten by a stale archived-write. With the sorted dual
+        # lock the two operations serialize: either restore wins (corrector
+        # archived, original active) or forget wins (restore refuses,
+        # corrector deleted) — never a mix.
+        import threading
+        for i in range(5):
+            a = MemoryRecord(title=f"Race note {i}",
+                             content=f"Value is alpha number {i}.",
+                             type="fact")
+            store.upsert(a)
+            b = MemoryRecord(title=f"Race note {i}",
+                             content=f"Value is beta number {i}.",
+                             type="fact")
+            store.upsert(b)
+            old = next(m for m in store.iter_memories_including_retired()
+                       if m.status == "superseded"
+                       and m.title == f"Race note {i}")
+            barrier = threading.Barrier(2)
+            results: dict = {}
+
+            def do_restore(old=old, results=results):
+                barrier.wait()
+                results["restore"] = store.restore_correction(old.source_path)
+
+            def do_forget(b=b, results=results):
+                barrier.wait()
+                results["forget"] = store.forget(b.filename())
+
+            t1 = threading.Thread(target=do_restore)
+            t2 = threading.Thread(target=do_forget)
+            t1.start()
+            t2.start()
+            t1.join(15)
+            t2.join(15)
+            corr = next(m for m in store.iter_memories_including_retired()
+                        if m.id == b.id)
+            orig = store.get(old.source_path)
+            consistent = (
+                (results["restore"] is True
+                 and corr.status == "archived" and orig.status == "active")
+                or (results["restore"] is False and corr.status == "deleted"))
+            self.assertTrue(
+                consistent,
+                f"iter {i}: mixed state restore={results['restore']} "
+                f"corr={corr.status} orig={orig.status}")
+
     def test_index_grouped(self):
         store.upsert(MemoryRecord(title="R", content="rule", type="instruction"))
         store.upsert(MemoryRecord(title="F", content="fact", type="fact"))
