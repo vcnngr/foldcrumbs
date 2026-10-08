@@ -57,9 +57,9 @@ none.
      `foldcrumbs profile env <name>` prints the single env line the user
      must set for that agent.
    - Other MCP clients: register the stdio command `foldcrumbs-mcp` —
-     stdlib-only, no MCP SDK dependency. It exposes 11 tools (remember,
-     recall, fetch, timeline, answer, forget, graph_path, relate, ingest,
-     adopt, outcome). Do NOT register `python3 -m foldcrumbs.mcp_server`:
+     stdlib-only, no MCP SDK dependency. It exposes 12 tools (remember,
+     recall, fetch, timeline, answer, forget, supersede, graph_path,
+     relate, ingest, adopt, outcome). Do NOT register `python3 -m foldcrumbs.mcp_server`:
      that form only works with the exact interpreter foldcrumbs was
      installed into, and fails outright after a pipx install (the module is
      not visible to system python).

@@ -317,12 +317,25 @@ class MemoryRecord:
             return 0.0
         return round(min(1.0, self._effective_uncontradicted()), 2)
 
+    # Provenances that record what the USER SAID. Words stated by the
+    # owner do not go stale on their own: they age out only through
+    # contradiction, supersession or expiry — explicit acts. Derived
+    # records (inferred/observed/imported/validated) are the model's or a
+    # fleet peer's reading of the world, and THOSE do drift.
+    _USER_STATED_PROVENANCES = frozenset({"explicit_statement", "corrected"})
+
     def _effective_uncontradicted(self) -> float:
         """The effective weight this record would have WITHOUT the
         contradiction flag — the true ceiling for the penalty branch."""
         base = self.confidence * _PROVENANCE_WEIGHTS.get(self.provenance, 0.8)
         validation_boost = min(0.15, self.validation_count * 0.03)
-        if self.type in ("preference", "observation"):
+        # Study finding P5 (2026-10-06): an explicit preference at 0.4
+        # confidence crossed 90 days dropped to 0.2 and decay archived it —
+        # "prefers dark mode" is not stale because it is old. The age
+        # penalty now applies only to DERIVED provenances; what the user
+        # stated keeps its weight until something explicit retires it.
+        if (self.type in ("preference", "observation")
+                and self.provenance not in self._USER_STATED_PROVENANCES):
             age_days = (_now() - self.created_at).days
             age_penalty = 0.2 if age_days > 90 else 0.1 if age_days > 30 else 0.0
         else:

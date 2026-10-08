@@ -166,6 +166,113 @@ class TestStore(TmpStore):
         self.assertEqual(store.upsert(b)[0], "validated")
         self.assertEqual(len([m for m in store.load_all()]), 1)
 
+    # --- study findings P1+P2 (2026-10-06): a near-duplicate that CHANGES a
+    # word is a correction, not a confirmation. Validating it bumped the trust
+    # of the sentence being replaced; repeating a superseded fact validated
+    # its replacement (signal inversion). A correction supersedes visibly.
+
+    def test_a_word_change_is_a_correction_not_a_validation(self):
+        a = MemoryRecord(title="Deploy window",
+                         content="We deploy on Tuesdays 10-12 UTC.",
+                         type="decision")
+        self.assertEqual(store.upsert(a)[0], "created")
+        b = MemoryRecord(title="Deploy window",
+                         content="We deploy on Wednesdays 10-12 UTC.",
+                         type="decision")
+        action, _ = store.upsert(b)
+        self.assertEqual(action, "corrected")
+        # the old statement is retired but still on disk, chained to the new
+        retired = [m for m in store.iter_memories_including_retired()
+                   if m.status == "superseded"]
+        self.assertEqual(len(retired), 1)
+        self.assertEqual(retired[0].content, "We deploy on Tuesdays 10-12 UTC.")
+        self.assertEqual(retired[0].superseded_by, store.get(b.filename()).id)
+        # recall serves ONLY the correction
+        hits = store.search("deploy window")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("Wednesdays", hits[0].content)
+        # the correction carries the corrected provenance
+        self.assertEqual(store.get(b.filename()).provenance, "corrected")
+
+    def test_a_pure_addition_stays_a_validation(self):
+        # A near-duplicate that ADDS a word removes none, so it is an
+        # elaboration of the same fact, not a replacement of it.
+        a = MemoryRecord(title="Use stdlib",
+                         content="Hooks use only stdlib here.", type="decision")
+        store.upsert(a)
+        b = MemoryRecord(title="Use stdlib only",
+                         content="Hooks use only stdlib here now.",
+                         type="decision")
+        self.assertEqual(store.upsert(b)[0], "validated")
+        self.assertEqual(store.get(a.filename()).validation_count, 1)
+
+    def test_repeating_a_superseded_fact_does_not_bump_its_replacement(self):
+        v1 = MemoryRecord(title="API version v1",
+                          content="The API version is 1.0.", type="fact")
+        store.write_memory(v1)
+        v2 = MemoryRecord(title="API version v2",
+                          content="The API version is 2.0 now.", type="fact")
+        store.write_memory(v2)
+        store.supersede(v1.filename(), v2.filename())
+        before = store.get(v2.filename()).validation_count
+        repeat = MemoryRecord(title="API version v1",
+                              content="The API version is 1.0.", type="fact")
+        action, _ = store.upsert(repeat)
+        self.assertEqual(action, "corrected")
+        # the replacement did NOT collect trust from the old fact being repeated
+        self.assertEqual(store.get(v2.filename()).validation_count, before)
+
+    def test_an_identical_repeat_stays_a_validation(self):
+        x = MemoryRecord(title="Team size", content="The team has five people.",
+                         type="fact")
+        store.write_memory(x)
+        again = MemoryRecord(title="Team size",
+                             content="The team has five people.", type="fact")
+        self.assertEqual(store.upsert(again)[0], "validated")
+
+    def test_concurrent_validations_lose_no_increment(self):
+        # Study finding P4 (2026-10-06): upsert's dedup path is a
+        # read-modify-write on ONE file. Lock-free, 24 threads racing on the
+        # same memory kept ~2 increments instead of 24 (reproduced before the
+        # fix). With the per-memory lock every validation lands.
+        import threading
+        base = MemoryRecord(title="Team size",
+                            content="The team has five people now.", type="fact")
+        store.write_memory(base)
+        n = 24
+        barrier = threading.Barrier(n)
+        errors = []
+
+        def worker():
+            try:
+                barrier.wait()          # start together
+                rep = MemoryRecord(title="Team size",
+                                   content="The team has five people now.",
+                                   type="fact")
+                store.upsert(rep)
+            except Exception as exc:    # noqa: BLE001 — report, don't die
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=worker) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        self.assertEqual(errors, [], "concurrent upserts raised")
+        self.assertEqual(store.get(base.filename()).validation_count, n,
+                         "concurrent validations lost updates")
+
+    def test_a_derived_record_cannot_correct(self):
+        # distill's inferred records have no authority to correct — their
+        # contradictions are the contradiction pass's call, not dedup's.
+        a = MemoryRecord(title="Deploy", content="We deploy on Tuesdays.",
+                         type="decision")
+        store.write_memory(a)
+        b = MemoryRecord(title="Deploy", content="We deploy on Wednesdays.",
+                         type="decision", provenance="inferred")
+        self.assertEqual(store.upsert(b)[0], "validated")
+        self.assertEqual(store.get(a.filename()).status, "active")
+
     def test_index_grouped(self):
         store.upsert(MemoryRecord(title="R", content="rule", type="instruction"))
         store.upsert(MemoryRecord(title="F", content="fact", type="fact"))
@@ -816,6 +923,49 @@ class TestDecay(TmpStore):
         store.write_memory(rec)
         self.assertNotIn(stale.filename(), audit.decay()["candidates"],
                          "a re-validated memory was archived anyway")
+
+    def _stated(self, title, body, confidence, provenance):
+        """An old preference the USER stated outright (study finding P5)."""
+        from datetime import datetime, timedelta, timezone
+        rec = MemoryRecord(title=title, content=body, type="preference",
+                           confidence=confidence, provenance=provenance)
+        old = datetime.now(timezone.utc) - timedelta(days=120)
+        rec.created_at = rec.updated_at = old
+        store.write_memory(rec)
+        return rec
+
+    def test_an_explicit_preference_does_not_age_out(self):
+        # Study finding P5 (2026-10-06): "prefers dark mode" stated by the
+        # owner is not stale because it is old. An explicit_statement at 0.4
+        # confidence, 120 days old, used to take the 0.2 age penalty -> 0.2 <
+        # STALE_CONF 0.3 and decay archived it. What the user said ages out
+        # only through contradiction / supersession / expiry, never by time.
+        from foldcrumbs import audit
+        stated = self._stated("Editor prefs", "Prefers dark mode and vim keys.",
+                              confidence=0.4, provenance="explicit_statement")
+        self.assertEqual(store.get(stated.filename()).compute_confidence(), 0.4)
+        self.assertNotIn(stated.filename(), audit.decay()["candidates"],
+                         "an explicitly stated preference was archived for being old")
+
+    def test_a_corrected_preference_does_not_age_out_either(self):
+        # `corrected` records what the user SAID too (a correction of a prior
+        # record), so it shares the no-age-penalty treatment.
+        from foldcrumbs import audit
+        stated = self._stated("Editor prefs", "Prefers light mode now.",
+                              confidence=0.35, provenance="corrected")
+        self.assertNotIn(stated.filename(), audit.decay()["candidates"],
+                         "a corrected preference was archived for being old")
+
+    def test_a_derived_preference_still_ages_out(self):
+        # The complement: a model-INFERRED preference is a reading of the
+        # world, and those do drift — it keeps the age penalty and decays.
+        from foldcrumbs import audit
+        inferred = self._stated("Guessed pref", "Seems to like tabs.",
+                                confidence=0.3, provenance="inferred")
+        self.assertLess(store.get(inferred.filename()).compute_confidence(),
+                        audit.STALE_CONF)
+        self.assertIn(inferred.filename(), audit.decay()["candidates"],
+                      "a derived preference no longer ages out")
 
     def _undated(self, name, front):
         path = Path(self.dir) / name

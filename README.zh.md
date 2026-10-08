@@ -745,8 +745,8 @@ python3 -m unittest discover -s tests -v
 ## MCP 服务器
 
 foldcrumbs 附带一个极简 MCP 服务器（stdio、仅标准库 — 不依赖 `mcp` SDK），向任何
-MCP 客户端提供十一个工具 — `remember`、`recall`（完整或紧凑索引模式）、`fetch`、
-`timeline`、`answer`、`forget`、`graph_path`、`relate`、`ingest`、`adopt` 和 `outcome`：
+MCP 客户端提供十二个工具 — `remember`、`recall`（完整或紧凑索引模式）、`fetch`、
+`timeline`、`answer`、`forget`、`supersede`、`graph_path`、`relate`、`ingest`、`adopt` 和 `outcome`：
 
 ```bash
 foldcrumbs-mcp            # 随包安装的控制台入口点

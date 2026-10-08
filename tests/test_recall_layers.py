@@ -220,13 +220,13 @@ class TestTimeline(_Seeded):
 
 class TestCatalogParity(_Seeded):
 
-    def test_catalog_is_eleven(self):
+    def test_catalog_is_twelve(self):
         r = _rpc(20, "tools/list")
         names = {t["name"] for t in r["result"]["tools"]}
         self.assertEqual(names,
                          {"remember", "recall", "answer", "forget",
                           "graph_path", "relate", "ingest", "adopt",
-                          "outcome", "fetch", "timeline"})
+                          "outcome", "fetch", "timeline", "supersede"})
 
     def test_every_tool_has_handler_and_cli(self):
         for tool in mcp_server.TOOLS:

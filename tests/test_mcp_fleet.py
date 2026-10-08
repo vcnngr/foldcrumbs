@@ -40,13 +40,14 @@ def _text(resp):
 
 class TestFleetToolsCatalog(unittest.TestCase):
 
-    def test_catalog_is_eleven_tools(self):
+    def test_catalog_is_twelve_tools(self):
         r = _rpc(1, "tools/list")
         names = {t["name"] for t in r["result"]["tools"]}
         self.assertEqual(names,
                          {"remember", "recall", "answer", "forget",
                           "graph_path", "relate", "ingest",
-                          "adopt", "outcome", "fetch", "timeline"})
+                          "adopt", "outcome", "fetch", "timeline",
+                          "supersede"})
 
     def test_adopt_tool_schema(self):
         tool = next(t for t in mcp_server.TOOLS if t["name"] == "adopt")

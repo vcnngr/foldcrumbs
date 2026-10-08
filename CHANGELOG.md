@@ -26,6 +26,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   33 contract tests incl. cross-tenant-leak, store-escape, collision-safe
   scope digest, and total-CLI-contract regressions.
 
+### Changed
+
+- **Near-duplicates that change a word are corrections, not confirmations.**
+  `remember`'s fuzzy dedup used to bump trust on *any* ≥0.85-similar record,
+  so "standup moved to Wednesdays" over "…to Tuesdays" *raised the confidence
+  of the sentence it was replacing* — and repeating a superseded fact made the
+  replacement look more trusted (inverted signal). Now a user-voiced record
+  (`explicit_statement`/`corrected`) whose content **drops words** supersedes
+  the match instead of validating it: new action `corrected`, visible chain,
+  `restore` brings the original back. Same-word repeats still validate; pure
+  additions still validate. Derived records (distill's `inferred`, ingest's
+  `imported`) never correct — their contradictions stay with the
+  contradiction pass. Filename collisions (same title, the common case) move
+  the old record to a history name first, so the chain survives.
+
+- **MCP can now supersede** (11 → 12 tools). Explicit old→new corrections were
+  CLI-only, so an MCP agent could add a contradicting memory but never retire
+  the one it replaced. The new `supersede` tool keeps the existing trust
+  boundary: `type=authorization` records still refuse (grants retire through
+  the human CLI only).
+
+- **Spoken facts age on their own merits, not on their birthday.** The 90-day
+  age penalty (−0.2 effective confidence) now applies only to derived
+  provenance (inferred/observed/imported/validated). An explicit user
+  statement or correction no longer decays into archival on age alone — a
+  low-confidence preference you actually said survives; it is retired by
+  contradiction or supersession, not by the calendar. Derived records are
+  unchanged.
+
+### Fixed
+
+- **Lost updates on concurrent writes.** `upsert` (validate/correct),
+  `supersede`, `set_status` and `forget` did read-modify-write on ordinary
+  memories with no lock, so two writers on the same memory could silently drop
+  one another's change. Measured before the fix: 24 concurrent validations
+  landed `validation_count=2` (22 increments lost). These paths now take the
+  same per-memory lock (`locks/memory-<id>`) authorizations already used and
+  re-read under it; an unobtainable lock refuses loudly instead of racing.
+  Same 24 threads after the fix: 24/24.
+
 ## [0.12.0] — 2026-09-29
 
 ### Added

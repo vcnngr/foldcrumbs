@@ -86,8 +86,14 @@ Two guarantees worth trusting:
 ## Writing memories an agent should write
 
 - One fact per file. `remember` deduplicates near-identical content by
-  fuzzy match — a near-duplicate VALIDATES the existing record (bumps its
-  trust), it is not a content-replacement command: the old text stays.
+  fuzzy match — a near-duplicate that says the SAME thing VALIDATES the
+  existing record (bumps its trust). A near-duplicate that CHANGES a word
+  of the content ("Tuesdays" -> "Wednesdays") and carries the user's own
+  voice is a CORRECTION: the new record supersedes the old one (visible
+  chain, `restore` brings the original back) instead of quietly raising
+  the trust of the sentence being replaced. Derived records (distill's
+  `inferred`, ingest's `imported`) never correct — they validate or
+  create, and their contradictions go through the contradiction pass.
   (Authorizations are excluded from the fuzzy dedup and are create-only —
   they are never validated in place by a similar-looking new record.)
 - Use `--type` honestly: `fact`, `preference`, `goal`, `decision`,
