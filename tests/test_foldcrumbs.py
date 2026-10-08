@@ -429,11 +429,24 @@ class TestStore(TmpStore):
     def test_concurrent_restore_and_forget_never_mix_states(self):
         # RT r3 P0-2: the undo touches TWO records, so it must hold BOTH
         # locks — a concurrent forget(corrector) racing the restore used to
-        # be overwritten by a stale archived-write. With the sorted dual
-        # lock the two operations serialize: either restore wins (corrector
-        # archived, original active) or forget wins (restore refuses,
-        # corrector deleted) — never a mix.
+        # be overwritten by a stale archived-write. The mutex SERIALIZES the
+        # two operations serialize; it does not cancel the second one.
+        # Contract (RT r5, pinned per reviewer): the FINAL state must equal
+        # one of the two COMPLETE sequential orders —
+        #   forget first : forget="deleted", restore refuses (False),
+        #                  corrector deleted, original stays superseded;
+        #   restore first: restore=True, original active, then the queued
+        #                  forget completes: forget="deleted", corrector
+        #                  deleted.
+        # A lock refusal (forget returns None — "retry in a moment") is NOT
+        # a final state, so the forget thread retries until it lands (RT r5
+        # P0-1: the previous assertion accepted the mid-refusal state
+        # corr=archived, which is neither documented order).
+        # What must never happen is the r2 bug: restore returning True off a
+        # stale read (original active while the corrector was ALREADY
+        # deleted before the restore started).
         import threading
+        import time
         for i in range(5):
             a = MemoryRecord(title=f"Race note {i}",
                              content=f"Value is alpha number {i}.",
@@ -455,24 +468,36 @@ class TestStore(TmpStore):
 
             def do_forget(b=b, results=results):
                 barrier.wait()
-                results["forget"] = store.forget(b.filename())
+                out = store.forget(b.filename())
+                tries = 0
+                while out is None and tries < 100:
+                    # loud lock refusal = "retry in a moment" — not final
+                    time.sleep(0.05)
+                    out = store.forget(b.filename())
+                    tries += 1
+                results["forget"] = out
 
             t1 = threading.Thread(target=do_restore)
             t2 = threading.Thread(target=do_forget)
             t1.start()
             t2.start()
-            t1.join(15)
-            t2.join(15)
+            t1.join(30)
+            t2.join(30)
             corr = next(m for m in store.iter_memories_including_retired()
                         if m.id == b.id)
             orig = store.get(old.source_path)
-            consistent = (
-                (results["restore"] is True
-                 and corr.status == "archived" and orig.status == "active")
-                or (results["restore"] is False and corr.status == "deleted"))
+            forget_first = (results["forget"] == "deleted"
+                            and results["restore"] is False
+                            and corr.status == "deleted"
+                            and orig.status == "superseded")
+            restore_first = (results["restore"] is True
+                             and results["forget"] == "deleted"
+                             and orig.status == "active"
+                             and corr.status == "deleted")
             self.assertTrue(
-                consistent,
-                f"iter {i}: mixed state restore={results['restore']} "
+                forget_first or restore_first,
+                f"iter {i}: state outside both complete sequential orders — "
+                f"restore={results['restore']} forget={results['forget']} "
                 f"corr={corr.status} orig={orig.status}")
 
     def test_index_grouped(self):
