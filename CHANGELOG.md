@@ -5,9 +5,18 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.0] — 2026-10-08
 
 ### Added
+
+- **Agent-facing docs surface** — `llms.txt` at the repo root (compact
+  llmstxt.org-style index: AGENTS.md first, integrations, quality evidence
+  with the exact measured numbers, design deep-dives, honest non-goals) and
+  `SETUP-FOR-AGENTS.md` (install-and-wire instructions written to be
+  *executed by an AI client*, served via the stable raw.githubusercontent
+  URL; every command verified against the real CLI by 34 conformity audits
+  in `tools/conformity/` — including a pipx path with positive/negative
+  by-name controls). Callouts linked from all three READMEs.
 
 - **Paperclip memory-provider bridge** (`integrations/paperclip/bridge.py`)
   — foldcrumbs as a local markdown-first memory provider for
