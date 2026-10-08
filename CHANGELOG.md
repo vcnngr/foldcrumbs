@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `tools/conformity/` — including a pipx path with positive/negative
   by-name controls). Callouts linked from all three READMEs.
 
+- **Hard-negatives benchmark frontier** (`benchmarks/quality/`) — near-miss
+  pairs mined empirically from the real store (probe + audited golden set),
+  four hermeticity neutralizations (reinforce/counts, federation, semantic
+  cache, host state-dir), an anti-divergence guard (mutation-checked) and a
+  cross-state-dir proof (`verify_hermetic.py`). Measured, honest numbers in
+  `RESULTS.md`: lexical 7/7 FP, semantic 6/7 on hard negatives (n=7,
+  directional only) — the semantic channel's real value stays paraphrase
+  recall 7/10 → 10/10.
+
 - **Paperclip memory-provider bridge** (`integrations/paperclip/bridge.py`)
   — foldcrumbs as a local markdown-first memory provider for
   [Paperclip](https://github.com/paperclipai/paperclip) (94k-star agent-orchestration

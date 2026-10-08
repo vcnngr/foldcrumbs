@@ -429,10 +429,18 @@ class TestStore(TmpStore):
     def test_concurrent_restore_and_forget_never_mix_states(self):
         # RT r3 P0-2: the undo touches TWO records, so it must hold BOTH
         # locks — a concurrent forget(corrector) racing the restore used to
-        # be overwritten by a stale archived-write. With the sorted dual
-        # lock the two operations serialize: either restore wins (corrector
-        # archived, original active) or forget wins (restore refuses,
-        # corrector deleted) — never a mix.
+        # be overwritten by a stale archived-write. The mutex SERIALIZES the
+        # two operations; it does not cancel the second one. Contract (RT
+        # r4 P0-1, pinned): every interleaving must equal one of the two
+        # sequential orders —
+        #   forget first: restore refuses (False), corrector deleted,
+        #                  original stays superseded;
+        #   restore first: original active, then the queued forget deletes
+        #                  the (now archived) corrector — corrector ends
+        #                  deleted, and that is consistent, not mixed.
+        # What must never happen is the r2 bug: restore returning True off a
+        # stale read (e.g. original active while corrector was ALREADY
+        # deleted before the restore started).
         import threading
         for i in range(5):
             a = MemoryRecord(title=f"Race note {i}",
@@ -466,13 +474,16 @@ class TestStore(TmpStore):
             corr = next(m for m in store.iter_memories_including_retired()
                         if m.id == b.id)
             orig = store.get(old.source_path)
-            consistent = (
-                (results["restore"] is True
-                 and corr.status == "archived" and orig.status == "active")
-                or (results["restore"] is False and corr.status == "deleted"))
+            forget_first = (results["restore"] is False
+                            and corr.status == "deleted"
+                            and orig.status == "superseded")
+            restore_first = (results["restore"] is True
+                             and orig.status == "active"
+                             and corr.status in ("archived", "deleted"))
             self.assertTrue(
-                consistent,
-                f"iter {i}: mixed state restore={results['restore']} "
+                forget_first or restore_first,
+                f"iter {i}: state outside both sequential orders — "
+                f"restore={results['restore']} forget={results['forget']} "
                 f"corr={corr.status} orig={orig.status}")
 
     def test_index_grouped(self):
