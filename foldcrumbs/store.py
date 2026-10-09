@@ -771,6 +771,23 @@ def upsert(
     _refuse_if_foreign(rec, "store")
     if rec.type == "authorization":
         return "created", write_memory(rec, cwd)
+    # RT r1 P0 (PR #91): the same-slot check, the dedup decision AND the
+    # write must be atomic per slot — lock on the target filename (stable
+    # across ids) spans all outcomes, so two concurrent same-title
+    # remembers can no longer both see an empty slot and os.replace-race.
+    with _slot_lock(rec.filename()) as slot_held:
+        if not slot_held:
+            raise ContractProtectedError(
+                f"{rec.filename()}: slot locked by another writer; "
+                "refusing to race it (retry in a moment)")
+        return _upsert_locked(rec, cwd, allow_correction)
+
+
+def _upsert_locked(
+    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None,
+    allow_correction: bool = True,
+) -> tuple[str, Path]:
+    """The dedup decision + write. Caller MUST hold _slot_lock(rec.filename())."""
     dup = find_duplicate(rec, cwd)
     same_slot = False
     if dup is None and rec.type != "authorization":
@@ -1092,6 +1109,26 @@ def set_status(
     if rebuild:
         rebuild_index(cwd)
     return True
+
+
+def _slot_lock(filename: str, wait: float = 5.0):
+    """Per-SLOT exclusive lock (locks/slot-<filename>), stable across ids.
+
+    RT r1 P0 (PR #91): upsert's creation path checked the same-slot
+    occupant lock-free and write_memory did check+os.replace unserialized —
+    two concurrent same-title remembers both saw an empty slot, both
+    returned "created", and one record was silently lost (os.replace
+    last-writer-wins). _memory_lock(id) cannot cover this: the two racers
+    have DIFFERENT ids but target the SAME filename. The slot lock spans
+    read → decision → write for every upsert outcome (created, validated,
+    corrected, refused), so the same-slot check and the write are atomic
+    with respect to other upserts of that slot. Bounded wait; refuse, never
+    race."""
+    from . import federation
+
+    safe = "".join(c if c.isalnum() else "_" for c in filename)
+    lock_dir = Path(config.STATE_DIR) / "locks" / f"slot-{safe}"
+    return federation.file_lock(lock_dir, wait=wait)
 
 
 def _memory_lock(rec_id: str, wait: float = 5.0):

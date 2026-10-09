@@ -262,6 +262,64 @@ class TestStore(TmpStore):
         self.assertEqual(store.get(base.filename()).validation_count, n,
                          "concurrent validations lost updates")
 
+    def test_concurrent_same_slot_upserts_never_both_create(self):
+        # RT r1 P0 (PR #91): the same-slot check ran lock-free and
+        # write_memory's check+os.replace was unserialized — two concurrent
+        # same-title remembers BOTH saw an empty slot, both returned
+        # "created", and one record was silently lost (reviewer PoC: two
+        # created actions, one file on disk). The per-slot lock (keyed by
+        # filename, stable across ids) makes read → decision → write atomic:
+        # the only legal outcomes are the two sequential orders —
+        #   created + corrected (second write chains over the first), or
+        #   created + refused (loud ContractProtectedError is acceptable,
+        #   silent loss is not).
+        # Mutation-checked: replacing _slot_lock with nullcontext makes two
+        # concurrent racers return ["created", "created"] deterministically
+        # (15/15 runs), so this test fails without the lock.
+        import threading
+        for _attempt in range(8):
+            barrier = threading.Barrier(2, timeout=10)
+            out = {}
+
+            def go(tag, content):
+                rec = MemoryRecord(title="Tobia", content=content,
+                                   type="fact",
+                                   provenance="explicit_statement")
+                barrier.wait()          # start together
+                try:
+                    out[tag] = store.upsert(rec)[0]
+                except store.ContractProtectedError:
+                    out[tag] = "refused"   # loud refusal: a legal outcome
+
+            ta = threading.Thread(target=go, args=("a", "Tobia fa vela."))
+            tb = threading.Thread(target=go, args=(
+                "b", "Tobia non fa più vela, fa arrampicata."))
+            ta.start()
+            tb.start()
+            ta.join(timeout=20)
+            tb.join(timeout=20)
+            self.assertEqual(sorted(out), ["a", "b"], "a racer never landed")
+            actions = sorted(out.values())
+            self.assertNotEqual(
+                actions, ["created", "created"],
+                "two concurrent same-slot upserts both created — the slot "
+                "lock did not serialize them; one record was silently lost")
+            self.assertIn(actions, (["corrected", "created"],
+                                    ["created", "refused"]),
+                          f"illegal concurrent outcome: {actions}")
+            # Whichever order won: exactly ONE active memory for the slot,
+            # never two (contradiction) and never zero (lost).
+            actives = [m for m in store.iter_memories()
+                       if m.status == "active" and m.title == "Tobia"]
+            self.assertEqual(len(actives), 1,
+                             f"slot left with {len(actives)} actives "
+                             f"(actions={actions})")
+            # Reset the slot for the next attempt (fresh record ids, and the
+            # store dir is per-test but the loop needs a clean slate).
+            for m in list(store.iter_memories_including_retired()):
+                if m.title == "Tobia":
+                    store.forget(m.filename())
+
     def test_same_title_low_similarity_correction_chains(self):
         # Team report 2026-10-08 / P2 (worse than reported): a same-title
         # write BELOW the dedup threshold used to os.replace the original
