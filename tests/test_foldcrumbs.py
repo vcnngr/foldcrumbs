@@ -262,6 +262,89 @@ class TestStore(TmpStore):
         self.assertEqual(store.get(base.filename()).validation_count, n,
                          "concurrent validations lost updates")
 
+    def test_same_title_low_similarity_correction_chains(self):
+        # Team report 2026-10-08 / P2 (worse than reported): a same-title
+        # write BELOW the dedup threshold used to os.replace the original
+        # file — silent data loss, no chain, no warning. Now: user-stated
+        # + content words changed => correction chain, even below threshold.
+        a = MemoryRecord(title="Hobby di Tobia", content="Tobia fa vela.",
+                         type="fact", provenance="explicit_statement")
+        action, _ = store.upsert(a)
+        self.assertEqual(action, "created")
+        b = MemoryRecord(title="Hobby di Tobia",
+                         content="Tobia non fa più vela, fa arrampicata.",
+                         type="fact", provenance="explicit_statement")
+        action2, path2 = store.upsert(b)
+        self.assertEqual(action2, "corrected")
+        # the correction holds the canonical name; the original moved to a
+        # history file and is superseded WITH the auto-correction marker
+        self.assertEqual(Path(path2).name, b.filename())
+        old = store.get(f"{b.filename().removesuffix('.md')}-{a.id[:8]}.md")
+        self.assertIsNotNone(old, "original must survive in a history file")
+        self.assertEqual(old.status, "superseded")
+        self.assertEqual(old.superseded_by, b.id)
+        self.assertEqual(old.extra_meta.get("superseded_via"), "auto_correction")
+        self.assertEqual(old.content, "Tobia fa vela.")
+
+    def test_same_title_repeat_of_old_fact_chains_back(self):
+        # The team's exact sequence: after the correction, repeating the OLD
+        # fact must not resurrect it silently alongside the new one — the
+        # user's voice repeating it is a correction BACK, visible chain.
+        a = MemoryRecord(title="Hobby di Tobia", content="Tobia fa vela.",
+                         type="fact", provenance="explicit_statement")
+        store.upsert(a)
+        b = MemoryRecord(title="Hobby di Tobia",
+                         content="Tobia non fa più vela, fa arrampicata.",
+                         type="fact", provenance="explicit_statement")
+        store.upsert(b)
+        c = MemoryRecord(title="Hobby di Tobia", content="Tobia fa vela.",
+                         type="fact", provenance="explicit_statement")
+        action3, path3 = store.upsert(c)
+        self.assertEqual(action3, "corrected")
+        live = store.get(Path(path3).name)
+        self.assertEqual(live.content, "Tobia fa vela.")
+        # exactly ONE active memory for this slot — no silent coexistence
+        actives = [m for m in store.iter_memories()
+                   if m.status == "active" and "Tobia" in m.content]
+        self.assertEqual(len(actives), 1,
+                         f"expected one active Tobia memory, got "
+                         f"{[m.content for m in actives]}")
+
+    def test_derived_same_title_collision_raises(self):
+        # A derived record (distill's inferred) has no authority to correct:
+        # a same-title collision must fail loudly, never clobber.
+        a = MemoryRecord(title="Hobby di Tobia", content="Tobia fa vela.",
+                         type="fact", provenance="explicit_statement")
+        store.upsert(a)
+        before = store._resolve_in_store(a.filename()).read_bytes()
+        b = MemoryRecord(title="Hobby di Tobia",
+                         content="Tobia fa arrampicata ora.",
+                         type="fact", provenance="inferred")
+        with self.assertRaises(store.ContractProtectedError):
+            store.upsert(b)
+        self.assertEqual(store._resolve_in_store(a.filename()).read_bytes(),
+                         before, "the original bytes must survive")
+
+    def test_corrections_disabled_never_clobbers_a_live_same_slot(self):
+        # The P2 invariant, at the semantic level: when corrections are off
+        # (e.g. import_store of a foreign record), a live same-slot occupant
+        # is refused loudly — the write_memory os.replace below is never
+        # reached. (write_memory itself stays the byte-level primitive its
+        # other tests rely on; the protection belongs to upsert.)
+        a = MemoryRecord(title="Slot", content="first truth.", type="fact",
+                         provenance="explicit_statement")
+        store.upsert(a)
+        before = store._resolve_in_store(a.filename()).read_bytes()
+        b = MemoryRecord(title="Slot", content="unrelated second truth.",
+                         type="fact", provenance="explicit_statement")
+        self.assertEqual(a.filename(), b.filename(),
+                         "the fixture no longer collides on the filename")
+        with self.assertRaises(store.ContractProtectedError) as ctx:
+            store.upsert(b, allow_correction=False)
+        self.assertIn("collision", str(ctx.exception).lower())
+        self.assertEqual(store._resolve_in_store(a.filename()).read_bytes(),
+                         before, "the incumbent's bytes must survive")
+
     def test_a_derived_record_cannot_correct(self):
         # distill's inferred records have no authority to correct — their
         # contradictions are the contradiction pass's call, not dedup's.

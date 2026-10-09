@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A same-title write below the dedup threshold silently clobbered the
+  incumbent** (found via the external team's 0.13.0 report, worse than
+  reported): "Tobia fa vela." → "Tobia non fa più vela, fa arrampicata."
+  scores ~0.71 (under the 0.85 fuzzy bar), never reached the correction
+  branch, and `os.replace` overwrote the original file — data loss with no
+  chain and no warning. Now `upsert` arbitrates every LIVE same-slot
+  occupant: the user's own voice (explicit_statement/corrected) with any
+  content-word change is a correction (visible chain, `restore` undoes it);
+  identical words remain a confirmation; a derived record (distill's
+  inferred, an import, corrections disabled) gets a loud refusal instead —
+  `distill.persist` counts it `skipped`, `import_store` plans it `skipped`.
+  Repeating the superseded fact is a correction BACK: exactly one active
+  memory for the slot, full chain on disk. The protection lives at the
+  semantic layer (`upsert`); `write_memory` stays the byte-level primitive.
+
 ## [0.13.0] — 2026-10-08
 
 ### Added

@@ -255,10 +255,17 @@ def distill(summary: str, source: str = "foldcrumbs-distill") -> list[MemoryReco
 
 def persist(records: list[MemoryRecord], cwd: str | None = None) -> dict[str, int]:
     """Upsert records (dedup-aware) and rebuild the index. Returns counts."""
-    created = validated = 0
+    created = validated = skipped = 0
     fresh: list[MemoryRecord] = []
     for rec in records:
-        action, _ = store.upsert(rec, cwd)
+        try:
+            action, _ = store.upsert(rec, cwd)
+        except store.ContractProtectedError as exc:
+            # Same-slot occupant a derived record cannot replace (P2 fix):
+            # an inferred note never silently clobbers a stated memory.
+            skipped += 1
+            config.log_event(f"distill skipped (collision): {exc}")
+            continue
         if action == "created":
             created += 1
             fresh.append(rec)
@@ -280,7 +287,7 @@ def persist(records: list[MemoryRecord], cwd: str | None = None) -> dict[str, in
         if pruned:
             config.log_event(f"auto-prune removed {len(pruned)} artifact(s): "
                              + ", ".join(pruned))
-    return {"created": created, "validated": validated,
+    return {"created": created, "validated": validated, "skipped": skipped,
             "superseded": superseded, "total": len(records)}
 
 
