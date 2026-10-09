@@ -98,8 +98,12 @@ Two guarantees worth trusting:
   create, and their contradictions go through the contradiction pass.
   A slot holding a RETIRED record (superseded or archived — an explicit
   `supersede` leaves it on its own filename) refuses any re-write loudly:
-  repeating the old exact sentence is a revival attempt, not a new memory;
-  undo deliberately (`restore`) or `forget --hard` the slot open first.
+  repeating the old exact sentence is a revival attempt, not a new memory.
+  Undo it deliberately with the procedure that WORKS for that state: an
+  ARCHIVED record is brought back with `restore`; a SUPERSEDED record is
+  NOT restorable by design (a supersession is a decision `restore` knows
+  nothing about), so to reopen the slot `forget --hard` it and re-record.
+  The refusal message names the correct procedure per state.
   (Authorizations are excluded from the fuzzy dedup and are create-only —
   they are never validated in place by a similar-looking new record.)
 - Use `--type` honestly: `fact`, `preference`, `goal`, `decision`,

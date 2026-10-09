@@ -836,11 +836,27 @@ def _upsert_locked(
             # history (identical repeat = resurrection of the old fact;
             # different content = the record vanishes with no trace).
             # Deliberate retirements are undone deliberately.
+            #
+            # RT r1 P0 (t_bf465190): the hint must name only procedures
+            # that WORK for this state. `foldcrumbs restore` succeeds for
+            # an ARCHIVED record (set_status archived→active); for a
+            # SUPERSEDED one it refuses by design ("a supersession is a
+            # decision this call knows nothing about"), and reverse-
+            # superseding leaves both records superseded. So the undo a
+            # superseded slot really supports is `forget --hard` + re-
+            # record — say exactly that, no false promises.
             _same = _content_body_words(rec) == _content_body_words(retired)
-            hint = (f"`foldcrumbs restore "
-                    f"{retired.source_path or retired.filename()}`")
-            if retired.status == "superseded" and retired.superseded_by:
-                hint += " (or supersede the replacement back explicitly)"
+            _loc = retired.source_path or retired.filename()
+            if retired.status == "archived":
+                hint = (f"undo it with `foldcrumbs restore {_loc}`")
+            else:
+                # Superseded: name ONLY the procedure that works. No
+                # `restore` mention at all — it fails here by design and
+                # even an explanatory reference invites an agent to try it.
+                hint = (f"to reopen the slot deliberately, "
+                        f"`foldcrumbs forget {_loc} --hard --apply` and "
+                        "re-record it (a supersession is undone explicitly, "
+                        "never by re-writing the old sentence)")
             raise ContractProtectedError(
                 f"{rec.filename()}: this slot holds a {retired.status} "
                 f"memory ({retired.id[:8]})"
@@ -848,8 +864,7 @@ def _upsert_locked(
                    "resurrect the retired fact" if _same else
                    " — creating here would silently destroy that retired "
                    "record (os.replace, no trace)")
-                + f". Undo the retirement deliberately: {hint}; or "
-                "`forget --hard` it first if the slot should really open")
+                + f". {hint}")
         occupant = _same_slot_occupant(rec, cwd)
         if occupant is not None:
             if (allow_correction
@@ -1021,11 +1036,15 @@ def import_store(
                 # (P2 fix): skipped, never a silent overwrite.
                 action = "skipped"
         else:
-            # Mirror the apply path: a same-slot occupant below the fuzzy
-            # threshold will be REFUSED at apply time, not created.
+            # Mirror the apply path EXACTLY (RT r1 P1, t_bf465190): the
+            # dry-run used to check only the LIVE same-slot occupant, so a
+            # retired (superseded/archived) slot was forecast "created"
+            # while apply refuses it -> "skipped". A dry-run that
+            # disagrees with apply is a lie; check both occupants.
             if find_duplicate(rec, cwd) is not None:
                 action = "validated"
-            elif _same_slot_occupant(rec, cwd) is not None:
+            elif (_same_slot_occupant(rec, cwd) is not None
+                  or _retired_slot_occupant(rec, cwd) is not None):
                 action = "skipped"
             else:
                 action = "created"

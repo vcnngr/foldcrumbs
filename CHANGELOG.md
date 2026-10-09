@@ -16,9 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   superseded file — new id, chain gone, the old fact quietly back in
   recall next to its replacement. A retired slot occupant (superseded or
   archived, not expired — expiry keeps its "rewrite fresh" semantics) now
-  refuses ANY cross-id write loudly, with the undo hint (`restore`, or
-  `forget --hard` the slot open first). Deliberate retirements are undone
+  refuses ANY cross-id write loudly, naming — per state — the undo that
+  ACTUALLY works: `restore` for an archived record; `forget --hard` +
+  re-record for a superseded one (a supersession is a deliberate
+  decision `restore` refuses by design — the refusal message never
+  promises an undo that fails). Deliberate retirements are undone
   deliberately, never by a bare re-remember.
+- **`import --dry-run` disagreed with `--apply` on a retired slot**
+  (found in review of the fix above): the dry-run forecast `created`
+  while apply refused the write (`skipped`) — it checked only the live
+  same-slot occupant, not the retired one. A dry-run that lies about
+  what apply will do is worse than no dry-run; it now mirrors apply
+  exactly (both occupants checked).
 - **`forget --hard` left the deleted memory's title on disk**: the slot
   lock file was named `slot-<slug of the filename>` and lock files are
   never removed, so `state/locks/` accumulated readable titles of

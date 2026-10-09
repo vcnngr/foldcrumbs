@@ -368,6 +368,48 @@ class TestStore(TmpStore):
                          f"expected one active Tobia memory, got "
                          f"{[m.content for m in actives]}")
 
+    def test_refusal_message_promises_only_an_undo_that_works(self):
+        # RT r2 P0 (t_bf465190): the refusal must name, per state, the
+        # procedure that ACTUALLY works. For a SUPERSEDED occupant,
+        # `restore` fails by design ("nothing to restore", rc=1) and a
+        # reverse supersede leaves BOTH records superseded — so the
+        # message must NOT suggest restore there; it must point at
+        # forget --hard + re-record. For an ARCHIVED occupant, restore
+        # DOES work, and the message says so.
+        a = MemoryRecord(title="Tobia Vela", content="Tobia fa vela.",
+                         type="fact")
+        b = MemoryRecord(title="Tobia Climbing", content="Tobia fa arrampicata.",
+                         type="fact")
+        _, a_path = store.upsert(a)
+        _, b_path = store.upsert(b)
+        self.assertTrue(store.supersede(Path(a_path).name, Path(b_path).name))
+        c = MemoryRecord(title="Tobia Vela", content="Tobia fa vela.",
+                         type="fact")
+        with self.assertRaises(store.ContractProtectedError) as ctx:
+            store.upsert(c)
+        msg = str(ctx.exception)
+        self.assertIn("forget", msg)
+        self.assertNotIn("foldcrumbs restore", msg,
+                         "refusal suggests `restore`, which FAILS on a "
+                         "superseded record (rc=1) — false operational hint")
+        # the promised procedure actually works: forget --hard opens the slot
+        self.assertTrue(store.forget(Path(a_path).name, hard=True))
+        action, _ = store.upsert(c)
+        self.assertEqual(action, "created")
+        # --- archived occupant: restore IS promised and works ---
+        d = MemoryRecord(title="Tobia Swim", content="Tobia nuota.",
+                         type="fact")
+        _, d_path = store.upsert(d)
+        self.assertTrue(store.set_status(Path(d_path).name, "archived"))
+        e = MemoryRecord(title="Tobia Swim", content="Tobia nuota in mare.",
+                         type="fact")
+        with self.assertRaises(store.ContractProtectedError) as ctx2:
+            store.upsert(e)
+        msg2 = str(ctx2.exception)
+        self.assertIn("restore", msg2,
+                      "archived occupant: `restore` works, message should say so")
+        self.assertTrue(store.set_status(Path(d_path).name, "active"))  # restore works
+
     def test_explicit_supersede_then_identical_rewrite_is_refused(self):
         # Team report 2026-10-09 (P2), the EXPLICIT-supersede variant. An
         # auto-correction moves the retired record to a HISTORY file (the
@@ -2130,6 +2172,32 @@ class TestImportStore(TmpStore):
         self.assertEqual(plan["created"], [])
         self.assertEqual(len(plan["validated"]), 2)
         self.assertEqual(len(store.load_all()), 2)
+
+    def test_dry_run_and_apply_agree_on_a_retired_slot(self):
+        # RT r2 P1 (t_bf465190): dry-run used to forecast "created" on a
+        # slot whose occupant is retired (superseded), while apply then
+        # REFUSED the write (skipped). A dry-run that lies about apply is
+        # worse than none. Both must say the same thing.
+        # Put the target's slot for "decision_uses_postgres.md" into the
+        # RETIRED state (same-id status flip, mirroring a real supersede):
+        live = MemoryRecord(title="Uses Postgres",
+                            content="We use Postgres now.", type="decision")
+        action, path = store.upsert(live)
+        self.assertEqual(action, "created")
+        incumbent = store.get(Path(path).name)
+        incumbent.status = "superseded"
+        store.write_memory(incumbent)  # same-id rewrite: allowed
+        src = self._make_src()
+        dry = store.import_store(src)
+        self.assertNotIn("decision_uses_postgres.md", dry["created"],
+                         "dry-run forecasts create on a retired slot — "
+                         "apply will refuse it (skipped), the plan lies")
+        self.assertIn("decision_uses_postgres.md", dry["skipped"])
+        applied = store.import_store(src, apply=True)
+        self.assertEqual(sorted(dry["skipped"]), sorted(applied["skipped"]),
+                         "dry-run and apply disagree on the skipped set")
+        self.assertEqual(sorted(dry["created"]), sorted(applied["created"]),
+                         "dry-run and apply disagree on the created set")
 
 
 class TestLifecycle(TmpStore):
