@@ -733,6 +733,24 @@ def _is_correction(new: MemoryRecord, old: MemoryRecord) -> bool:
     return bool(_content_body_words(old) - _content_body_words(new))
 
 
+def _same_slot_occupant(
+    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None
+) -> MemoryRecord | None:
+    """A LIVE, different-id record occupying ``rec``'s exact filename.
+
+    Same title+type => same slot. Used by upsert (correction/refusal
+    decision) and by import_store's dry run (skipped, not created).
+    Expired/superseded/deleted occupants do not hold the slot.
+    """
+    if rec.type == "authorization":
+        return None
+    occupant = get(rec.filename(), cwd)
+    if (occupant is not None and occupant.id != rec.id
+            and occupant.status == "active" and not occupant.is_expired):
+        return occupant
+    return None
+
+
 def upsert(
     rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None,
     allow_correction: bool = True,
@@ -753,7 +771,56 @@ def upsert(
     _refuse_if_foreign(rec, "store")
     if rec.type == "authorization":
         return "created", write_memory(rec, cwd)
+    # RT r1 P0 (PR #91): the same-slot check, the dedup decision AND the
+    # write must be atomic per slot — lock on the target filename (stable
+    # across ids) spans all outcomes, so two concurrent same-title
+    # remembers can no longer both see an empty slot and os.replace-race.
+    with _slot_lock(rec.filename()) as slot_held:
+        if not slot_held:
+            raise ContractProtectedError(
+                f"{rec.filename()}: slot locked by another writer; "
+                "refusing to race it (retry in a moment)")
+        return _upsert_locked(rec, cwd, allow_correction)
+
+
+def _upsert_locked(
+    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None,
+    allow_correction: bool = True,
+) -> tuple[str, Path]:
+    """The dedup decision + write. Caller MUST hold _slot_lock(rec.filename())."""
     dup = find_duplicate(rec, cwd)
+    same_slot = False
+    if dup is None and rec.type != "authorization":
+        # Same-title occupant BELOW the fuzzy threshold (team report
+        # 2026-10-08, P2): a same title+type write targets the SAME filename
+        # but may be far below the 0.85 similarity bar ("Tobia fa vela" vs
+        # "Tobia non fa più vela, fa arrampicata" scores ~0.71). It used to
+        # fall through to create and os.replace-clobber the incumbent —
+        # silent data loss. Now: the user's own voice gets the same-slot
+        # correction/validation decision (identical words => confirmation,
+        # any content change => correction chain). Derived records keep NO
+        # authority over the slot — they fall through and the cross-id
+        # collision guard refuses them loudly (a trust bump onto different
+        # content would be the study's signal inversion all over again).
+        occupant = _same_slot_occupant(rec, cwd)
+        if occupant is not None:
+            if (allow_correction
+                    and rec.provenance in _USER_STATED_PROVENANCES):
+                dup = occupant
+                same_slot = True
+            else:
+                # A derived record (distill's inferred, ingest's imported)
+                # has no authority over the slot, and falling through to
+                # create would os.replace the incumbent — silent data loss
+                # (team report P2). Refuse loudly; distill.persist counts
+                # this as skipped, import_store as skipped too. The caller
+                # can supersede/forget explicitly if the slot really moved.
+                raise ContractProtectedError(
+                    f"collision: {rec.filename()} is occupied by a different "
+                    f"active memory ({occupant.id[:8]}) and this record has "
+                    "no authority to replace it (derived provenance or "
+                    "corrections disabled) — supersede/forget the incumbent "
+                    "explicitly; no silent overwrite")
     if dup is not None:
         # INV design rev2 §D4: validation would bump trust on a memory
         # whose contract is dead — wrong signal. A near-duplicate of a
@@ -793,9 +860,18 @@ def upsert(
                     f"{dup.filename()}: memory locked by another writer; "
                     "refusing to race it (retry in a moment)")
             dup = get(dup.filename(), cwd) or dup   # re-read under the lock
+            # For a SAME-SLOT occupant (identical title+type, below the fuzzy
+            # bar) any content-word change is a correction of the slot — the
+            # removal heuristic is too weak there ("fa vela" -> "non fa più
+            # vela, fa arrampicata" removes nothing, it ADDS a negation).
+            # For a fuzzy near-duplicate (>=0.85) keep the removal heuristic:
+            # a pure addition elaborates, it does not replace.
+            words_changed = (
+                _content_body_words(rec) != _content_body_words(dup)
+                if same_slot else _is_correction(rec, dup))
             if (allow_correction
                     and rec.provenance in _USER_STATED_PROVENANCES
-                    and _is_correction(rec, dup)):
+                    and words_changed):
                 rec.provenance = "corrected"
                 d = _ensure_dir(cwd)
                 old_name = dup.filename()
@@ -890,9 +966,21 @@ def import_store(
             # allow_correction=False: the record carries the SOURCE store's
             # provenance, and a foreign explicit_statement has no authority
             # to correct a local memory — imports validate or create only.
-            action, _ = upsert(rec, cwd, allow_correction=False)
+            try:
+                action, _ = upsert(rec, cwd, allow_correction=False)
+            except ContractProtectedError:
+                # A local same-slot occupant the import cannot displace
+                # (P2 fix): skipped, never a silent overwrite.
+                action = "skipped"
         else:
-            action = "validated" if find_duplicate(rec, cwd) else "created"
+            # Mirror the apply path: a same-slot occupant below the fuzzy
+            # threshold will be REFUSED at apply time, not created.
+            if find_duplicate(rec, cwd) is not None:
+                action = "validated"
+            elif _same_slot_occupant(rec, cwd) is not None:
+                action = "skipped"
+            else:
+                action = "created"
         plan[action].append(path.name)
     if apply and (plan["created"] or plan["validated"]):
         rebuild_index(cwd)
@@ -1021,6 +1109,26 @@ def set_status(
     if rebuild:
         rebuild_index(cwd)
     return True
+
+
+def _slot_lock(filename: str, wait: float = 5.0):
+    """Per-SLOT exclusive lock (locks/slot-<filename>), stable across ids.
+
+    RT r1 P0 (PR #91): upsert's creation path checked the same-slot
+    occupant lock-free and write_memory did check+os.replace unserialized —
+    two concurrent same-title remembers both saw an empty slot, both
+    returned "created", and one record was silently lost (os.replace
+    last-writer-wins). _memory_lock(id) cannot cover this: the two racers
+    have DIFFERENT ids but target the SAME filename. The slot lock spans
+    read → decision → write for every upsert outcome (created, validated,
+    corrected, refused), so the same-slot check and the write are atomic
+    with respect to other upserts of that slot. Bounded wait; refuse, never
+    race."""
+    from . import federation
+
+    safe = "".join(c if c.isalnum() else "_" for c in filename)
+    lock_dir = Path(config.STATE_DIR) / "locks" / f"slot-{safe}"
+    return federation.file_lock(lock_dir, wait=wait)
 
 
 def _memory_lock(rec_id: str, wait: float = 5.0):
