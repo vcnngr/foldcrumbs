@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.1] — 2026-10-09
 
 ### Fixed
 
@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Repeating the superseded fact is a correction BACK: exactly one active
   memory for the slot, full chain on disk. The protection lives at the
   semantic layer (`upsert`); `write_memory` stays the byte-level primitive.
+
+- **Two concurrent same-title upserts could silently lose a record** (found
+  in review of the fix above, before release): the same-slot check ran
+  lock-free, so two threads could both see the slot empty, both take the
+  "created" path, and `os.replace` dropped one write — the per-record lock
+  from 0.13.0 did not cover this case (two NEW records have different ids
+  but the same filename). `upsert` now holds a stable **per-slot lock**
+  (`locks/slot-<filename>`) across the whole read → decide → write span for
+  every outcome; the incumbent's per-record lock is kept nested inside.
+  Mutation-verified: with the lock disabled the new barrier test fails
+  15/15 runs; with it, 10/10 pass (exactly one created + one arbitrated
+  outcome, full chain on disk).
 
 ## [0.13.0] — 2026-10-08
 
