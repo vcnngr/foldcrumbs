@@ -368,6 +368,102 @@ class TestStore(TmpStore):
                          f"expected one active Tobia memory, got "
                          f"{[m.content for m in actives]}")
 
+    def test_explicit_supersede_then_identical_rewrite_is_refused(self):
+        # Team report 2026-10-09 (P2), the EXPLICIT-supersede variant. An
+        # auto-correction moves the retired record to a HISTORY file (the
+        # canonical name stays with the live correction), so re-writing the
+        # old fact chains back — see the test above. But `supersede` between
+        # DIFFERENT titles retires the record IN PLACE on its own filename.
+        # Re-writing that exact sentence then targets a slot held by a
+        # superseded record: it used to fall through to create and
+        # os.replace the superseded file away (new id, chain gone, the old
+        # fact silently resurrected). Now it is refused loudly.
+        vela = MemoryRecord(title="Tobia sport vela",
+                            content="Tobia fa vela ogni sabato.",
+                            type="fact", provenance="explicit_statement")
+        arramp = MemoryRecord(title="Tobia sport arrampicata",
+                              content="Tobia fa arrampicata ogni sabato.",
+                              type="fact", provenance="explicit_statement")
+        store.upsert(vela)
+        store.upsert(arramp)
+        self.assertTrue(store.supersede(vela.filename(), arramp.filename()))
+        retired = store.get(vela.filename())
+        self.assertEqual(retired.status, "superseded")
+        kept_id = retired.id
+        # The team's step 4: repeat the EXACT superseded sentence, same title.
+        again = MemoryRecord(title="Tobia sport vela",
+                             content="Tobia fa vela ogni sabato.",
+                             type="fact", provenance="explicit_statement")
+        with self.assertRaises(store.ContractProtectedError) as ctx:
+            store.upsert(again)
+        self.assertIn("superseded", str(ctx.exception).lower())
+        # The retired record is intact: same id, still superseded, still
+        # chained — not destroyed, not resurrected.
+        after = store.get(vela.filename())
+        self.assertEqual(after.id, kept_id, "the retired record was replaced")
+        self.assertEqual(after.status, "superseded")
+        self.assertEqual(after.superseded_by, arramp.id)
+
+    def test_explicit_supersede_then_different_rewrite_is_refused(self):
+        # Same slot, DIFFERENT new content: creating there would still
+        # os.replace the retired record away (silent history loss), so it is
+        # refused too — forget --hard the slot open first if it really moved.
+        vela = MemoryRecord(title="Tobia sport vela",
+                            content="Tobia fa vela ogni sabato.",
+                            type="fact", provenance="explicit_statement")
+        arramp = MemoryRecord(title="Tobia sport arrampicata",
+                              content="Tobia fa arrampicata ogni sabato.",
+                              type="fact", provenance="explicit_statement")
+        store.upsert(vela)
+        store.upsert(arramp)
+        store.supersede(vela.filename(), arramp.filename())
+        before = store._resolve_in_store(vela.filename()).read_bytes()
+        unrelated = MemoryRecord(title="Tobia sport vela",
+                                 content="Completamente un altro fatto.",
+                                 type="fact", provenance="explicit_statement")
+        with self.assertRaises(store.ContractProtectedError):
+            store.upsert(unrelated)
+        self.assertEqual(store._resolve_in_store(vela.filename()).read_bytes(),
+                         before, "the retired record's bytes were clobbered")
+
+    def test_slot_lock_names_carry_no_memory_title(self):
+        # Team report 2026-10-09 (lock residue): the slot lock used to be
+        # named slot-<slug of the title>, so `forget --hard` left the deleted
+        # memory's title readable on disk under state/locks/. Lock names are
+        # now an opaque hash of the filename — a distinctive title must never
+        # appear in any lock file name.
+        from foldcrumbs import config
+        rec = MemoryRecord(title="ZibaldoneUnicoRicordabile",
+                           content="Un fatto con un titolo inconfondibile.",
+                           type="fact", provenance="explicit_statement")
+        store.upsert(rec)  # takes _slot_lock, leaves the lock file behind
+        lockdir = Path(config.STATE_DIR) / "locks"
+        names = [p.name for p in lockdir.glob("slot-*")]
+        self.assertTrue(names, "no slot lock file was created")
+        for n in names:
+            self.assertNotIn("zibaldone", n.lower())
+            self.assertNotIn("ricordabile", n.lower())
+
+    def test_forget_hard_removes_legacy_slug_lock_residue(self):
+        # The other half of the residue fix: a legacy slug-named lock file
+        # (as <=0.13.1 wrote) is removed by forget --hard, so upgrading does
+        # not leave the deleted title behind.
+        from foldcrumbs import config
+        rec = MemoryRecord(title="Vecchio Residuo Titolo",
+                           content="Una memoria con un lock legacy.",
+                           type="fact", provenance="explicit_statement")
+        store.upsert(rec)
+        lockdir = Path(config.STATE_DIR) / "locks"
+        lockdir.mkdir(parents=True, exist_ok=True)
+        legacy_slug = "".join(
+            c if c.isalnum() else "_" for c in rec.filename())
+        legacy = lockdir / f"slot-{legacy_slug}"
+        legacy.write_text("", encoding="utf-8")
+        self.assertTrue(legacy.exists())
+        self.assertEqual(store.forget(rec.filename(), hard=True), "removed")
+        self.assertFalse(legacy.exists(),
+                         "forget --hard left the legacy slug-named lock file")
+
     def test_derived_same_title_collision_raises(self):
         # A derived record (distill's inferred) has no authority to correct:
         # a same-title collision must fail loudly, never clobber.

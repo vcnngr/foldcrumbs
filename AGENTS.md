@@ -90,10 +90,16 @@ Two guarantees worth trusting:
   existing record (bumps its trust). A near-duplicate that CHANGES a word
   of the content ("Tuesdays" -> "Wednesdays") and carries the user's own
   voice is a CORRECTION: the new record supersedes the old one (visible
-  chain, `restore` brings the original back) instead of quietly raising
+  chain; `restore` on the original undoes an AUTOMATIC correction —
+  dedicated `restore_correction`, original back to active, correction
+  archived, never deleted) instead of quietly raising
   the trust of the sentence being replaced. Derived records (distill's
   `inferred`, ingest's `imported`) never correct — they validate or
   create, and their contradictions go through the contradiction pass.
+  A slot holding a RETIRED record (superseded or archived — an explicit
+  `supersede` leaves it on its own filename) refuses any re-write loudly:
+  repeating the old exact sentence is a revival attempt, not a new memory;
+  undo deliberately (`restore`) or `forget --hard` the slot open first.
   (Authorizations are excluded from the fuzzy dedup and are create-only —
   they are never validated in place by a similar-looking new record.)
 - Use `--type` honestly: `fact`, `preference`, `goal`, `decision`,

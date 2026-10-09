@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Re-writing the exact sentence of an explicitly superseded memory
+  silently destroyed it** (team report, verified on 0.13.1): the dedup
+  scan skips retired records and the same-slot guard only counted live
+  ones, so the write fell through to create and `os.replace` REPLACED the
+  superseded file — new id, chain gone, the old fact quietly back in
+  recall next to its replacement. A retired slot occupant (superseded or
+  archived, not expired — expiry keeps its "rewrite fresh" semantics) now
+  refuses ANY cross-id write loudly, with the undo hint (`restore`, or
+  `forget --hard` the slot open first). Deliberate retirements are undone
+  deliberately, never by a bare re-remember.
+- **`forget --hard` left the deleted memory's title on disk**: the slot
+  lock file was named `slot-<slug of the filename>` and lock files are
+  never removed, so `state/locks/` accumulated readable titles of
+  forgotten memories. Lock names are now an opaque hash
+  (`slot-<sha256[:16]>` — nothing identifying persists), and
+  `forget --hard` removes the legacy slug-named file for the slot it
+  deletes. Pre-existing legacy residue is cleaned as those slots are
+  hard-forgotten; a plain `rm -rf ~/.foldcrumbs/locks/slot-*` clears the
+  rest with no running writers (locks are advisory and re-created).
+
 ## [0.13.1] — 2026-10-09
 
 ### Fixed

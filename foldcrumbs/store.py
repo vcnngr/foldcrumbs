@@ -733,6 +733,32 @@ def _is_correction(new: MemoryRecord, old: MemoryRecord) -> bool:
     return bool(_content_body_words(old) - _content_body_words(new))
 
 
+def _retired_slot_occupant(
+    rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None
+) -> MemoryRecord | None:
+    """A RETIRED (superseded/archived), different-id record occupying
+    ``rec``'s exact filename.
+
+    Team report 2026-10-09 (P2): re-writing the EXACT sentence of an
+    explicitly superseded memory used to look like an empty slot —
+    find_duplicate skips retired records, _same_slot_occupant only counts
+    live ones — so upsert fell through to create and os.replace DESTROYED
+    the superseded file (new id, chain gone): a silent resurrection that
+    also erased history. A deliberate supersede is undone deliberately
+    (restore), never by a bare re-remember. Expired occupants stay out:
+    expiry semantics are "rewrite it fresh" (test_expiry enshrines that an
+    expired memory is not a dedup target).
+    """
+    if rec.type == "authorization":
+        return None
+    occupant = get(rec.filename(), cwd)
+    if (occupant is not None and occupant.id != rec.id
+            and occupant.status in ("superseded", "archived")
+            and not occupant.is_expired):
+        return occupant
+    return None
+
+
 def _same_slot_occupant(
     rec: MemoryRecord, cwd: str | os.PathLike[str] | None = None
 ) -> MemoryRecord | None:
@@ -802,6 +828,28 @@ def _upsert_locked(
         # authority over the slot — they fall through and the cross-id
         # collision guard refuses them loudly (a trust bump onto different
         # content would be the study's signal inversion all over again).
+        retired = _retired_slot_occupant(rec, cwd)
+        if retired is not None:
+            # Team report 2026-10-09 (P2): ANY cross-id write onto a
+            # retired occupant's slot used to fall through to create and
+            # os.replace the retired file away — silently destroying
+            # history (identical repeat = resurrection of the old fact;
+            # different content = the record vanishes with no trace).
+            # Deliberate retirements are undone deliberately.
+            _same = _content_body_words(rec) == _content_body_words(retired)
+            hint = (f"`foldcrumbs restore "
+                    f"{retired.source_path or retired.filename()}`")
+            if retired.status == "superseded" and retired.superseded_by:
+                hint += " (or supersede the replacement back explicitly)"
+            raise ContractProtectedError(
+                f"{rec.filename()}: this slot holds a {retired.status} "
+                f"memory ({retired.id[:8]})"
+                + (" with identical content — re-writing it would silently "
+                   "resurrect the retired fact" if _same else
+                   " — creating here would silently destroy that retired "
+                   "record (os.replace, no trace)")
+                + f". Undo the retirement deliberately: {hint}; or "
+                "`forget --hard` it first if the slot should really open")
         occupant = _same_slot_occupant(rec, cwd)
         if occupant is not None:
             if (allow_correction
@@ -1035,6 +1083,21 @@ def forget(
                 target.unlink()
             except OSError:
                 return None
+            # Team report 2026-10-09: forget --hard must not leave the
+            # deleted memory's TITLE on disk. The slot lock used to be named
+            # slot-<slug of filename> (<=0.13.1); drop that legacy file for
+            # this slot (safe to unlink: no writer in this version opens it —
+            # _slot_lock now uses a hash name). The current hash-named lock
+            # is deliberately left: it is opaque (no title) and unlinking a
+            # file under an active flock would break mutual exclusion.
+            legacy = "".join(
+                c if c.isalnum() else "_" for c in target.name)
+            for stale in (Path(config.STATE_DIR) / "locks").glob(
+                    f"slot-{legacy}*"):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
             action = "removed"
         else:
             rec.status = "deleted"
@@ -1124,10 +1187,18 @@ def _slot_lock(filename: str, wait: float = 5.0):
     corrected, refused), so the same-slot check and the write are atomic
     with respect to other upserts of that slot. Bounded wait; refuse, never
     race."""
+    import hashlib
+
     from . import federation
 
-    safe = "".join(c if c.isalnum() else "_" for c in filename)
-    lock_dir = Path(config.STATE_DIR) / "locks" / f"slot-{safe}"
+    # Team report 2026-10-09: the lock file used to be named slot-<slug of
+    # the filename>, so `forget --hard` left the DELETED memory's title on
+    # disk under state/locks/ — an un-forgetting. Lock names are now a
+    # stable hash: still one lock per slot, nothing identifying persisted.
+    # (Old slug-named files are dead weight no code path locks anymore;
+    # forget --hard removes the legacy file for the slot it deletes.)
+    digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()[:16]
+    lock_dir = Path(config.STATE_DIR) / "locks" / f"slot-{digest}"
     return federation.file_lock(lock_dir, wait=wait)
 
 
