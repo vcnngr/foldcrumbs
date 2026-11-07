@@ -8,6 +8,8 @@
 
 [English](README.md) · **Italiano** · [中文](README.zh.md) · [llms.txt](llms.txt) (indice per agenti)
 
+> 📱 **Foldcrumbs per iPhone** — un'app separata, ispirata a questo progetto e con codice proprio: legge il tuo vault Obsidian e le note iCloud sul telefono, risponde offline, zero account. [App Store](https://apps.apple.com/it/app/foldcrumbs-private-answers/id6821162391)
+
 Memoria persistente cross-sessione per agent di coding — **basta rispiegare il progetto a ogni sessione: niente Docker, niente vector DB, nessun servizio esterno**.
 
 `/clear` e la compaction cancellano la conoscenza di Claude Code a ogni sessione. foldcrumbs mantiene una

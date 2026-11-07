@@ -8,6 +8,8 @@
 
 [English](README.md) · [Italiano](README.it.md) · **中文** · [llms.txt](llms.txt)（面向 agent 的索引）
 
+> 📱 **Foldcrumbs for iPhone** — 独立应用，受本项目启发，拥有自己的代码：在手机上读取 Obsidian vault 与 iCloud 笔记，离线回答，无需账户。[App Store](https://apps.apple.com/it/app/foldcrumbs-private-answers/id6821162391)
+
 面向编码 agent 的跨会话持久记忆 — **不必每个会话重新解释你的项目：无需 Docker、无需向量数据库、无需外部服务**。
 
 `/clear` 和压缩(compaction)会在每个会话中抹掉 Claude Code 的记忆。foldcrumbs 维护一个

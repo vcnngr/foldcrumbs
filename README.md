@@ -8,6 +8,8 @@
 
 **English** · [Italiano](README.it.md) · [中文](README.zh.md) · [llms.txt](llms.txt) (agent-facing index)
 
+> 📱 **Foldcrumbs for iPhone** — a separate app, inspired by this project and with its own code: reads your Obsidian vault and iCloud notes on the phone, answers offline, zero account. [App Store](https://apps.apple.com/it/app/foldcrumbs-private-answers/id6821162391)
+
 Persistent cross-session memory for coding agents — **no more re-explaining your project every session, no Docker, no vector DB, no external service**.
 
 `/clear` and compaction wipe Claude Code's knowledge every session. foldcrumbs keeps a small
