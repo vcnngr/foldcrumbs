@@ -397,6 +397,11 @@ def tool_recall(args: dict[str, Any]) -> str:
                    tags=list(tags) if tags else None,
                    collect_invalidated=invalidated,
                    collect_contested=contested)
+    # Observation only: a question the store could not answer is logged so the
+    # gaps are visible. Never changes the result; a logging failure is swallowed.
+    if not mems:
+        from . import unanswered
+        unanswered.record(str(args["query"]))
     mode = args.get("mode", "full")
     if mode is None:
         mode = "full"
